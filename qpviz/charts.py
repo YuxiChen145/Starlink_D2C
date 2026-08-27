@@ -354,12 +354,17 @@ def timeline_figure(
     labels = [str(v) for v in identities]
     keep = set(identities)
 
-    collections = list(dict.fromkeys(runs["collection"].tolist())) if not runs.empty else []
-    for i, collection in enumerate(collections):
-        color, _ = series_style(i, mode)
-        sub = runs[(runs["collection"] == collection) & (runs["value"].isin(keep))]
+    # Colour by collection, but never cycle hues: the eight with the most runs
+    # take the categorical slots and the remainder share one muted "Other".
+    if runs.empty:
+        collections, folded = [], []
+    else:
+        ranked = runs["collection"].value_counts().index.tolist()
+        collections, folded = ranked[:8], ranked[8:]
+
+    def _add(sub, name, color):
         if sub.empty:
-            continue
+            return
         if x_axis == "absolute":
             base = sub["start"]
             width = (sub["end"] - sub["start"]).dt.total_seconds() * 1000.0
@@ -374,20 +379,39 @@ def timeline_figure(
                 y=[str(v) for v in sub["value"]],
                 base=base,
                 orientation="h",
-                name=str(collection),
+                name=str(name),
                 marker=dict(color=color, line=dict(width=0)),
                 width=0.72,
                 customdata=np.stack(
-                    [sub["duration_s"].to_numpy(), sub["samples"].to_numpy()], axis=-1
+                    [
+                        sub["duration_s"].to_numpy(),
+                        sub["samples"].to_numpy(),
+                        sub["collection"].astype(str).to_numpy(),
+                    ],
+                    axis=-1,
                 ),
                 hovertemplate=(
-                    f"<b>{level_label} %{{y}}</b><br>{collection}"
+                    f"<b>{level_label} %{{y}}</b><br>%{{customdata[2]}}"
                     f"<br>start {hover_x}"
                     "<br>held %{customdata[0]:.1f}s (%{customdata[1]} samples)"
                     "<extra></extra>"
                 ),
             )
         )
+
+    for i, collection in enumerate(collections):
+        _add(
+            runs[(runs["collection"] == collection) & (runs["value"].isin(keep))],
+            collection,
+            series_style(i, mode)[0],
+        )
+    if folded:
+        _add(
+            runs[runs["collection"].isin(folded) & runs["value"].isin(keep)],
+            f"Other ({len(folded)} collections)",
+            OTHER_COLOR,
+        )
+        collections = collections + ["other"]
 
     if height is None:
         height = int(min(1400, max(320, 18 * len(labels) + 120)))
@@ -426,9 +450,9 @@ def timeline_figure(
     return fig
 
 
-#: one step of the sequential ramp per hierarchy depth (an ordinal encoding -
-#: never a cycled categorical hue, which would imply groups that do not exist)
-_DEPTH_COLORS = ["#f0efec", "#5598e7", "#9ec5f4", "#cde2fb", "#e4eefc"]
+#: one step of the sequential ramp per tree depth (an ordinal encoding - never
+#: a cycled categorical hue, which would imply groups that do not exist)
+_DEPTH_COLORS = ["#256abf", "#3987e5", "#6da7ec", "#9ec5f4", "#cde2fb"]
 
 
 def _node_text(value) -> str:
@@ -438,70 +462,187 @@ def _node_text(value) -> str:
     return str(value)
 
 
-def treemap_figure(
+def _held_text(seconds: float) -> str:
+    if seconds >= 90:
+        return f"{seconds / 60:.1f} min"
+    return f"{seconds:.0f} s"
+
+
+def build_tree(
+    table: pd.DataFrame,
+    levels: Sequence[str],
+    level_labels: Sequence[str],
+    include_root: bool = True,
+):
+    """Lay a dwell hierarchy out as a left-to-right node-link tree.
+
+    Returns ``(nodes, edges)``: nodes carry ``x`` (depth), ``y`` (row), label,
+    dwell and depth; edges are elbow paths from parent to child.  Children are
+    ordered by dwell, and a parent sits at the mean row of its children.
+
+    ``include_root`` keeps the synthetic "All" node.  Drawing leaves it out -
+    a single root just adds a column of dead space, and the running total is
+    already in the caption above the figure.
+    """
+    root = {"id": "", "label": "All", "depth": 0, "dwell": 0.0, "children": []}
+    nodes = {"": root}
+
+    columns = [table[level].tolist() for level in levels]
+    dwells = table["dwell_s"].tolist()
+
+    for row in range(len(table)):
+        path = ""
+        for depth, label in enumerate(level_labels, start=1):
+            value = columns[depth - 1][row]
+            path_next = f"{path}/{depth}={value}"
+            node = nodes.get(path_next)
+            if node is None:
+                node = {
+                    "id": path_next,
+                    "label": f"{label} {_node_text(value)}",
+                    "depth": depth,
+                    "dwell": 0.0,
+                    "children": [],
+                }
+                nodes[path_next] = node
+                nodes[path]["children"].append(node)
+            node["dwell"] += float(dwells[row])
+            path = path_next
+        root["dwell"] += float(dwells[row])
+
+    # depth-first, biggest branch first, assigning each leaf its own row
+    order: List[dict] = []
+    counter = [0]
+
+    def place(node):
+        if not node["children"]:
+            node["y"] = float(counter[0])
+            counter[0] += 1
+        else:
+            node["children"].sort(key=lambda c: -c["dwell"])
+            for child in node["children"]:
+                place(child)
+            node["y"] = float(
+                sum(c["y"] for c in node["children"]) / len(node["children"])
+            )
+        node["x"] = float(node["depth"])
+        order.append(node)
+
+    place(root)
+    if not include_root:
+        order = [n for n in order if n["depth"] > 0]
+
+    edges = []
+    for node in order:
+        if not include_root and node["depth"] == 0:
+            continue
+        for child in node["children"]:
+            # elbow: out from the parent, down the trunk, in to the child
+            trunk = child["x"] - 0.45
+            edges.append(
+                [
+                    (node["x"], node["y"]),
+                    (trunk, node["y"]),
+                    (trunk, child["y"]),
+                    (child["x"], child["y"]),
+                ]
+            )
+    return order, edges
+
+
+def tree_figure(
     table: pd.DataFrame,
     levels: Sequence[str],
     level_labels: Sequence[str],
     mode: str = "light",
-    max_leaves: int = 400,
-    height: int = 620,
+    max_leaves: int = 150,
+    height: Optional[int] = None,
 ) -> go.Figure:
-    """Nested rectangles over ``levels``, sized by dwell time."""
+    """Node-link tree over ``levels``, with dwell time on every node."""
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
     if table.empty or not levels:
         return fig
 
-    table = table.nlargest(max_leaves, "dwell_s")
-    # .tolist() per column, never iterrows(): a mixed-dtype row would coerce
-    # integer cell ids to floats and label the tiles "eNB 10.0"
-    columns = [table[level].tolist() for level in levels]
-    dwells = table["dwell_s"].tolist()
+    nodes, edges = build_tree(
+        table.nlargest(max_leaves, "dwell_s"),
+        levels,
+        level_labels,
+        include_root=False,
+    )
+    if not nodes:
+        return fig
 
-    ids, labels, parents, values, colors = [], [], [], [], []
-    index: Dict[str, int] = {}
+    # Held time is worth reading off the outermost grouping and off the leaves;
+    # putting it on every intermediate node just crowds the picture.
+    outermost = min(n["depth"] for n in nodes)
+    labels = [
+        f"{n['label']} · {_held_text(n['dwell'])}"
+        if n["depth"] == outermost or not n["children"]
+        else n["label"]
+        for n in nodes
+    ]
 
-    root = "All"
-    index[root] = 0
-    ids.append(root)
-    labels.append(root)
-    parents.append("")
-    values.append(0.0)
-    colors.append(_DEPTH_COLORS[0])
-
-    for row in range(len(table)):
-        path = root
-        for depth, label in enumerate(level_labels, start=1):
-            value = columns[depth - 1][row]
-            path_next = f"{path}/{levels[depth - 1]}={value}"
-            if path_next not in index:
-                index[path_next] = len(ids)
-                ids.append(path_next)
-                labels.append(f"{label} {_node_text(value)}")
-                parents.append(path)
-                values.append(0.0)
-                colors.append(_DEPTH_COLORS[min(depth, len(_DEPTH_COLORS) - 1)])
-            if depth == len(levels):
-                values[index[path_next]] = float(dwells[row])
-            path = path_next
-
+    edge_x: List[Optional[float]] = []
+    edge_y: List[Optional[float]] = []
+    for path in edges:
+        for x, y in path:
+            edge_x.append(x)
+            edge_y.append(y)
+        edge_x.append(None)
+        edge_y.append(None)
     fig.add_trace(
-        go.Treemap(
-            ids=ids, labels=labels, parents=parents, values=values,
-            branchvalues="remainder",
-            marker=dict(colors=colors, line=dict(color=chrome["surface"], width=2)),
-            textfont=dict(family=FONT_FAMILY, size=12, color=chrome["text_primary"]),
-            tiling=dict(pad=2),
-            hovertemplate="<b>%{label}</b><br>%{value:.0f}s held<extra></extra>",
-            texttemplate="%{label}",
+        go.Scatter(
+            x=edge_x, y=edge_y, mode="lines",
+            line=dict(color=chrome["axis"], width=1),
+            hoverinfo="skip", showlegend=False,
         )
     )
+
+    biggest = max((n["dwell"] for n in nodes), default=1.0) or 1.0
+    depth_of = [n["depth"] for n in nodes]
+    fig.add_trace(
+        go.Scatter(
+            x=[n["x"] for n in nodes],
+            y=[n["y"] for n in nodes],
+            mode="markers+text",
+            text=labels,
+            # A node with children has a branch line leaving it at its own
+            # height, so its label goes above the line; leaves have no
+            # outgoing line and read better beside the marker.
+            textposition=[
+                "middle right" if not n["children"] else "top right" for n in nodes
+            ],
+            textfont=dict(family=FONT_FAMILY, size=11, color=chrome["text_primary"]),
+            marker=dict(
+                size=[7 + 11 * (n["dwell"] / biggest) ** 0.5 for n in nodes],
+                color=[
+                    _DEPTH_COLORS[min(d, len(_DEPTH_COLORS) - 1)] for d in depth_of
+                ],
+                line=dict(color=chrome["surface"], width=1.5),
+            ),
+            customdata=[[n["dwell"]] for n in nodes],
+            hovertemplate="<b>%{text}</b><br>held %{customdata[0]:.0f}s<extra></extra>",
+            showlegend=False,
+        )
+    )
+
+    leaves = sum(1 for n in nodes if not n["children"])
+    if height is None:
+        height = int(min(2800, max(320, 26 * leaves + 80)))
+
     fig.update_layout(
         height=height,
         paper_bgcolor=chrome["surface"],
         plot_bgcolor=chrome["surface"],
         font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=4, r=4, t=4, b=4),
+        margin=dict(l=8, r=8, t=8, b=8),
         hoverlabel=dict(font_family=FONT_FAMILY),
+    )
+    fig.update_xaxes(
+        visible=False, range=[0.6, len(levels) + 2.1], fixedrange=False
+    )
+    fig.update_yaxes(
+        visible=False, autorange="reversed", range=None
     )
     return fig

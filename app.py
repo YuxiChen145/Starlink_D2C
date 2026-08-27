@@ -480,24 +480,7 @@ with tab_cells:
                      "share one axis.",
             )
 
-            # One lane per identity per collection: drawing all 28 at once is
-            # unreadable and the legend swamps the plot, so focus on a few.
-            by_size = (
-                cells["collection"].value_counts().index.tolist()
-            )
-            focus = st.multiselect(
-                "Collections to draw",
-                options=by_size,
-                default=by_size[:1],
-                max_selections=6,
-                key="identity_focus",
-                help="Up to six at a time — each gets its own colour.",
-            )
-            if not focus:
-                st.info("Pick at least one collection to draw.")
-                st.stop()
-
-            runs = identity.dwell_runs(cells[cells["collection"].isin(focus)], level)
+            runs = identity.dwell_runs(cells, level)
             if runs.empty:
                 st.info("Not enough samples to build dwell runs.")
             else:
@@ -548,7 +531,8 @@ with tab_cells:
                 default=default_levels or levels[:1],
                 format_func=identity.label_for,
                 key="identity_hierarchy",
-                help="Rectangles are sized by how long that cell served.",
+                help="Nodes are sized by how long that cell served; branches "
+                     "are ordered longest-held first.",
             )
             if not chosen:
                 st.info("Pick at least one level.")
@@ -564,14 +548,25 @@ with tab_cells:
                         f"{table[l].nunique():,} {identity.label_for(l)}" for l in chosen
                     )
                     st.caption(f"{counts} · {table['dwell_s'].sum() / 60:.1f} minutes held in total.")
+                    max_leaves = st.number_input(
+                        "Max leaves",
+                        min_value=10, max_value=600, value=150, step=10,
+                        key="identity_leaves",
+                        help="Longest-held paths win when there are more.",
+                    )
                     st.plotly_chart(
-                        charts.treemap_figure(
+                        charts.tree_figure(
                             table, chosen,
                             [identity.label_for(l) for l in chosen],
-                            mode=MODE,
+                            mode=MODE, max_leaves=int(max_leaves),
                         ),
                         width="stretch",
                     )
+                    if len(table) > max_leaves:
+                        st.caption(
+                            f"Showing the {int(max_leaves)} longest-held of "
+                            f"{len(table)} paths."
+                        )
                     with st.expander("Hierarchy as a table"):
                         pretty = table.rename(
                             columns={l: identity.label_for(l) for l in chosen}

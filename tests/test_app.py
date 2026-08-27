@@ -146,6 +146,23 @@ def test_cell_identity_tab_renders_both_views(fixture_dir, monkeypatch, tmp_path
     _assert_clean(app)
     hierarchy = app.multiselect(key="identity_hierarchy")
     assert hierarchy.value == ["enb", "sector", "pci"]
+    assert app.number_input(key="identity_leaves").value == 150
+
+
+def test_cell_identity_has_no_collection_picker_of_its_own(
+    fixture_dir, monkeypatch, tmp_path
+):
+    """The sidebar Collections filter governs this tab like every other."""
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    assert not [m for m in app.multiselect if m.label == "Collections to draw"]
+
+    runs_before = int(next(m for m in app.metric if m.label == "Dwell runs").value)
+    app.multiselect(key="f_collections").select("Collection_A").run()
+    _assert_clean(app)
+    runs_after = int(next(m for m in app.metric if m.label == "Dwell runs").value)
+    assert runs_after < runs_before
 
 
 def test_cell_identity_survives_a_metric_with_no_identity_columns(

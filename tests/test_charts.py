@@ -245,10 +245,10 @@ def test_timeline_handles_no_runs():
     assert len(fig.data) == 0
 
 
-def test_treemap_builds_a_node_per_path_segment():
+def _hierarchy():
     import pandas as pd
 
-    table = pd.DataFrame(
+    return pd.DataFrame(
         {
             "enb": [10, 10, 11],
             "sector": [1, 2, 3],
@@ -257,31 +257,139 @@ def test_treemap_builds_a_node_per_path_segment():
             "samples": [30, 20, 10],
         }
     )
-    fig = charts.treemap_figure(table, ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"])
-    node = fig.data[0]
-    assert node.ids[0] == "All" and node.parents[0] == ""
+
+
+def test_tree_builds_a_node_per_path_segment():
+    nodes, edges = charts.build_tree(
+        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
+    )
     # 1 root + 2 eNBs + 3 sectors + 3 PCIs
-    assert len(node.ids) == 9
-    assert sum(node.values) == pytest.approx(60.0)
-    assert "eNB 10" in node.labels and "PCI 300" in node.labels
+    assert len(nodes) == 9
+    assert len(edges) == 8
+    labels = {n["label"] for n in nodes}
+    assert "eNB 10" in labels and "PCI 300" in labels and "All" in labels
 
 
-def test_treemap_shades_by_depth_never_by_cycled_hue():
+def test_tree_can_drop_the_synthetic_root():
+    nodes, edges = charts.build_tree(
+        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
+        include_root=False,
+    )
+    assert len(nodes) == 8
+    assert all(n["depth"] > 0 for n in nodes)
+    # the two edges leaving the root go with it; row positions are unchanged
+    assert len(edges) == 6
+    assert sorted(n["y"] for n in nodes if not n["children"]) == [0.0, 1.0, 2.0]
+
+
+def test_tree_rolls_dwell_up_to_every_ancestor():
+    nodes, _ = charts.build_tree(
+        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
+    )
+    by_label = {n["label"]: n for n in nodes}
+    assert by_label["All"]["dwell"] == pytest.approx(60.0)
+    assert by_label["eNB 10"]["dwell"] == pytest.approx(50.0)
+    assert by_label["eNB 11"]["dwell"] == pytest.approx(10.0)
+    assert by_label["PCI 100"]["dwell"] == pytest.approx(30.0)
+
+
+def test_tree_gives_every_leaf_a_row_and_centres_the_parents():
+    nodes, _ = charts.build_tree(
+        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
+    )
+    leaves = sorted(n["y"] for n in nodes if not n["children"])
+    assert leaves == [0.0, 1.0, 2.0]
+    by_label = {n["label"]: n for n in nodes}
+    # eNB 10 owns the first two leaves, so it sits between them
+    assert by_label["eNB 10"]["y"] == pytest.approx(0.5)
+    assert by_label["All"]["y"] == pytest.approx(1.25)
+    # depth becomes the x coordinate
+    assert by_label["All"]["x"] == 0.0 and by_label["PCI 300"]["x"] == 3.0
+
+
+def test_tree_orders_branches_by_dwell():
     import pandas as pd
 
     table = pd.DataFrame(
-        {"enb": [10, 11], "pci": [1, 2], "dwell_s": [1.0, 2.0], "samples": [1, 2]}
+        {
+            "enb": [10, 11],
+            "pci": [1, 2],
+            "dwell_s": [5.0, 50.0],  # the smaller branch is listed first
+            "samples": [5, 50],
+        }
     )
-    fig = charts.treemap_figure(table, ["enb", "pci"], ["eNB", "PCI"])
-    used = set(fig.data[0].marker.colors)
+    nodes, _ = charts.build_tree(table, ["enb", "pci"], ["eNB", "PCI"])
+    root = next(n for n in nodes if n["depth"] == 0)
+    assert [c["label"] for c in root["children"]] == ["eNB 11", "eNB 10"]
+
+
+def test_tree_edges_are_elbows_between_parent_and_child():
+    _, edges = charts.build_tree(
+        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
+    )
+    for path in edges:
+        assert len(path) == 4
+        (x0, y0), (x1, y1), (x2, y2), (x3, y3) = path
+        assert y0 == y1 and y2 == y3  # horizontal in, horizontal out
+        assert x1 == x2  # vertical trunk between them
+        assert x3 > x0
+
+
+def test_tree_figure_draws_edges_and_nodes():
+    fig = charts.tree_figure(
+        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
+    )
+    assert len(fig.data) == 2
+    edges, nodes = fig.data
+    assert edges.mode == "lines" and None in list(edges.x)
+    assert nodes.mode == "markers+text"
+    assert len(nodes.x) == 8  # the root is not drawn
+    assert fig.layout.yaxis.autorange == "reversed"
+
+
+def test_tree_labels_carry_held_time_on_the_outer_level_and_the_leaves():
+    fig = charts.tree_figure(
+        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
+    )
+    labels = list(fig.data[1].text)
+    assert "eNB 10 · 50 s" in labels  # outermost grouping: rolled-up total
+    assert "PCI 100 · 30 s" in labels  # leaf: its own dwell
+    assert "Sector 1" in labels  # intermediate levels stay bare
+
+
+def test_tree_shades_by_depth_never_by_cycled_hue():
+    fig = charts.tree_figure(_hierarchy(), ["enb", "pci"], ["eNB", "PCI"])
+    used = set(fig.data[1].marker.color)
     assert used <= set(charts._DEPTH_COLORS)
     assert not used & set(theme.CATEGORICAL["light"])
 
 
-def test_treemap_handles_empty_input():
+def test_tree_caps_the_number_of_leaves():
     import pandas as pd
 
-    assert len(charts.treemap_figure(pd.DataFrame(), ["pci"], ["PCI"]).data) == 0
+    table = pd.DataFrame(
+        {
+            "enb": list(range(20)),
+            "pci": list(range(20)),
+            "dwell_s": [float(i) for i in range(20)],
+            "samples": [1] * 20,
+        }
+    )
+    fig = charts.tree_figure(table, ["enb", "pci"], ["eNB", "PCI"], max_leaves=5)
+    assert len(fig.data[1].x) == 5 + 5
+
+
+def test_tree_handles_empty_input():
+    import pandas as pd
+
+    assert len(charts.tree_figure(pd.DataFrame(), ["pci"], ["PCI"]).data) == 0
+
+
+@pytest.mark.parametrize(
+    "seconds,expected", [(12.0, "12 s"), (89.0, "89 s"), (90.0, "1.5 min"), (600.0, "10.0 min")]
+)
+def test_held_text(seconds, expected):
+    assert charts._held_text(seconds) == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -312,3 +420,32 @@ def test_categorical_legend_lists_every_slot_and_the_other_bucket():
     assert html.count("border-radius:3px") == 3  # two slots + Other
     assert "Other (17 pts)" in html
     assert charts.OTHER_COLOR in html
+
+
+def test_timeline_folds_collections_past_the_eight_categorical_slots():
+    import pandas as pd
+    from qpviz import identity
+
+    times = pd.date_range("2026-07-22 14:00:00", periods=6, freq="1s")
+    frames = []
+    for n in range(11):
+        frames.append(
+            pd.DataFrame(
+                {
+                    "time": times,
+                    # more runs for the low-numbered collections, so ranking is stable
+                    "collection": f"C{n:02d}",
+                    "pci": pd.array([1, 2, 1, 2, 1, 2][: 6 - (n > 0)] + [3] * (n > 0), dtype="Int32"),
+                }
+            )
+        )
+    runs = identity.dwell_runs(pd.concat(frames, ignore_index=True), "pci")
+    fig = charts.timeline_figure(runs, [1, 2, 3], "PCI")
+    names = [t.name for t in fig.data]
+    assert len(names) == 9  # eight named collections plus one folded trace
+    assert names[-1] == "Other (3 collections)"
+    folded = fig.data[-1]
+    assert folded.marker.color == charts.OTHER_COLOR
+    # no colour is ever reused between two named collections
+    colors = [t.marker.color for t in fig.data[:8]]
+    assert len(set(colors)) == 8

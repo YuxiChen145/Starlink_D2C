@@ -59,7 +59,7 @@ Point-in-polygon is an even-odd ray cast, so concave shapes work correctly.
 |---|---|
 | Map | Each sample coloured by the chosen metric, on OSM / Carto / Esri satellite tiles. Diverging red↔blue about a midpoint you set, or a single-hue sequential ramp, with a colour bar legend (round-number ticks; each band as tall as the value range it covers). Or colour categorically by serving PCI / eNB / sector — the eight most common take a hue each and the rest fold into "Other". Hover any point for its value, collection, PCI, carrier and timestamp. |
 | CDF curves | One ECDF per group, all on the same canvas. CCDF toggle. |
-| Cell identity | Who is serving you and for how long — a dwell timeline and an eNB → sector → PCI treemap. See below. |
+| Cell identity | Who is serving you and for how long — a dwell timeline and an eNB → sector → PCI tree. See below. |
 | Statistics | Per-group n / mean / std / min / P5 / P10 / P50 / P90 / P95 / max, downloadable as CSV. |
 | Data | The filtered rows, downloadable as CSV. |
 
@@ -98,11 +98,12 @@ Two views:
 - **Timeline** — one bar per continuous stretch on a single identity, ordered
   by first appearance. A moving constellation draws a staircase; a terrestrial
   cell draws one long bar. Up to six collections at a time, each its own
-  colour, sharing an *active-elapsed* x axis (see below).
-- **Hierarchy** — a treemap of eNB → sector → PCI sized by dwell time. On D2C
-  the median eNB-Id carries about 2 sectors and each sector maps to essentially
-  one PCI, so a PCI is a beam; terrestrial sectorisation looks different, and
-  the two show up as a few large tiles beside a long tail of small ones.
+  colour, sharing an *active-elapsed* x axis (see below). Past eight
+  collections the rest fold into one muted "Other" rather than cycling hues.
+- **Hierarchy** — a node-link tree of eNB → sector → PCI, branches ordered
+  longest-held first and nodes sized by dwell. On D2C the median eNB-Id carries
+  about 2 sectors and each sector maps to essentially one PCI, so a PCI is a
+  beam; terrestrial sectorisation looks different.
 
 Details that matter for the numbers:
 
