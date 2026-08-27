@@ -119,3 +119,22 @@ def test_require_drops_rows_with_null_dimensions(fixture_dir, cache_dir):
     assert out["pci"].notna().all()
     assert len(out) == len(patched) - 5
     assert len(flt.apply_filters(patched, flt.Filters(require=["nope"]))) == len(patched)
+
+
+def test_direction_filter(fixture_dir, cache_dir):
+    from qpviz.loader import load as _load
+
+    both = _load(fixture_dir, ["lte_pdsch_pc", "lte_pusch_pc"], cache_dir)
+    assert set(both["link"].unique()) == {"DL", "UL"}
+    downlink = flt.apply_filters(both, flt.Filters(links=["DL"]))
+    assert set(downlink["link"].unique()) == {"DL"}
+    assert 0 < len(downlink) < len(both)
+    assert len(flt.apply_filters(both, flt.Filters(links=["DL", "UL"]))) == len(both)
+
+
+def test_source_filter(fixture_dir, cache_dir):
+    from qpviz.loader import load as _load
+
+    both = _load(fixture_dir, ["lte_pdsch_pc", "lte_pusch_pc"], cache_dir)
+    out = flt.apply_filters(both, flt.Filters(sources=["lte_pusch_pc"]))
+    assert set(out["source"].unique()) == {"lte_pusch_pc"}

@@ -69,7 +69,13 @@ def test_missing_file_raises(tmp_path):
 
 def test_available_datasets_lists_only_present_files(fixture_dir):
     keys = {d.key for d in loader.available_datasets(fixture_dir)}
-    assert keys == {"lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pucch"}
+    assert keys == {
+        "lte_radio",
+        "nr_radio",
+        "lte_pdsch_pc",
+        "lte_pusch_pc",
+        "lte_pucch",
+    }
 
 
 def test_load_concatenates_and_skips_missing(fixture_dir, cache_dir):

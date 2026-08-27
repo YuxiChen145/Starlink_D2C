@@ -33,10 +33,20 @@ present.
 an empty selection means *all*. Selecting several collections pools their
 samples; splitting curves by `Collection` compares them side by side.
 
-**Filters** — Technology (LTE / NR / both) → dataset → metric, then
-Collection, Band, EARFCN / NR-ARFCN, PCI, and a **region drawn on the map**.
-Each filter's options are derived from what survives the filters above it, so
-you never see a PCI that no longer has data behind it.
+**No dataset picking.** You choose a **Technology** (All / LTE / 5G NR) and a
+**Metric**; the app works out which of the ten exports can supply that metric
+and pools them. The sidebar names what it read, e.g. *"Reading LTE PDSCH
+[per-carrier], LTE PUSCH [per-carrier]"*.
+
+**Filters** — Direction (DL / UL), Data source, Collection, Band,
+EARFCN / NR-ARFCN, PCI, and a **region drawn on the map**. Every one is a
+multi-select where empty means *all*, and each filter's options are derived
+from what survives the filters above it, so you never see a PCI that no longer
+has data behind it. When a metric exists in both directions — throughput and
+MCS do — Direction defaults to **DL** rather than silently pooling uplink and
+downlink into one distribution. Direction and Data source are also available
+as CDF grouping dimensions, so you can put DL and UL, or per-carrier and
+aggregated, on the same canvas deliberately.
 
 **Region selection.** On the Map tab, use the rectangle or polygon tool at the
 top-left. Every shape you draw is applied (as a union) to *all* tabs — map, CDF,

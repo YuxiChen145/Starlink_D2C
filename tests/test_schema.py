@@ -46,3 +46,28 @@ def test_metrics_available_is_in_display_order():
 
 def test_metrics_available_ignores_unknown_keys():
     assert schema.metrics_available(["nope"]) == []
+
+
+def test_technologies_map_to_dataset_tech_values():
+    assert schema.TECHNOLOGIES == {"All": None, "LTE": "LTE", "5G NR": "NR"}
+
+
+def test_datasets_for_resolves_metric_and_technology():
+    # RSRP for "All" pools the LTE serving + neighbour and the NR radio exports
+    assert {d.key for d in schema.datasets_for("rsrp")} == {
+        "lte_radio",
+        "lte_neighbor",
+        "nr_radio",
+    }
+    assert {d.key for d in schema.datasets_for("rsrp", "NR")} == {"nr_radio"}
+
+
+def test_datasets_for_spans_both_directions_where_the_metric_does():
+    resolved = schema.datasets_for("throughput", "LTE")
+    assert {d.link for d in resolved} == {"DL", "UL"}
+
+
+def test_datasets_for_honours_what_is_on_disk():
+    resolved = schema.datasets_for("rsrp", available=["nr_radio", "lte_pdsch_pc"])
+    assert [d.key for d in resolved] == ["nr_radio"]
+    assert schema.datasets_for("rsrp", available=[]) == []

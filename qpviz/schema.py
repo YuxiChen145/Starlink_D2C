@@ -339,6 +339,25 @@ def datasets_with_metric(metric: str, tech: Optional[str] = None) -> List[Datase
     return out
 
 
+#: UI label -> the ``tech`` value stored on each dataset (``None`` = no filter)
+TECHNOLOGIES: Dict[str, Optional[str]] = {"All": None, "LTE": "LTE", "5G NR": "NR"}
+
+
+def datasets_for(
+    metric: str, tech: Optional[str] = None, available: Optional[List[str]] = None
+) -> List[Dataset]:
+    """Every export that can supply ``metric`` for ``tech``.
+
+    This is what replaces picking datasets by hand: the technology and the
+    metric together determine which files are read.
+    """
+    out = datasets_with_metric(metric, tech)
+    if available is not None:
+        keep = set(available)
+        out = [d for d in out if d.key in keep]
+    return out
+
+
 def metrics_available(dataset_keys: List[str]) -> List[str]:
     """Metric keys present in at least one of ``dataset_keys``, in display order."""
     present = set()

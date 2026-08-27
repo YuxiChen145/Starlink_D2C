@@ -33,6 +33,8 @@ def test_app_starts_and_renders_every_tab(fixture_dir, monkeypatch, tmp_path):
     assert any("CDF" in l for l in labels)
     assert app.multiselect(key="f_collections") is not None
     assert app.selectbox(key="metric_choice") is not None
+    # datasets are resolved from technology + metric, never picked by hand
+    assert not [m for m in app.multiselect if m.label == "Datasets"]
     # header metrics + at least one plotly chart rendered
     assert len(app.metric) >= 4
 
@@ -56,13 +58,54 @@ def test_app_switches_metric_and_technology(fixture_dir, monkeypatch, tmp_path):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
-    app.radio(key="tech_choice").set_value("NR").run()
+    assert app.radio(key="tech_choice").options == ["All", "LTE", "5G NR"]
+
+    app.radio(key="tech_choice").set_value("5G NR").run()
     _assert_clean(app)
     metric = app.selectbox(key="metric_choice")
+    # only the NR radio export is present in the fixtures, so only its metrics
     assert metric.options == ["RSRP (dBm)", "RSRQ (dB)", "SINR (dB)"]
     metric.set_value("sinr").run()
     _assert_clean(app)
     assert app.selectbox(key="metric_choice").value == "sinr"
+
+
+def test_metric_with_both_directions_defaults_to_downlink(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    app.radio(key="tech_choice").set_value("LTE").run()
+    app.selectbox(key="metric_choice").set_value("throughput").run()
+    _assert_clean(app)
+
+    direction = app.multiselect(key="f_links_DL-UL")
+    assert direction.options == ["DL", "UL"]
+    assert direction.value == ["DL"]
+
+    downlink_only = int(app.metric[0].value.replace(",", ""))
+    direction.select("UL").run()
+    _assert_clean(app)
+    assert int(app.metric[0].value.replace(",", "")) > downlink_only
+
+
+def test_data_source_filter_narrows_the_pooled_exports(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    app.radio(key="tech_choice").set_value("LTE").run()
+    app.selectbox(key="metric_choice").set_value("throughput").run()
+    _assert_clean(app)
+
+    sources = app.multiselect(key="f_sources")
+    # the DL default leaves only the PDSCH export in play; options render as labels
+    assert sources.options == ["LTE PDSCH [per-carrier]"]
+    sources.select("lte_pdsch_pc").run()
+    _assert_clean(app)
+    assert app.multiselect(key="f_sources").value == ["lte_pdsch_pc"]
 
 
 REAL_DATA = Path(__file__).resolve().parents[1] / "QP CSV"

@@ -16,7 +16,9 @@ from qpviz import charts, filters as flt, loader, mapview, stats
 from qpviz.schema import (
     DATASETS_BY_KEY,
     METRICS,
+    TECHNOLOGIES,
     Dataset,
+    datasets_for,
     metrics_available,
 )
 
@@ -85,39 +87,35 @@ with st.sidebar:
     st.markdown("#### 1 · Data source")
 
     tech = st.radio(
-        "Technology", ["All", "LTE", "NR"], horizontal=True, key="tech_choice"
+        "Technology",
+        list(TECHNOLOGIES),
+        horizontal=True,
+        key="tech_choice",
+        help="Which radio technology to read. The matching Qualipoc exports are "
+             "selected automatically from the metric you pick below.",
     )
-    candidates = [
-        DATASETS_BY_KEY[k]
-        for k in present
-        if tech == "All" or DATASETS_BY_KEY[k].tech == tech
+    tech_value = TECHNOLOGIES[tech]
+    in_tech = [
+        k for k in present if tech_value is None or DATASETS_BY_KEY[k].tech == tech_value
     ]
-    default_sources = [
-        d.key for d in candidates if d.key in ("lte_radio", "nr_radio")
-    ] or [candidates[0].key]
-
-    source_keys = st.multiselect(
-        "Datasets",
-        options=[d.key for d in candidates],
-        default=default_sources,
-        format_func=lambda k: DATASETS_BY_KEY[k].label,
-        help="Each Qualipoc export carries a different set of metrics.",
-    )
-    if not source_keys:
-        st.warning("Select at least one dataset.")
+    if not in_tech:
+        st.warning(f"No {tech} exports in this folder.")
         st.stop()
 
-    metric_keys = metrics_available(source_keys)
-    if not metric_keys:
-        st.warning("The selected datasets share no plottable metric.")
-        st.stop()
-
+    metric_keys = metrics_available(in_tech)
     metric = st.selectbox(
         "Metric",
         options=metric_keys,
         format_func=lambda m: METRICS[m].axis_label,
         index=0,
         key="metric_choice",
+    )
+
+    source_keys = [d.key for d in datasets_for(metric, tech_value, available=in_tech)]
+    st.caption(
+        "Reading "
+        + ", ".join(f"**{DATASETS_BY_KEY[k].label}**" for k in source_keys)
+        + ". Narrow this with the Direction and Data source filters below."
     )
 
 frame = load_frame(data_dir, tuple(sorted(source_keys)))
@@ -129,10 +127,35 @@ with st.sidebar:
     st.divider()
     st.markdown("#### 2 · Filters")
 
-    collections = multiselect_all(
-        "Collections", loader.options(frame, "collection"), "f_collections"
+    link_options = loader.options(frame, "link")
+    links = st.multiselect(
+        "Direction",
+        options=link_options,
+        # a metric that exists in both directions defaults to downlink rather
+        # than silently pooling DL and UL into one distribution
+        default=["DL"] if set(link_options) == {"DL", "UL"} else [],
+        key=f"f_links_{'-'.join(link_options)}",
+        help="Leave empty to include all.",
+        placeholder=f"All ({len(link_options)})",
     )
-    step1 = flt.apply_filters(frame, flt.Filters(collections=collections))
+    step0 = flt.apply_filters(frame, flt.Filters(links=links))
+
+    source_options = [k for k in source_keys if k in set(step0["source"].dropna())]
+    sources = st.multiselect(
+        "Data source",
+        options=source_options,
+        default=[],
+        format_func=lambda k: DATASETS_BY_KEY[k].label,
+        key="f_sources",
+        help="Leave empty to include all of the exports listed above.",
+        placeholder=f"All ({len(source_options)})",
+    )
+    step0 = flt.apply_filters(step0, flt.Filters(sources=sources))
+
+    collections = multiselect_all(
+        "Collections", loader.options(step0, "collection"), "f_collections"
+    )
+    step1 = flt.apply_filters(step0, flt.Filters(collections=collections))
 
     bands = multiselect_all("Band", loader.options(step1, "band"), "f_bands")
     step2 = flt.apply_filters(step1, flt.Filters(bands=bands))
@@ -192,6 +215,8 @@ with st.sidebar:
 active = flt.apply_filters(
     frame,
     flt.Filters(
+        links=links,
+        sources=sources,
         collections=collections,
         bands=bands,
         freqs=freqs,
@@ -207,6 +232,8 @@ active = flt.apply_filters(
 unregioned = flt.apply_filters(
     frame,
     flt.Filters(
+        links=links,
+        sources=sources,
         collections=collections,
         bands=bands,
         freqs=freqs,
@@ -223,7 +250,7 @@ unregioned = flt.apply_filters(
 
 metric_meta = METRICS[metric]
 head = st.columns([2, 1, 1, 1, 1])
-head[0].markdown(f"### {metric_meta.label} — {len(source_keys)} dataset(s)")
+head[0].markdown(f"### {metric_meta.label} · {tech}")
 head[1].metric("Samples", f"{len(active):,}")
 head[2].metric("Collections", f"{active['collection'].nunique():,}")
 head[3].metric("PCIs", f"{active['pci'].nunique():,}")

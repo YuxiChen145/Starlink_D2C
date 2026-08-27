@@ -79,7 +79,7 @@ def write_dataset(directory: Path, ds: Dataset, rows: int = 240, seed: int = 7) 
 @pytest.fixture(scope="session")
 def fixture_dir(tmp_path_factory) -> Path:
     directory = tmp_path_factory.mktemp("qp_csv")
-    for key in ("lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pucch"):
+    for key in ("lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pusch_pc", "lte_pucch"):
         write_dataset(directory, DATASETS_BY_KEY[key])
     return directory
 
