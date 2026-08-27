@@ -182,3 +182,133 @@ def test_real_curves_render(fixture_dir, cache_dir):
     frame = load(fixture_dir, ["lte_radio"], cache_dir)
     fig = charts.cdf_figure(cdf_curves(frame, "rsrp", ["pci"]), "RSRP (dBm)")
     assert len(fig.data) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Cell identity figures
+# --------------------------------------------------------------------------- #
+
+
+def _runs():
+    import pandas as pd
+    from qpviz import identity
+
+    times = pd.date_range("2026-07-22 14:00:00", periods=12, freq="1s")
+    frame = pd.DataFrame(
+        {
+            "time": list(times) + list(times),
+            "collection": ["A"] * 12 + ["B"] * 12,
+            "pci": pd.array([1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4] * 2, dtype="Int32"),
+        }
+    )
+    return identity.dwell_runs(frame, "pci")
+
+
+def test_timeline_draws_one_trace_per_collection():
+    runs = _runs()
+    fig = charts.timeline_figure(runs, [1, 2, 3, 4], "PCI")
+    assert len(fig.data) == 2
+    assert {t.name for t in fig.data} == {"A", "B"}
+    assert all(t.orientation == "h" for t in fig.data)
+    assert fig.layout.showlegend is True
+
+
+def test_timeline_row_order_and_reversed_axis():
+    fig = charts.timeline_figure(_runs(), [3, 1, 4], "PCI")
+    assert list(fig.layout.yaxis.categoryarray) == ["3", "1", "4"]
+    # first identity at the top, so the staircase reads downward
+    assert fig.layout.yaxis.autorange == "reversed"
+    # identities not in the list are not drawn
+    assert all("2" not in list(t.y) for t in fig.data)
+
+
+def test_timeline_elapsed_and_absolute_axes():
+    runs = _runs()
+    elapsed = charts.timeline_figure(runs, [1, 2, 3, 4], "PCI", x_axis="elapsed")
+    assert "Elapsed" in elapsed.layout.xaxis.title.text
+    assert max(elapsed.data[0].x) == pytest.approx(4 / 60)  # 4 s in minutes
+    absolute = charts.timeline_figure(runs, [1, 2, 3, 4], "PCI", x_axis="absolute")
+    assert absolute.layout.xaxis.title.text == "Time"
+
+
+def test_timeline_height_grows_with_the_number_of_rows():
+    runs = _runs()
+    short = charts.timeline_figure(runs, [1, 2], "PCI").layout.height
+    tall = charts.timeline_figure(runs, list(range(1, 60)), "PCI").layout.height
+    assert tall > short
+
+
+def test_timeline_handles_no_runs():
+    import pandas as pd
+
+    fig = charts.timeline_figure(pd.DataFrame(columns=["collection", "value"]), [], "PCI")
+    assert len(fig.data) == 0
+
+
+def test_treemap_builds_a_node_per_path_segment():
+    import pandas as pd
+
+    table = pd.DataFrame(
+        {
+            "enb": [10, 10, 11],
+            "sector": [1, 2, 3],
+            "pci": [100, 200, 300],
+            "dwell_s": [30.0, 20.0, 10.0],
+            "samples": [30, 20, 10],
+        }
+    )
+    fig = charts.treemap_figure(table, ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"])
+    node = fig.data[0]
+    assert node.ids[0] == "All" and node.parents[0] == ""
+    # 1 root + 2 eNBs + 3 sectors + 3 PCIs
+    assert len(node.ids) == 9
+    assert sum(node.values) == pytest.approx(60.0)
+    assert "eNB 10" in node.labels and "PCI 300" in node.labels
+
+
+def test_treemap_shades_by_depth_never_by_cycled_hue():
+    import pandas as pd
+
+    table = pd.DataFrame(
+        {"enb": [10, 11], "pci": [1, 2], "dwell_s": [1.0, 2.0], "samples": [1, 2]}
+    )
+    fig = charts.treemap_figure(table, ["enb", "pci"], ["eNB", "PCI"])
+    used = set(fig.data[0].marker.colors)
+    assert used <= set(charts._DEPTH_COLORS)
+    assert not used & set(theme.CATEGORICAL["light"])
+
+
+def test_treemap_handles_empty_input():
+    import pandas as pd
+
+    assert len(charts.treemap_figure(pd.DataFrame(), ["pci"], ["PCI"]).data) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Categorical map colouring
+# --------------------------------------------------------------------------- #
+
+
+def test_categorical_bins_takes_the_eight_most_common_values():
+    values = [1] * 10 + [2] * 9 + [3] * 8 + [4] * 7 + [5] * 6 + [6] * 5 + [7] * 4
+    values += [8] * 3 + [9] * 2 + [10] * 1
+    order, colors, other = charts.categorical_bins(values)
+    assert order == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert other == 3  # the 9th and 10th values fold into "Other"
+    # hues are never cycled, so no two identities share a colour
+    assert len(set(colors.values())) == len(colors)
+    assert list(colors.values()) == theme.CATEGORICAL["light"][:8]
+
+
+def test_categorical_bins_with_few_values_has_no_other_bucket():
+    order, colors, other = charts.categorical_bins([1, 1, 2])
+    assert order == [1, 2] and other == 0
+    assert charts.categorical_bins([]) == ([], {}, 0)
+
+
+def test_categorical_legend_lists_every_slot_and_the_other_bucket():
+    order, colors, other = charts.categorical_bins([1] * 3 + [2] * 2)
+    html = charts.categorical_legend_html(order, colors, "PCI", other_count=17)
+    assert html.count("border-radius:3px") == 3  # two slots + Other
+    assert "Other (17 pts)" in html
+    assert charts.OTHER_COLOR in html

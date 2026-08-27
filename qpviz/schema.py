@@ -71,6 +71,9 @@ METRIC_ORDER: List[str] = [
 # Datasets
 # --------------------------------------------------------------------------- #
 
+#: canonical cell-identity columns (see qpviz.identity)
+IDENTITY_COLUMNS: List[str] = ["pci", "enb", "sector", "cell_id", "ssb"]
+
 DIMENSION_COLUMNS: List[str] = [
     "time",
     "collection",
@@ -83,6 +86,10 @@ DIMENSION_COLUMNS: List[str] = [
     "lat",
     "lon",
     "pci",
+    "enb",
+    "sector",
+    "cell_id",
+    "ssb",
     "freq",
     "band",
     "tech",
@@ -144,6 +151,8 @@ DATASETS: List[Dataset] = [
             **_COMMON,
             **_GEO,
             "pci": "PCI LTE",
+            "enb_sector": "eNB-Id / Sector Id",
+            "cell_id": "Cell Id",
             "freq": "DL EARFCN",
             "band": "Band Number",
             "cell_type": "Cell Type",
@@ -181,6 +190,9 @@ DATASETS: List[Dataset] = [
             **_COMMON,
             **_GEO,
             "pci": "PCI 5G NR",
+            "enb": "NR gNB-Id",
+            "cell_id": "Cell Id",
+            "ssb": "SSB Index",
             "freq": "DL NR-ARFCN",
             "band": "Band Number",
             "cell_type": "Cell Type",
@@ -257,6 +269,7 @@ DATASETS: List[Dataset] = [
         dims={
             **_COMMON,
             "pci": "PCI LTE",
+            "enb_sector": "eNB-Id / Sector Id",
             "freq": "DL EARFCN",
             "band": "Band Number",
             "cell_type": "Cell Type",
@@ -274,6 +287,7 @@ DATASETS: List[Dataset] = [
             **_COMMON,
             **_GEO,
             "pci": "PCI 5G NR",
+            "ssb": "SSB Index",
             "freq": "DL NR-ARFCN",
             "band": "Band Number",
             "cell_type": "Cell Type",
@@ -315,6 +329,7 @@ DATASETS: List[Dataset] = [
             **_COMMON,
             **_GEO,
             "pci": "PCI 5G NR",
+            "ssb": "SSB Index",
             "freq": "UL NR-ARFCN",
             "band": "Band Number",
             "cell_type": "Cell Type",

@@ -12,7 +12,7 @@ from typing import List, Sequence, Tuple
 import pandas as pd
 import streamlit as st
 
-from qpviz import charts, filters as flt, loader, mapview, stats
+from qpviz import charts, filters as flt, identity, loader, mapview, stats
 from qpviz.schema import (
     DATASETS_BY_KEY,
     METRICS,
@@ -260,8 +260,8 @@ if active.empty:
     st.info("No samples match the current filters.")
     st.stop()
 
-tab_map, tab_cdf, tab_stats, tab_data = st.tabs(
-    ["🗺️ Map", "📈 CDF curves", "📊 Statistics", "🧾 Data"]
+tab_map, tab_cdf, tab_cells, tab_stats, tab_data = st.tabs(
+    ["🗺️ Map", "📈 CDF curves", "🛰️ Cell identity", "📊 Statistics", "🧾 Data"]
 )
 
 
@@ -274,13 +274,24 @@ with tab_map:
 
     left, right = st.columns([4, 1])
     with right:
+        color_options = ["Metric"] + [
+            l for l in identity.available_levels(active) if l != "ssb"
+        ]
+        color_choice = st.selectbox(
+            "Colour by",
+            color_options,
+            format_func=lambda c: "Metric" if c == "Metric" else identity.label_for(c),
+            help="Colouring by an identity shows how the serving cell changes "
+                 "along the route: terrestrial cells hold whole stretches, "
+                 "satellite cells interleave.",
+        )
         apply_region_to_map = st.checkbox("Apply region to map", value=False)
         marker_radius = st.slider("Marker size", 2, 12, 4)
         midpoint = st.number_input(
             "Diverging midpoint",
             value=float(pd.to_numeric(active[metric], errors="coerce").median()),
             help="Values below this are red, above are blue.",
-            disabled=map_scale != "diverging",
+            disabled=map_scale != "diverging" or color_choice != "Metric",
         )
         st.caption(
             "Use the rectangle or polygon tool (top-left of the map) to select a "
@@ -299,6 +310,8 @@ with tab_map:
         mode=MODE,
         regions=st.session_state["regions"],
         radius=int(marker_radius),
+        color_by=None if color_choice == "Metric" else color_choice,
+        color_by_label="" if color_choice == "Metric" else identity.label_for(color_choice),
     )
     with left:
         result = st_folium(
@@ -390,6 +403,186 @@ with tab_cdf:
                 width="stretch",
                 hide_index=True,
             )
+
+
+# --------------------------------------------------------------------------- #
+# Cell identity
+# --------------------------------------------------------------------------- #
+
+with tab_cells:
+    # Serving-cell identity is a property of the connection, not of the metric
+    # you happen to be plotting - and only the Radio exports carry eNB/gNB-Id
+    # and Sector Id. So this tab reads those directly, under the same filters.
+    radio_keys = tuple(
+        k
+        for k in sorted(present)
+        if k in ("lte_radio", "nr_radio")
+        and (tech_value is None or DATASETS_BY_KEY[k].tech == tech_value)
+    )
+    if not radio_keys:
+        st.info("No Radio [connected] export for this technology, so no cell identity.")
+        st.stop()
+
+    radio = load_frame(data_dir, radio_keys)
+
+    def _intersecting(values, column):
+        """Only carry a filter across if it means anything in the radio frame."""
+        if not values:
+            return []
+        present_values = set(loader.options(radio, column))
+        return [v for v in values if v in present_values]
+
+    cells = flt.apply_filters(
+        radio,
+        flt.Filters(
+            collections=collections,
+            bands=_intersecting(bands, "band"),
+            freqs=_intersecting(freqs, "freq"),
+            pcis=_intersecting(pcis, "pci"),
+            regions=st.session_state["regions"],
+            keep_ungeolocated=keep_ungeo,
+            require=("pci",) if drop_unknown else (),
+        ),
+    )
+    cells = identity.serving_only(cells)
+    levels = identity.available_levels(cells)
+
+    if cells.empty or not levels:
+        st.info("No serving-cell rows match the current filters.")
+    else:
+        st.caption(
+            "Serving cell (PCell / PSCell) only, from "
+            + ", ".join(DATASETS_BY_KEY[k].label for k in radio_keys)
+            + f" — {len(cells):,} samples."
+        )
+        view = st.radio(
+            "View", ["Timeline", "Hierarchy"], horizontal=True, key="identity_view"
+        )
+
+        if view == "Timeline":
+            row = st.columns([2, 2, 2, 2])
+            level = row[0].selectbox(
+                "Identity", levels, format_func=identity.label_for, key="identity_level"
+            )
+            order_by = row[1].selectbox(
+                "Row order", ["first seen", "dwell", "value"], key="identity_order",
+                help="First seen draws the staircase a moving constellation makes; "
+                     "dwell puts the cells you spent longest on at the top.",
+            )
+            max_rows = row[2].number_input(
+                "Max rows", min_value=5, max_value=400, value=60, step=5,
+                help="Largest total dwell wins when there are more.",
+            )
+            x_axis = row[3].selectbox(
+                "X axis", ["elapsed", "absolute"], key="identity_x",
+                help="Elapsed is active minutes within each collection (time "
+                     "the log was paused is excluded), so several collections "
+                     "share one axis.",
+            )
+
+            # One lane per identity per collection: drawing all 28 at once is
+            # unreadable and the legend swamps the plot, so focus on a few.
+            by_size = (
+                cells["collection"].value_counts().index.tolist()
+            )
+            focus = st.multiselect(
+                "Collections to draw",
+                options=by_size,
+                default=by_size[:1],
+                max_selections=6,
+                key="identity_focus",
+                help="Up to six at a time — each gets its own colour.",
+            )
+            if not focus:
+                st.info("Pick at least one collection to draw.")
+                st.stop()
+
+            runs = identity.dwell_runs(cells[cells["collection"].isin(focus)], level)
+            if runs.empty:
+                st.info("Not enough samples to build dwell runs.")
+            else:
+                shown = identity.order_identities(runs, order_by, limit=int(max_rows))
+                span_min = max(runs["elapsed_end"].max() / 60.0, 1e-9)
+                handovers = len(runs) - runs["collection"].nunique()
+                summary = st.columns(4)
+                summary[0].metric(f"Distinct {identity.label_for(level)}", f"{runs['value'].nunique():,}")
+                summary[1].metric("Dwell runs", f"{len(runs):,}")
+                summary[2].metric("Median dwell", f"{runs['duration_s'].median():.1f} s")
+                summary[3].metric("Changes / min", f"{handovers / span_min:.2f}")
+
+                st.plotly_chart(
+                    charts.timeline_figure(
+                        runs, shown, identity.label_for(level), mode=MODE, x_axis=x_axis
+                    ),
+                    width="stretch",
+                )
+                if len(shown) < runs["value"].nunique():
+                    st.caption(
+                        f"Showing the {len(shown)} longest-held of "
+                        f"{runs['value'].nunique()} identities."
+                    )
+                with st.expander("Dwell runs as a table"):
+                    table = runs[
+                        ["collection", "value", "start", "duration_s", "samples"]
+                    ].rename(
+                        columns={
+                            "collection": "Collection",
+                            "value": identity.label_for(level),
+                            "start": "Start",
+                            "duration_s": "Held (s)",
+                            "samples": "Samples",
+                        }
+                    )
+                    st.dataframe(table, width="stretch", hide_index=True, height=320)
+                    st.download_button(
+                        "Download dwell runs (CSV)",
+                        table.to_csv(index=False).encode(),
+                        file_name=f"{level}_dwell_runs.csv",
+                        mime="text/csv",
+                    )
+        else:
+            default_levels = [l for l in ("enb", "sector", "pci") if l in levels]
+            chosen = st.multiselect(
+                "Levels, outer → inner",
+                options=levels,
+                default=default_levels or levels[:1],
+                format_func=identity.label_for,
+                key="identity_hierarchy",
+                help="Rectangles are sized by how long that cell served.",
+            )
+            if not chosen:
+                st.info("Pick at least one level.")
+            else:
+                table = identity.hierarchy(cells, chosen)
+                if table.empty:
+                    st.info(
+                        "No rows carry every level in that path — try dropping "
+                        "a level."
+                    )
+                else:
+                    counts = " · ".join(
+                        f"{table[l].nunique():,} {identity.label_for(l)}" for l in chosen
+                    )
+                    st.caption(f"{counts} · {table['dwell_s'].sum() / 60:.1f} minutes held in total.")
+                    st.plotly_chart(
+                        charts.treemap_figure(
+                            table, chosen,
+                            [identity.label_for(l) for l in chosen],
+                            mode=MODE,
+                        ),
+                        width="stretch",
+                    )
+                    with st.expander("Hierarchy as a table"):
+                        pretty = table.rename(
+                            columns={l: identity.label_for(l) for l in chosen}
+                        ).rename(columns={"dwell_s": "Held (s)", "samples": "Samples"})
+                        st.dataframe(pretty.round(1), width="stretch", hide_index=True, height=320)
+                        st.download_button(
+                            "Download hierarchy (CSV)",
+                            pretty.to_csv(index=False).encode(),
+                            file_name="cell_hierarchy.csv",
+                            mime="text/csv",
+                        )
 
 
 # --------------------------------------------------------------------------- #

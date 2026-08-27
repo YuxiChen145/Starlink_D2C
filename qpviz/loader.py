@@ -11,13 +11,19 @@ from typing import Iterable, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from .schema import DATASETS, DATASETS_BY_KEY, DIMENSION_COLUMNS, METRICS, Dataset
+from .schema import (
+    DATASETS,
+    DATASETS_BY_KEY,
+    DIMENSION_COLUMNS,
+    METRICS,
+    Dataset,
+)
 
 DEFAULT_DATA_DIR = os.environ.get("QP_DATA_DIR", "QP CSV")
 DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 _TIME_FORMATS = ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S")
 
@@ -29,6 +35,20 @@ _CATEGORICAL = ("collection", "band", "tech", "link", "source", "source_label")
 
 #: free-text dimensions, always stored as pandas ``string``
 _TEXT_DIMS = ("database", "operator", "model", "serial", "ran_config", "cell_type")
+
+#: nullable-integer dimensions and the dtype each is stored as
+_INT_DIMS = {
+    "pci": "Int32",
+    "enb": "Int64",
+    "sector": "Int32",
+    "cell_id": "Int64",
+    "ssb": "Int16",
+    "freq": "Int64",
+}
+
+#: NR reports the gNB-Id and the full NCGI; the cell-local id (what LTE calls
+#: the sector) is the remainder once the gNB-Id is shifted out
+_NR_CELL_ID_SHIFT = 256
 
 
 # --------------------------------------------------------------------------- #
@@ -68,6 +88,17 @@ def _to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def split_enb_sector(series: pd.Series):
+    """``"11311/73"`` -> ``(11311, 73)``. LTE reports the pair as one string."""
+    text = series.astype("string")
+    parts = text.str.split("/", n=1, expand=True)
+    if parts.shape[1] < 2:
+        parts[1] = pd.NA
+    enb = pd.to_numeric(parts[0], errors="coerce")
+    sector = pd.to_numeric(parts[1], errors="coerce")
+    return enb, sector
+
+
 def normalise(raw: pd.DataFrame, ds: Dataset) -> pd.DataFrame:
     """Map one raw CSV frame onto the canonical schema."""
     out = pd.DataFrame(index=raw.index)
@@ -80,10 +111,12 @@ def normalise(raw: pd.DataFrame, ds: Dataset) -> pd.DataFrame:
             out["time"] = parse_time(col)
         elif canon in ("lat", "lon"):
             out[canon] = _to_numeric(col)
-        elif canon == "pci":
-            out["pci"] = _to_numeric(col).astype("Int32")
-        elif canon == "freq":
-            out["freq"] = _to_numeric(col).astype("Int64")
+        elif canon == "enb_sector":
+            enb, sector = split_enb_sector(col)
+            out["enb"] = enb.astype("Int64")
+            out["sector"] = sector.astype("Int32")
+        elif canon in _INT_DIMS:
+            out[canon] = _to_numeric(col).astype(_INT_DIMS[canon])
         elif canon == "band":
             out["band"] = [normalise_band(v, ds.tech) for v in col]
         else:
@@ -94,6 +127,13 @@ def normalise(raw: pd.DataFrame, ds: Dataset) -> pd.DataFrame:
             _to_numeric(raw[source_col]) if source_col in raw.columns else np.nan
         )
 
+    # NR gives the gNB-Id and the full cell identity but no explicit sector;
+    # the cell-local id is what corresponds to LTE's sector.
+    if "sector" not in out.columns and {"enb", "cell_id"} <= set(out.columns):
+        local = out["cell_id"].astype("Float64") - out["enb"].astype("Float64") * _NR_CELL_ID_SHIFT
+        local = local.where((local >= 0) & (local < _NR_CELL_ID_SHIFT))
+        out["sector"] = local.astype("Int32")
+
     out["tech"] = ds.tech
     out["link"] = ds.link
     out["source"] = ds.key
@@ -103,7 +143,8 @@ def normalise(raw: pd.DataFrame, ds: Dataset) -> pd.DataFrame:
         out["lon"] = np.nan
     for col in DIMENSION_COLUMNS:
         if col not in out.columns:
-            out[col] = pd.Series(pd.NA, index=out.index, dtype="string")
+            dtype = _INT_DIMS.get(col, "string")
+            out[col] = pd.Series(pd.NA, index=out.index, dtype=dtype)
 
     metric_cols = list(ds.metrics)
     if metric_cols:
@@ -134,12 +175,15 @@ def coerce_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     for col in ("lat", "lon"):
         if col in frame.columns:
             frame[col] = pd.to_numeric(frame[col], errors="coerce").astype("float64")
-    if "pci" in frame.columns:
-        frame["pci"] = frame["pci"].astype("Int32")
-    if "freq" in frame.columns:
-        frame["freq"] = frame["freq"].astype("Int64")
+    for col, dtype in _INT_DIMS.items():
+        if col in frame.columns:
+            frame[col] = frame[col].astype(dtype)
     if "time" in frame.columns:
-        frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+        # pin the resolution: pandas 2 infers ns and pandas 3 us, and a frame
+        # that changes unit between versions changes every duration downstream
+        frame["time"] = pd.to_datetime(frame["time"], errors="coerce").astype(
+            "datetime64[ns]"
+        )
     for col in METRICS:
         if col in frame.columns:
             frame[col] = pd.to_numeric(frame[col], errors="coerce").astype("float64")

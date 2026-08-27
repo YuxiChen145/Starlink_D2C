@@ -7,7 +7,15 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from .charts import color_bins, color_for, downsample, legend_html
+from .charts import (
+    OTHER_COLOR,
+    categorical_bins,
+    categorical_legend_html,
+    color_bins,
+    color_for,
+    downsample,
+    legend_html,
+)
 from .filters import LatLon, geolocated
 
 TILE_CHOICES: Dict[str, Tuple[str, Optional[str]]] = {
@@ -62,8 +70,16 @@ def build_map(
     mode: str = "light",
     regions: Sequence[Sequence[LatLon]] = (),
     radius: int = 4,
+    color_by: Optional[str] = None,
+    color_by_label: str = "",
 ):
-    """Build a folium map of ``metric`` with a rectangle/polygon draw control."""
+    """Build a folium map with a rectangle/polygon draw control.
+
+    Points are coloured by ``metric`` on a continuous scale, or - when
+    ``color_by`` names an identity column such as ``pci`` - categorically, with
+    the eight most common values taking the categorical slots and the rest
+    folding into a muted "Other".
+    """
     import folium
     from folium.plugins import Draw
 
@@ -100,7 +116,14 @@ def build_map(
 
     plotted = downsample(geo.sort_values("time", na_position="last"), max_points)
     values = pd.to_numeric(plotted[metric], errors="coerce").to_numpy(dtype="float64")
-    edges, colors = color_bins(values, scale=scale, midpoint=midpoint)
+
+    categorical = bool(color_by) and color_by in plotted.columns
+    if categorical:
+        identities = plotted[color_by].to_numpy()
+        order, palette, other_count = categorical_bins(identities, mode=mode)
+        edges, colors = [], []
+    else:
+        edges, colors = color_bins(values, scale=scale, midpoint=midpoint)
 
     layer = folium.FeatureGroup(name=metric_label, show=True)
     lat = pd.to_numeric(plotted["lat"], errors="coerce").to_numpy()
@@ -118,13 +141,17 @@ def build_map(
             f"<b>{metric_label}: {value:.2f}</b><br>{coll[i]}<br>"
             f"PCI {pci[i]} · ARFCN {freq[i]}<br>{times[i]}"
         )
+        if categorical:
+            fill = palette.get(identities[i], OTHER_COLOR)
+        else:
+            fill = color_for(value, edges, colors)
         folium.CircleMarker(
             location=(lat[i], lon[i]),
             radius=radius,
             color=None,
             weight=0,
             fill=True,
-            fill_color=color_for(value, edges, colors),
+            fill_color=fill,
             fill_opacity=0.85,
             tooltip=folium.Tooltip(tooltip, sticky=True),
         ).add_to(layer)
@@ -142,9 +169,14 @@ def build_map(
 
     import branca
 
-    fmap.get_root().html.add_child(
-        branca.element.Element(legend_html(edges, colors, metric_label, mode))
-    )
+    if categorical:
+        legend = categorical_legend_html(
+            order, palette, color_by_label or color_by, mode, other_count,
+            value_prefix=f"{color_by_label or color_by} " if color_by_label else "",
+        )
+    else:
+        legend = legend_html(edges, colors, metric_label, mode)
+    fmap.get_root().html.add_child(branca.element.Element(legend))
     if box:
         fmap.fit_bounds([box[0], box[1]])
     return fmap, edges, colors

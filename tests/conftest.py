@@ -67,7 +67,23 @@ def write_dataset(directory: Path, ds: Dataset, rows: int = 240, seed: int = 7) 
                 else band_value
             )
             if "cell_type" in ds.dims:
-                row[ds.dims["cell_type"]] = "MCG PCell"
+                # every 9th row is an aggregated carrier, not the serving cell
+                row[ds.dims["cell_type"]] = "MCG SCell1" if i % 9 == 8 else "MCG PCell"
+            # cell identity: a handful of eNBs, each with a couple of sectors
+            enb = 11000 + (i // 7) % 5
+            sector = 10 + (i // 3) % 4
+            if "enb_sector" in ds.dims:
+                row[ds.dims["enb_sector"]] = f"{enb}/{sector}"
+            if "enb" in ds.dims:
+                row[ds.dims["enb"]] = enb
+            if "cell_id" in ds.dims:
+                # NR reports the full NCGI; LTE an ECI. Keep NR consistent with
+                # gNB-Id so the derived sector round-trips.
+                row[ds.dims["cell_id"]] = (
+                    enb * 256 + sector if ds.tech == "NR" else 2895000 + enb
+                )
+            if "ssb" in ds.dims:
+                row[ds.dims["ssb"]] = (i % 2) * 2
             for metric, source_col in ds.metrics.items():
                 lo, hi = METRIC_RANGES[metric]
                 # every 17th row leaves the metric blank, like the real exports

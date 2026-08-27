@@ -116,3 +116,51 @@ def test_app_starts_against_the_real_export():
     app = _run(REAL_DATA, timeout=300)
     _assert_clean(app)
     assert int(app.metric[0].value.replace(",", "")) > 0
+
+
+def test_cell_identity_tab_renders_both_views(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+
+    labels = [t.label for t in app.tabs]
+    assert any("Cell identity" in l for l in labels)
+
+    # timeline is the default view, with its four summary metrics
+    view = app.radio(key="identity_view")
+    assert view.value == "Timeline"
+    assert any("Distinct" in m.label for m in app.metric)
+
+    level = app.selectbox(key="identity_level")
+    # technology is "All", so the NR-only SSB index is offered too
+    assert level.options == ["eNB / gNB-Id", "Sector Id", "PCI", "SSB Index"]
+    level.set_value("pci").run()
+    _assert_clean(app)
+
+    app.selectbox(key="identity_order").set_value("dwell").run()
+    _assert_clean(app)
+    app.selectbox(key="identity_x").set_value("absolute").run()
+    _assert_clean(app)
+
+    view.set_value("Hierarchy").run()
+    _assert_clean(app)
+    hierarchy = app.multiselect(key="identity_hierarchy")
+    assert hierarchy.value == ["enb", "sector", "pci"]
+
+
+def test_cell_identity_survives_a_metric_with_no_identity_columns(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    # throughput comes from the PDSCH/PUSCH exports, which carry no eNB-Id -
+    # the tab must still work, reading the Radio exports underneath
+    app.radio(key="tech_choice").set_value("LTE").run()
+    app.selectbox(key="metric_choice").set_value("throughput").run()
+    _assert_clean(app)
+    assert app.selectbox(key="identity_level").options == [
+        "eNB / gNB-Id",
+        "Sector Id",
+        "PCI",
+    ]
