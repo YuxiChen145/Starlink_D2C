@@ -2,10 +2,10 @@
 
 An interactive platform for exploring Qualipoc drive/walk-test exports from the
 Starlink Direct-to-Cell measurement campaign: pick any combination of
-collections, filter down to the cells you care about, and compare them on a map
-or as CDF curves on one canvas.
+collections, filter down to the cells you care about, and compare them on a map,
+as CDF curves on one canvas, or by which cells were serving and for how long.
 
-![tabs: Map · CDF curves · Statistics · Data](docs/screenshot-cdf.png)
+![The CDF tab: twelve per-PCI curves from 80,866 RSRP samples](docs/screenshot-cdf.png)
 
 ## Quick start
 
@@ -50,7 +50,8 @@ aggregated, on the same canvas deliberately.
 
 **Region selection.** On the Map tab, use the rectangle or polygon tool at the
 top-left. Every shape you draw is applied (as a union) to *all* tabs — map, CDF,
-statistics and the raw data export. "Clear" in the sidebar removes them.
+cell identity, statistics and the raw data export. "Clear" in the sidebar
+removes them.
 Point-in-polygon is an even-odd ray cast, so concave shapes work correctly.
 
 **Visualisations**
@@ -95,15 +96,21 @@ it is the number of *distinct* cells that separates them.
 
 Two views:
 
-- **Timeline** — one bar per continuous stretch on a single identity, ordered
-  by first appearance. A moving constellation draws a staircase; a terrestrial
-  cell draws one long bar. Up to six collections at a time, each its own
-  colour, sharing an *active-elapsed* x axis (see below). Past eight
-  collections the rest fold into one muted "Other" rather than cycling hues.
+- **Timeline** — one bar per continuous stretch on a single identity. A moving
+  constellation draws a staircase; a terrestrial cell draws one long bar. Rows
+  are ordered by first appearance (or by dwell, or numerically) and capped by
+  **Max rows**, longest-held first. Collections share one *active-elapsed* x
+  axis (see below) and each takes a colour; past eight, the rest fold into one
+  muted "Other" rather than cycling hues. Four figures above the plot: distinct
+  identities, dwell runs, median dwell and changes per minute.
 - **Hierarchy** — a node-link tree of eNB → sector → PCI, branches ordered
-  longest-held first and nodes sized by dwell. On D2C the median eNB-Id carries
-  about 2 sectors and each sector maps to essentially one PCI, so a PCI is a
-  beam; terrestrial sectorisation looks different.
+  longest-held first and nodes sized by dwell, with held time written on the
+  outermost level and on the leaves. On D2C the median eNB-Id carries about
+  2 sectors and each sector maps to essentially one PCI, so a PCI is a beam;
+  terrestrial sectorisation looks different.
+
+Both views take whatever the sidebar filters leave — there is no second
+collection picker here.
 
 Details that matter for the numbers:
 
@@ -170,9 +177,10 @@ qpviz/
   schema.py          the ten exports and their column maps; metric registry
   loader.py          CSV -> canonical frame, dtype coercion, parquet cache
   filters.py         filter set, point-in-polygon region test
-  identity.py        serving-cell scope, dwell runs, identity hierarchy
+  identity.py        serving-cell scope, dwell runs, dwell-weighted hierarchy
   stats.py           ECDF + grouped summary statistics
-  charts.py          plotly CDF figure, map colour binning, legend
+  charts.py          plotly figures: CDF, dwell timeline, identity tree;
+                     map colour binning and legends
   mapview.py         folium map, draw control, GeoJSON -> polygons
   theme.py           colour tokens (categorical / sequential / diverging)
 tests/               pytest suite, incl. a headless run of the whole app
