@@ -52,11 +52,92 @@ def test_downsample_thins_but_never_grows():
     assert len(charts.downsample(frame, 5000)) == 1000
 
 
-def test_legend_html_lists_every_bin():
+def test_legend_is_a_colour_bar_with_one_stop_per_bin():
     edges, colors = charts.color_bins(VALUES, scale="sequential")
     html = charts.legend_html(edges, colors, "RSRP (dBm)")
-    assert html.count("border-radius:2px") == len(colors)
+    assert "linear-gradient(to top," in html
+    for color in colors:
+        assert color in html
+    # hard stops, not a smooth blend: every band declares a start and an end
+    assert html.count("%,") + 1 >= len(colors)
     assert "RSRP (dBm)" in html
+
+
+def test_legend_bands_are_proportional_to_their_value_range():
+    edges, colors = charts.color_bins(VALUES, scale="diverging", midpoint=-95.0)
+    html = charts.legend_html(edges, colors, "RSRP")
+    gradient = html.split("linear-gradient(to top,")[1].split(")")[0]
+    stops = [s.strip().split() for s in gradient.split(",")]
+    starts = [float(p[1].rstrip("%")) for p in stops]
+    ends = [float(p[2].rstrip("%")) for p in stops]
+    assert starts[0] == pytest.approx(0.0)
+    assert ends[-1] == pytest.approx(100.0)
+    # contiguous, ascending, and matching the width of each bin
+    span = edges[-1] - edges[0]
+    for i in range(len(colors)):
+        assert ends[i] == pytest.approx(starts[i + 1] if i + 1 < len(colors) else 100.0)
+        expected = (edges[i + 1] - edges[i]) / span * 100.0
+        # the CSS carries three decimals, so compare at that resolution
+        assert ends[i] - starts[i] == pytest.approx(expected, abs=0.01)
+
+
+def test_legend_ticks_are_round_numbers_inside_the_range():
+    edges, colors = charts.color_bins(VALUES, scale="sequential")
+    html = charts.legend_html(edges, colors, "RSRP")
+    assert 2 <= html.count("translateY(50%)") <= 7
+    # VALUES spans -120..-70, so the bar lands on a step of 10
+    values, step = charts.nice_ticks(float(edges[0]), float(edges[-1]))
+    assert values == [-110.0, -100.0, -90.0, -80.0]
+    assert step == 10.0
+    for value in values:
+        assert charts._tick_text(value, step) in html
+
+
+@pytest.mark.parametrize(
+    "lo,hi",
+    [
+        (-131.3, -98.6),  # RSRP
+        (-20.3, -7.8),  # RSRQ
+        (-2.1, 26.0),  # SINR
+        (0.5, 27.4),  # MCS
+        (0.0, 12.1),  # BLER
+        (1296.8, 35867.8),  # throughput in kbps
+        (0.0, 0.004),  # a degenerate, very small range
+    ],
+)
+def test_nice_ticks_stay_inside_the_range_and_are_evenly_stepped(lo, hi):
+    values, step = charts.nice_ticks(lo, hi)
+    assert 2 <= len(values) <= 7
+    assert all(lo <= v <= hi for v in values)
+    gaps = [b - a for a, b in zip(values, values[1:])]
+    assert all(g == pytest.approx(step) for g in gaps)
+
+
+def test_nice_ticks_survives_a_zero_width_range():
+    values, step = charts.nice_ticks(5.0, 5.0)
+    assert step > 0
+    assert all(v == pytest.approx(5.0) for v in values)
+
+
+def test_a_two_and_a_half_step_keeps_one_decimal():
+    assert charts._tick_text(12.5, 2.5) == "12.5"
+    assert charts._tick_text(12.0, 5.0) == "12"
+    assert charts._tick_text(0.25, 0.05) == "0.25"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (-113.25, "-113"),  # RSRP: three significant digits, no decimal noise
+        (12.0, "12.0"),  # SINR: one decimal
+        (-3.75, "-3.8"),
+        (305.0, "305"),
+        (1234.0, "1.2k"),  # throughput in kbps
+        (40500.0, "40k"),
+    ],
+)
+def test_tick_text_stays_compact(value, expected):
+    assert charts._tick_text(value) == expected
 
 
 def _curves(n):

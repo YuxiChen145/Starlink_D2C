@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -163,31 +164,103 @@ def color_for(value: float, edges: Sequence[float], colors: Sequence[str]) -> st
     return colors[min(max(idx, 0), len(colors) - 1)]
 
 
+def _nice_step(span: float, max_ticks: int = 7) -> float:
+    """The finest round step (1, 2, 2.5 or 5 x a power of ten) that still fits
+    within ``max_ticks`` labels across ``span``."""
+    if span <= 0 or not math.isfinite(span):
+        return 1.0
+    magnitude = 10.0 ** math.floor(math.log10(span))
+    for scale in (magnitude / 100, magnitude / 10, magnitude, magnitude * 10):
+        for multiple in (1.0, 2.0, 2.5, 5.0):
+            step = multiple * scale
+            if step > 0 and math.floor(span / step) + 1 <= max_ticks:
+                return step
+    return span
+
+
+def nice_ticks(lo: float, hi: float, max_ticks: int = 7) -> Tuple[List[float], float]:
+    """Round tick values inside ``[lo, hi]``, plus the step used."""
+    step = _nice_step(hi - lo, max_ticks)
+    first = math.ceil(lo / step) * step
+    ticks: List[float] = []
+    value = first
+    while value <= hi + step * 1e-9:
+        # snap away -0.0 and floating-point dust like 4.999999999
+        ticks.append(round(value / step) * step + 0.0)
+        value += step
+    return ticks, step
+
+
+def _tick_text(value: float, step: Optional[float] = None) -> str:
+    """Compact tick label - throughput runs to tens of thousands of kbps."""
+    magnitude = abs(value)
+    if magnitude >= 10_000:
+        return f"{value / 1000:.0f}k"
+    if magnitude >= 1_000:
+        text = f"{value / 1000:.1f}k"
+        return text.replace(".0k", "k")
+    if step is not None:
+        if step < 1:
+            decimals = min(3, int(math.ceil(-math.log10(step))))
+        else:
+            # a 2.5-style step needs one decimal; 1/2/5 steps do not
+            decimals = 1 if abs(step - round(step)) > 1e-9 else 0
+        return f"{value:.{decimals}f}"
+    if magnitude >= 100:
+        return f"{value:.0f}"
+    return f"{value:.1f}"
+
+
 def legend_html(
     edges: Sequence[float],
     colors: Sequence[str],
     title: str,
     mode: str = "light",
+    height: int = 168,
 ) -> str:
+    """A vertical colour bar with round-number ticks.
+
+    The bar uses hard gradient stops rather than a smooth blend, and each band
+    is as tall as the share of the value range it covers - so the bar is a
+    faithful picture of the bins the markers are actually coloured by.
+    """
     chrome = CHROME.get(mode, CHROME["light"])
-    rows = []
+    lo, hi = float(edges[0]), float(edges[-1])
+    span = (hi - lo) or 1.0
+
+    stops = []
     for i, color in enumerate(colors):
-        lo, hi = edges[i], edges[i + 1]
-        rows.append(
-            f'<div style="display:flex;align-items:center;gap:6px;line-height:1.5">'
-            f'<span style="width:14px;height:10px;border-radius:2px;background:{color};'
-            f'box-shadow:0 0 0 1px rgba(0,0,0,.12)"></span>'
-            f'<span style="font-variant-numeric:tabular-nums">{lo:.1f} – {hi:.1f}</span>'
-            f"</div>"
+        start = (float(edges[i]) - lo) / span * 100.0
+        end = (float(edges[i + 1]) - lo) / span * 100.0
+        stops.append(f"{color} {start:.3f}% {end:.3f}%")
+    gradient = "linear-gradient(to top, " + ", ".join(stops) + ")"
+
+    values, step = nice_ticks(lo, hi)
+    ticks = []
+    for value in values:
+        position = (value - lo) / span * 100.0
+        ticks.append(
+            f'<div style="position:absolute;bottom:{position:.3f}%;'
+            f'transform:translateY(50%);white-space:nowrap;line-height:1">'
+            f'<span style="display:inline-block;width:4px;height:1px;'
+            f'background:{chrome["axis"]};vertical-align:middle;margin-right:5px">'
+            f'</span>{_tick_text(value, step)}</div>'
         )
+
     return (
         f'<div style="position:fixed;bottom:24px;left:12px;z-index:9999;'
         f'background:{chrome["surface"]};color:{chrome["text_primary"]};'
-        f'border:1px solid rgba(11,11,11,.12);border-radius:8px;padding:8px 10px;'
-        f'font:11px {FONT_FAMILY};box-shadow:0 2px 8px rgba(0,0,0,.12)">'
-        f'<div style="font-weight:600;margin-bottom:4px">{title}</div>'
-        + "".join(rows)
-        + "</div>"
+        f'border:1px solid rgba(11,11,11,.12);border-radius:8px;padding:10px 12px;'
+        f'font-family:{FONT_FAMILY};font-size:11px;line-height:1.4;'
+        f'box-shadow:0 2px 8px rgba(0,0,0,.12);'
+        f'font-variant-numeric:tabular-nums">'
+        f'<div style="font-weight:600;font-size:12px;margin-bottom:8px">{title}</div>'
+        f'<div style="display:flex;gap:2px;height:{height}px">'
+        f'<div style="width:12px;height:100%;border-radius:3px;background:{gradient};'
+        f'box-shadow:0 0 0 1px rgba(11,11,11,.12)"></div>'
+        f'<div style="position:relative;height:100%;color:{chrome["text_secondary"]}">'
+        + "".join(ticks)
+        + "</div></div></div>"
     )
 
 

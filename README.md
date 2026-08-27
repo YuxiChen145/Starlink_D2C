@@ -57,7 +57,7 @@ Point-in-polygon is an even-odd ray cast, so concave shapes work correctly.
 
 | Tab | What it shows |
 |---|---|
-| Map | Each sample coloured by the chosen metric, on OSM / Carto / Esri satellite tiles. Diverging red↔blue about a midpoint you set, or a single-hue sequential ramp. Hover any point for its value, collection, PCI, carrier and timestamp. |
+| Map | Each sample coloured by the chosen metric, on OSM / Carto / Esri satellite tiles. Diverging red↔blue about a midpoint you set, or a single-hue sequential ramp, with a colour bar legend (round-number ticks; each band as tall as the value range it covers). Hover any point for its value, collection, PCI, carrier and timestamp. |
 | CDF curves | One ECDF per group, all on the same canvas. CCDF toggle. |
 | Statistics | Per-group n / mean / std / min / P5 / P10 / P50 / P90 / P95 / max, downloadable as CSV. |
 | Data | The filtered rows, downloadable as CSV. |
