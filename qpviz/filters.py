@@ -1,0 +1,160 @@
+"""Filtering: collections, PCI, EARFCN/ARFCN, band and a drawn map region."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+
+LatLon = Tuple[float, float]
+
+
+# --------------------------------------------------------------------------- #
+# Geometry
+# --------------------------------------------------------------------------- #
+
+
+def points_in_polygon(
+    lat: Sequence[float], lon: Sequence[float], polygon: Sequence[LatLon]
+) -> np.ndarray:
+    """Vectorised even-odd (ray casting) point-in-polygon test.
+
+    ``polygon`` is a sequence of ``(lat, lon)`` vertices; it may or may not
+    repeat the first vertex at the end.  Points with NaN coordinates are False.
+    """
+    lat_arr = np.asarray(lat, dtype="float64")
+    lon_arr = np.asarray(lon, dtype="float64")
+    inside = np.zeros(lat_arr.shape, dtype=bool)
+
+    verts = [tuple(map(float, v)) for v in polygon]
+    if len(verts) > 1 and verts[0] == verts[-1]:
+        verts = verts[:-1]
+    if len(verts) < 3:
+        return inside
+
+    valid = np.isfinite(lat_arr) & np.isfinite(lon_arr)
+    x = lon_arr
+    y = lat_arr
+
+    n = len(verts)
+    for i in range(n):
+        y1, x1 = verts[i]
+        y2, x2 = verts[(i + 1) % n]
+        if y1 == y2:
+            continue
+        straddles = (y1 > y) != (y2 > y)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            x_cross = (x2 - x1) * (y - y1) / (y2 - y1) + x1
+        inside ^= straddles & (x < x_cross)
+
+    return inside & valid
+
+
+def bbox_polygon(
+    lat_min: float, lat_max: float, lon_min: float, lon_max: float
+) -> List[LatLon]:
+    return [
+        (lat_min, lon_min),
+        (lat_min, lon_max),
+        (lat_max, lon_max),
+        (lat_max, lon_min),
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Filter set
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Filters:
+    """A ``None`` (or empty) list means "do not filter on this dimension"."""
+
+    collections: Optional[Sequence[str]] = None
+    bands: Optional[Sequence[str]] = None
+    freqs: Optional[Sequence[int]] = None
+    pcis: Optional[Sequence[int]] = None
+    techs: Optional[Sequence[str]] = None
+    sources: Optional[Sequence[str]] = None
+    #: list of polygons, each a list of ``(lat, lon)`` vertices; OR-ed together
+    regions: List[List[LatLon]] = field(default_factory=list)
+    time_range: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
+    #: drop rows whose ``metric`` value is NaN
+    metric: Optional[str] = None
+    #: columns that must be non-null (e.g. drop rows with an unknown PCI)
+    require: Sequence[str] = ()
+    #: keep rows without GPS even when a region is drawn
+    keep_ungeolocated: bool = False
+
+    def describe(self) -> str:
+        bits = []
+        for name, values in (
+            ("collection", self.collections),
+            ("band", self.bands),
+            ("freq", self.freqs),
+            ("PCI", self.pcis),
+        ):
+            if values:
+                bits.append(f"{len(values)} {name}(s)")
+        if self.regions:
+            bits.append(f"{len(self.regions)} region(s)")
+        return ", ".join(bits) if bits else "no filters"
+
+
+def _isin(series: pd.Series, values: Sequence) -> pd.Series:
+    return pd.Series(series).isin(list(values)).to_numpy()
+
+
+def apply_filters(frame: pd.DataFrame, filters: Filters) -> pd.DataFrame:
+    """Apply ``filters`` to a canonical frame and return the surviving rows."""
+    if frame.empty:
+        return frame
+
+    mask = np.ones(len(frame), dtype=bool)
+
+    for column, values in (
+        ("collection", filters.collections),
+        ("band", filters.bands),
+        ("freq", filters.freqs),
+        ("pci", filters.pcis),
+        ("tech", filters.techs),
+        ("source", filters.sources),
+    ):
+        if values:
+            mask &= _isin(frame[column], values)
+
+    if filters.metric and filters.metric in frame.columns:
+        mask &= frame[filters.metric].notna().to_numpy()
+
+    for column in filters.require or ():
+        if column in frame.columns:
+            mask &= frame[column].notna().to_numpy()
+
+    if filters.time_range and "time" in frame.columns:
+        start, end = filters.time_range
+        times = pd.to_datetime(frame["time"], errors="coerce")
+        mask &= ((times >= start) & (times <= end)).to_numpy()
+
+    if filters.regions:
+        lat = frame["lat"].to_numpy(dtype="float64", na_value=np.nan)
+        lon = frame["lon"].to_numpy(dtype="float64", na_value=np.nan)
+        region_mask = np.zeros(len(frame), dtype=bool)
+        for polygon in filters.regions:
+            region_mask |= points_in_polygon(lat, lon, polygon)
+        if filters.keep_ungeolocated:
+            region_mask |= ~(np.isfinite(lat) & np.isfinite(lon))
+        mask &= region_mask
+
+    return frame.loc[mask]
+
+
+def geolocated(frame: pd.DataFrame) -> pd.DataFrame:
+    """Rows that carry usable GPS coordinates."""
+    if frame.empty:
+        return frame
+    lat = pd.to_numeric(frame["lat"], errors="coerce")
+    lon = pd.to_numeric(frame["lon"], errors="coerce")
+    keep = lat.notna() & lon.notna() & (lat.abs() > 1e-9) & (lon.abs() > 1e-9)
+    return frame.loc[keep.to_numpy()]

@@ -1,0 +1,8 @@
+# Runtime dependencies for the Starlink D2C measurement explorer.
+streamlit>=1.50
+streamlit-folium>=0.20
+folium>=0.15
+plotly>=5.20
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
