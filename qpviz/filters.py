@@ -152,6 +152,37 @@ def apply_filters(frame: pd.DataFrame, filters: Filters) -> pd.DataFrame:
     return frame.loc[mask]
 
 
+def shared_values(
+    frame: pd.DataFrame, column: str, group: str = "collection"
+) -> List:
+    """Values of ``column`` that appear in **every** group.
+
+    The union of PCIs across several collections answers "what did we see?";
+    the intersection answers "which cells can I compare like for like?" - only
+    those appear in all of them.
+
+    A group that carries no value at all for ``column`` is skipped rather than
+    emptying the result, so one PCI-less collection cannot silently zero the
+    shared set.
+    """
+    if frame.empty or column not in frame.columns or group not in frame.columns:
+        return []
+
+    sets = []
+    for _, sub in frame.groupby(group, observed=True, sort=True):
+        values = set(pd.Series(sub[column]).dropna().unique().tolist())
+        if values:
+            sets.append(values)
+    if not sets:
+        return []
+
+    common = set.intersection(*sets)
+    try:
+        return sorted(common)
+    except TypeError:  # pragma: no cover - mixed types
+        return sorted(common, key=str)
+
+
 def geolocated(frame: pd.DataFrame) -> pd.DataFrame:
     """Rows that carry usable GPS coordinates."""
     if frame.empty:

@@ -138,3 +138,66 @@ def test_source_filter(fixture_dir, cache_dir):
     both = _load(fixture_dir, ["lte_pdsch_pc", "lte_pusch_pc"], cache_dir)
     out = flt.apply_filters(both, flt.Filters(sources=["lte_pusch_pc"]))
     assert set(out["source"].unique()) == {"lte_pusch_pc"}
+
+
+# --------------------------------------------------------------------------- #
+# Shared values across collections
+# --------------------------------------------------------------------------- #
+
+
+def _pci_frame(mapping):
+    """{collection: [pci, ...]} -> a frame shaped like the canonical one."""
+    rows = []
+    for collection, pcis in mapping.items():
+        for pci in pcis:
+            rows.append({"collection": collection, "pci": pci})
+    return pd.DataFrame(rows)
+
+
+def test_shared_values_is_the_intersection_across_collections():
+    frame = _pci_frame({"A": [1, 2, 3, 3], "B": [2, 3, 4], "C": [3, 2, 9]})
+    assert flt.shared_values(frame, "pci") == [2, 3]
+
+
+def test_shared_values_equals_the_union_for_a_single_collection():
+    frame = _pci_frame({"A": [5, 1, 5, 9]})
+    assert flt.shared_values(frame, "pci") == [1, 5, 9]
+
+
+def test_shared_values_can_be_empty():
+    frame = _pci_frame({"A": [1, 2], "B": [3, 4]})
+    assert flt.shared_values(frame, "pci") == []
+
+
+def test_shared_values_ignores_nulls_and_skips_valueless_collections():
+    frame = _pci_frame({"A": [1, 2, None], "B": [2, None]})
+    assert flt.shared_values(frame, "pci") == [2]
+    # a collection with nothing but nulls must not zero the whole result
+    frame = _pci_frame({"A": [1, 2], "B": [2], "C": [None, None]})
+    assert flt.shared_values(frame, "pci") == [2]
+
+
+def test_shared_values_handles_missing_columns_and_empty_frames():
+    assert flt.shared_values(pd.DataFrame(), "pci") == []
+    assert flt.shared_values(_pci_frame({"A": [1]}), "nope") == []
+    assert flt.shared_values(pd.DataFrame({"pci": [1]}), "pci") == []
+
+
+def test_shared_values_works_on_other_columns(fixture_dir, cache_dir):
+    from qpviz.loader import load as _load
+
+    frame = _load(fixture_dir, ["lte_radio"], cache_dir)
+    # the fixture walks every PCI and both carriers through every collection
+    assert flt.shared_values(frame, "pci") == [123, 456, 790]
+    assert flt.shared_values(frame, "freq") == [2175, 8665]
+    # and a collection restricted to one PCI shares only that one
+    one = frame[(frame["collection"] != "Collection_A") | (frame["pci"] == 123)]
+    assert flt.shared_values(one, "pci") == [123]
+
+
+def test_shared_values_on_the_real_shape_is_a_subset_of_the_union(fixture_dir, cache_dir):
+    from qpviz.loader import load as _load
+
+    frame = _load(fixture_dir, ["lte_radio", "nr_radio"], cache_dir)
+    union = set(pd.Series(frame["pci"]).dropna().unique())
+    assert set(flt.shared_values(frame, "pci")) <= union

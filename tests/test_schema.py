@@ -38,6 +38,25 @@ def test_datasets_with_metric_filters_by_tech():
     }
 
 
+def test_offered_and_hidden_metrics_partition_the_registry():
+    assert set(schema.METRIC_ORDER) | set(schema.HIDDEN_METRICS) == set(schema.METRICS)
+    assert not set(schema.METRIC_ORDER) & set(schema.HIDDEN_METRICS)
+
+
+def test_hidden_metrics_are_never_offered():
+    every_dataset = [d.key for d in schema.DATASETS]
+    offered = schema.metrics_available(every_dataset)
+    assert offered == schema.METRIC_ORDER
+    for metric in schema.HIDDEN_METRICS:
+        assert metric not in offered
+        # still mapped by the datasets, so restoring one needs no other change
+        assert schema.datasets_with_metric(metric)
+
+
+def test_pucch_carries_only_hidden_metrics_so_it_is_not_reachable():
+    assert schema.metrics_available(["lte_pucch"]) == []
+
+
 def test_metrics_available_is_in_display_order():
     got = schema.metrics_available(["lte_radio", "lte_pusch_pc"])
     assert got == [m for m in schema.METRIC_ORDER if m in got]

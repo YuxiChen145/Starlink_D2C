@@ -53,7 +53,7 @@ METRICS: Dict[str, Metric] = {
     ]
 }
 
-#: Order the metric picker is shown in.
+#: Metrics offered in the picker, in display order.
 METRIC_ORDER: List[str] = [
     "rsrp",
     "rsrq",
@@ -62,6 +62,12 @@ METRIC_ORDER: List[str] = [
     "mcs",
     "throughput",
     "bler",
+]
+
+#: Still parsed, cached and filterable, but not offered in the metric picker
+#: for now. Moving a key back into METRIC_ORDER is all it takes to restore it -
+#: the datasets already map the underlying columns.
+HIDDEN_METRICS: List[str] = [
     "cqi",
     "tx_power",
     "pathloss",

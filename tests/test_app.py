@@ -181,3 +181,62 @@ def test_cell_identity_survives_a_metric_with_no_identity_columns(
         "Sector Id",
         "PCI",
     ]
+
+
+def test_metric_picker_offers_only_the_metrics_in_metric_order(
+    fixture_dir, monkeypatch, tmp_path
+):
+    from qpviz.schema import HIDDEN_METRICS, METRICS
+
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    options = app.selectbox(key="metric_choice").options
+    for metric in HIDDEN_METRICS:
+        assert METRICS[metric].axis_label not in options
+    assert "CQI (index)" not in options
+    assert "Tx Power (dBm)" not in options
+    assert "DL Pathloss (dB)" not in options
+
+
+def test_pci_set_modes_offer_the_union_and_the_intersection(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+
+    mode = app.radio(key="f_pci_mode")
+    assert mode.value == "Any collection"
+    # AppTest renders option labels, so these come back as strings
+    assert app.multiselect(key="f_pcis").options == ["123", "456", "790"]
+
+    # every fixture collection carries all three PCIs, so the shared set matches
+    mode.set_value("Shared by all").run()
+    _assert_clean(app)
+    assert app.multiselect(key="f_pcis").options == ["123", "456", "790"]
+
+    # drop a collection down to a single PCI and only that one stays shared
+    app.multiselect(key="f_collections").select("Collection_A").run()
+    _assert_clean(app)
+    assert app.multiselect(key="f_pcis").options == ["123", "456", "790"]
+
+
+def test_shared_mode_restricts_the_data_to_the_intersection(
+    fixture_dir, monkeypatch, tmp_path
+):
+    """Shared mode filters even with nothing picked - that is the point."""
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    everything = int(app.metric[0].value.replace(",", ""))
+
+    app.radio(key="f_pci_mode").set_value("Shared by all").run()
+    _assert_clean(app)
+    # all three PCIs are shared here, so the sample count is unchanged...
+    assert int(app.metric[0].value.replace(",", "")) == everything
+
+    # ...but narrowing to one PCI in one collection shrinks it
+    app.multiselect(key="f_pcis").select(123).run()
+    _assert_clean(app)
+    assert int(app.metric[0].value.replace(",", "")) < everything

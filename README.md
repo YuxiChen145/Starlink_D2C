@@ -48,6 +48,15 @@ downlink into one distribution. Direction and Data source are also available
 as CDF grouping dimensions, so you can put DL and UL, or per-carrier and
 aggregated, on the same canvas deliberately.
 
+**Union or intersection of PCIs.** With several collections selected, the PCI
+filter has two modes. *Any collection* lists every PCI that turned up anywhere.
+*Shared by all* lists only the PCIs present in **every** selected collection —
+the cells you can compare like for like — and restricts the data to that set
+even with nothing picked. The caption under the filter always shows both counts,
+and the gap between them is itself a finding: two D2C walking collections saw
+106 PCIs between them but only **3** in common, while three terrestrial
+T-Mobile collections shared **11** of their 43.
+
 **Region selection.** On the Map tab, use the rectangle or polygon tool at the
 top-left. Every shape you draw is applied (as a union) to *all* tabs — map, CDF,
 cell identity, statistics and the raw data export. "Clear" in the sidebar
@@ -64,9 +73,12 @@ Point-in-polygon is an even-odd ray cast, so concave shapes work correctly.
 | Statistics | Per-group n / mean / std / min / P5 / P10 / P50 / P90 / P95 / max, downloadable as CSV. |
 | Data | The filtered rows, downloadable as CSV. |
 
-**Metrics** — RSRP, RSRQ, RSSI, SINR, MCS, Throughput, plus BLER, CQI, Tx power
-and DL pathloss where the export carries them. The metric picker only offers
-what the selected datasets actually contain.
+**Metrics** — RSRP, RSRQ, RSSI, SINR, MCS, Throughput and BLER, wherever the
+export carries them; the picker only offers what the selected technology
+actually contains. CQI, Tx power and DL pathloss are still parsed and cached
+but not offered — move the key from `HIDDEN_METRICS` back into `METRIC_ORDER`
+in `qpviz/schema.py` to bring one back. With those hidden, LTE PUCCH (which
+carries nothing else) is not currently reachable as a data source.
 
 ### CDF curves: grouping
 
@@ -140,12 +152,12 @@ row came from.
 | LTE Radio Neighbor | LTE | DL | RSRP, RSRQ, RSSI |
 | LTE PDSCH [per-carrier] | LTE | DL | MCS, throughput, BLER |
 | LTE PDSCH [aggregated] | LTE | DL | MCS, throughput, BLER |
-| LTE PUSCH [per-carrier] | LTE | UL | MCS, throughput, Tx power, pathloss |
-| LTE PUCCH | LTE | UL | CQI, Tx power |
+| LTE PUSCH [per-carrier] | LTE | UL | MCS, throughput (+ Tx power, pathloss — hidden) |
+| LTE PUCCH | LTE | UL | CQI, Tx power — both hidden, so unreachable for now |
 | NR Radio [connected] | NR | DL | SS-RSRP, SS-RSRQ, SS-SINR (+ gNB-Id, Cell Id, SSB Index) |
 | NR PDSCH [per-carrier] | NR | DL | MCS, throughput, SINR, BLER |
 | NR PDSCH [aggregated] | NR | DL | MCS, throughput, BLER |
-| NR PUSCH [per-carrier] | NR | UL | MCS, throughput, Tx power, pathloss |
+| NR PUSCH [per-carrier] | NR | UL | MCS, throughput (+ Tx power, pathloss — hidden) |
 
 Things worth knowing about the data:
 
@@ -155,7 +167,8 @@ Things worth knowing about the data:
 - **Bands are normalised** to `B25` / `n25` whether the raw column said `25`,
   `LTE E-UTRA 25` or `5G NR n25`; anything unparseable becomes `Unknown`.
 - **LTE PUCCH has no GPS columns.** Those rows never appear on the map, and a
-  drawn region drops them unless you tick "Keep rows without GPS".
+  drawn region drops them unless you tick "Keep rows without GPS". (Moot while
+  its only two metrics are hidden.)
 - **LTE Radio Neighbor leaves PCI and EARFCN blank** on most rows. "Require a
   known PCI and EARFCN" (on by default) keeps those rows from collapsing into
   one large `n/a` curve.

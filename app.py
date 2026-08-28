@@ -163,8 +163,38 @@ with st.sidebar:
     freqs = multiselect_all(freq_label, loader.options(step2, "freq"), "f_freqs")
     step3 = flt.apply_filters(step2, flt.Filters(freqs=freqs))
 
-    pci_options = loader.options(step3, "pci")
-    pcis = multiselect_all(f"PCI ({len(pci_options)} available)", pci_options, "f_pcis")
+    # Two ways to look at PCIs across several collections: everything that
+    # turned up anywhere, or only the cells common to all of them - the set you
+    # can compare like for like.
+    union_pcis = loader.options(step3, "pci")
+    shared_pcis = flt.shared_values(step3, "pci")
+    n_collections = int(step3["collection"].nunique()) if not step3.empty else 0
+
+    pci_mode = st.radio(
+        "PCI set",
+        ["Any collection", "Shared by all"],
+        horizontal=True,
+        key="f_pci_mode",
+        help="“Any collection” lists every PCI seen in the selected "
+             "collections. “Shared by all” lists only those present in every "
+             "one of them, and restricts the data to that set even with "
+             "nothing picked below.",
+    )
+    shared_mode = pci_mode == "Shared by all"
+    pci_options = shared_pcis if shared_mode else union_pcis
+
+    pcis = multiselect_all("PCI", pci_options, "f_pcis")
+    st.caption(
+        f"{len(union_pcis)} PCI across {n_collections} collection"
+        f"{'' if n_collections == 1 else 's'} · {len(shared_pcis)} shared by all"
+    )
+
+    if shared_mode and not shared_pcis:
+        st.warning("No PCI appears in every selected collection.")
+    # PCIs are non-negative, so this matches nothing: "shared by all" with an
+    # empty shared set has to show no data, not all of it.
+    _NO_PCI = [-1]
+    effective_pcis = pcis or (shared_pcis or _NO_PCI if shared_mode else [])
 
     drop_unknown = st.checkbox(
         f"Require a known PCI and {freq_prefix}",
@@ -220,7 +250,7 @@ active = flt.apply_filters(
         collections=collections,
         bands=bands,
         freqs=freqs,
-        pcis=pcis,
+        pcis=effective_pcis,
         regions=st.session_state["regions"],
         metric=metric,
         require=("pci", "freq") if drop_unknown else (),
@@ -237,7 +267,7 @@ unregioned = flt.apply_filters(
         collections=collections,
         bands=bands,
         freqs=freqs,
-        pcis=pcis,
+        pcis=effective_pcis,
         metric=metric,
         require=("pci", "freq") if drop_unknown else (),
     ),
@@ -438,7 +468,7 @@ with tab_cells:
             collections=collections,
             bands=_intersecting(bands, "band"),
             freqs=_intersecting(freqs, "freq"),
-            pcis=_intersecting(pcis, "pci"),
+            pcis=_intersecting(effective_pcis, "pci"),
             regions=st.session_state["regions"],
             keep_ungeolocated=keep_ungeo,
             require=("pci",) if drop_unknown else (),

@@ -58,7 +58,11 @@ def write_dataset(directory: Path, ds: Dataset, rows: int = 240, seed: int = 7) 
             if ds.has_geo:
                 row[ds.dims["lat"]] = f"{41.6990 + (i % 40) * 0.0005:.8f}"
                 row[ds.dims["lon"]] = f"{-86.2400 + (i % 40) * 0.0005:.8f}"
-            row[ds.dims["pci"]] = PCIS[i % len(PCIS)]
+            # Step the PCI on a period coprime with the collection cycle, so
+            # every collection sees every PCI. Anything sharing a factor with
+            # 3 pins each collection to its own subset and makes the shared-PCI
+            # set empty for reasons that are an artefact of the fixture.
+            row[ds.dims["pci"]] = PCIS[(i // 5) % len(PCIS)]
             row[ds.dims["freq"]] = FREQS[ds.tech][i % 2]
             band_value = BANDS[ds.tech][i % 2]
             row[ds.dims["band"]] = (
