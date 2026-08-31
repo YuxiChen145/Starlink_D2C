@@ -57,6 +57,14 @@ and the gap between them is itself a finding: two D2C walking collections saw
 106 PCIs between them but only **3** in common, while three terrestrial
 T-Mobile collections shared **11** of their 43.
 
+**Searching a filter.** Every multi-select doubles as a search box: click it and
+type any part of a name. Matching is case-insensitive and matches anywhere in
+the string, not only the start — `Ookla`, `walking` and `n25` all work — and the
+filtered list gains a *Select N matches* row at the top, so you can add every
+match at once or keep picking individually. Collection names run to 60
+characters; the dropdown spills past the sidebar to show each one in full, and
+selected chips wrap rather than truncate.
+
 **Region selection.** On the Map tab, use the rectangle or polygon tool at the
 top-left. Every shape you draw is applied (as a union) to *all* tabs — map, CDF,
 cell identity, statistics and the raw data export. "Clear" in the sidebar

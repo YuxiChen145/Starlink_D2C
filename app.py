@@ -26,6 +26,69 @@ APP_TITLE = "Starlink D2C — Measurement Explorer"
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", page_icon="📡")
 
+# Collection names run to 60 characters, which the default sidebar truncates in
+# both the dropdown and the selected chips. Widen it a little and let long
+# labels wrap rather than clip. These selectors reach into Streamlit/BaseWeb
+# internals; if a future version renames them the app simply falls back to the
+# old truncation, so nothing breaks.
+st.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"], div[data-testid="stSidebar"] {
+        width: 24rem !important;
+        min-width: 24rem !important;
+    }
+    /* Collection names run to 60 characters, which the sidebar cannot show.
+       The dropdown is portalled to <body>, so let it spill past the sidebar
+       and give every option one full line. */
+    div[role="listbox"] {
+        min-width: 30rem !important;
+        max-width: none !important;
+        overflow-x: visible !important;
+    }
+    /* Its positioning wrapper has to grow too, or it clips the list. Kept in
+       its own rule: an engine without :has() would otherwise drop the lot. */
+    div:has(> div[role="listbox"]),
+    div:has(> div > div[role="listbox"]) {
+        min-width: 30rem !important;
+        max-width: none !important;
+        width: auto !important;
+        overflow-x: visible !important;
+    }
+    /* Fallback for anything longer still: the clipping is on the div *inside*
+       each option, which ships with white-space:nowrap and overflow:hidden. */
+    div[role="option"], div[role="option"] > div,
+    div[data-baseweb="popover"] li, div[data-baseweb="popover"] li > div {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        height: auto !important;
+        max-height: none !important;
+        line-height: 1.35;
+        word-break: break-word;
+    }
+    /* Selected chips live inside the sidebar and cannot spill, so they wrap.
+       (data-baseweb is the older Streamlit build; role=group the current one.) */
+    [data-testid="stMultiSelect"] span[role="group"],
+    [data-testid="stMultiSelect"] span[role="group"] span,
+    [data-testid="stMultiSelect"] [data-baseweb="tag"],
+    [data-testid="stMultiSelect"] [data-baseweb="tag"] * {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        height: auto !important;
+        max-width: 100% !important;
+        word-break: break-word;
+    }
+    [data-testid="stMultiSelect"] span[role="group"] {
+        padding-top: 1px;
+        padding-bottom: 1px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # --------------------------------------------------------------------------- #
 # Cached data access
