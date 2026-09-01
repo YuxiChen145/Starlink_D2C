@@ -662,18 +662,28 @@ with tab_cells:
                         f"{table[l].nunique():,} {identity.label_for(l)}" for l in chosen
                     )
                     st.caption(f"{counts} · {table['dwell_s'].sum() / 60:.1f} minutes held in total.")
-                    max_leaves = st.number_input(
+                    tree_cols = st.columns([2, 2])
+                    max_leaves = tree_cols[0].number_input(
                         "Max leaves drawn",
                         min_value=10, max_value=5000, value=150, step=10,
                         key="identity_leaves",
                         help="Longest-held paths win when there are more. The "
                              "download below is always the complete set.",
                     )
+                    n_columns = tree_cols[1].number_input(
+                        "Columns",
+                        min_value=1, max_value=4, value=2, step=1,
+                        key="identity_columns",
+                        help="Break the eNBs across this many side-by-side "
+                             "sub-trees so each row has room to breathe. The "
+                             "columns are balanced by leaf count.",
+                    )
                     st.plotly_chart(
                         charts.tree_figure(
                             table, chosen,
                             [identity.label_for(l) for l in chosen],
                             mode=MODE, max_leaves=int(max_leaves),
+                            columns=int(n_columns),
                         ),
                         width="stretch",
                     )

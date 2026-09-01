@@ -511,3 +511,100 @@ def test_fan_out_ignores_other_relationships_and_empty_input():
 
     assert len(charts.fan_out_figure(_dist(), "PCI per Sector Id").data) == 0
     assert len(charts.fan_out_figure(pd.DataFrame(), "anything").data) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Tree columns
+# --------------------------------------------------------------------------- #
+
+
+def _wide_hierarchy(n_enb=12):
+    import pandas as pd
+
+    rows = []
+    for e in range(n_enb):
+        for s_ in range(3):  # three sectors, one PCI each
+            rows.append(
+                {"enb": 100 + e, "sector": s_, "pci": 1000 + e * 10 + s_,
+                 "dwell_s": float(n_enb - e), "samples": 1}
+            )
+    return pd.DataFrame(rows)
+
+
+def test_balanced_columns_split_leaves_roughly_evenly():
+    nodes, _ = charts.build_tree(
+        _wide_hierarchy(12), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
+        include_root=False, columns=3,
+    )
+    leaves_per_col = {}
+    for n in nodes:
+        if not n["children"]:
+            leaves_per_col[n["col"]] = leaves_per_col.get(n["col"], 0) + 1
+    assert set(leaves_per_col) == {0, 1, 2}
+    # 12 eNBs * 3 leaves = 36, split three ways
+    assert sorted(leaves_per_col.values()) == [12, 12, 12]
+
+
+def test_columns_offset_the_x_coordinate_but_reset_the_rows():
+    nodes, _ = charts.build_tree(
+        _wide_hierarchy(8), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
+        include_root=False, columns=2,
+    )
+    col0 = [n for n in nodes if n["col"] == 0]
+    col1 = [n for n in nodes if n["col"] == 1]
+    # every column starts its rows at 0
+    assert min(n["y"] for n in col0) == 0.0
+    assert min(n["y"] for n in col1) == 0.0
+    # the second column sits entirely to the right of the first
+    assert max(n["x"] for n in col0) < min(n["x"] for n in col1)
+
+
+def test_no_edge_crosses_between_columns():
+    nodes, edges = charts.build_tree(
+        _wide_hierarchy(10), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
+        include_root=False, columns=3,
+    )
+    # map an x back to its column by the offset spacing
+    col_of = {round(n["x"], 3): n["col"] for n in nodes}
+    for path in edges:
+        cols = {col_of.get(round(x, 3)) for x, _ in path if round(x, 3) in col_of}
+        assert len(cols) == 1  # both endpoints in the same column
+
+
+def test_biggest_dwell_branches_land_in_the_first_column():
+    nodes, _ = charts.build_tree(
+        _wide_hierarchy(9), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
+        include_root=False, columns=3,
+    )
+    first_col_enbs = {
+        n["label"] for n in nodes if n["col"] == 0 and n["depth"] == 1
+    }
+    # eNB 100 has the largest dwell (n_enb - 0), so it heads column 0
+    assert "eNB 100" in first_col_enbs
+
+
+def test_one_column_is_the_old_single_strip():
+    single, _ = charts.build_tree(
+        _wide_hierarchy(6), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
+        include_root=False, columns=1,
+    )
+    assert {n["col"] for n in single} == {0}
+
+
+def test_tree_figure_height_shrinks_with_more_columns():
+    table = _wide_hierarchy(20)
+    one = charts.tree_figure(table, ["enb", "sector", "pci"],
+                             ["eNB", "Sector", "PCI"], columns=1).layout.height
+    three = charts.tree_figure(table, ["enb", "sector", "pci"],
+                               ["eNB", "Sector", "PCI"], columns=3).layout.height
+    assert three < one
+
+
+def test_columns_capped_at_the_branch_count():
+    # only two eNBs, but three columns asked for
+    small = _wide_hierarchy(2)
+    nodes, _ = charts.build_tree(
+        small, ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
+        include_root=False, columns=3,
+    )
+    assert {n["col"] for n in nodes} == {0, 1}

@@ -468,32 +468,67 @@ def _held_text(seconds: float) -> str:
     return f"{seconds:.0f} s"
 
 
+def _balanced_columns(branches: List[dict], n: int) -> List[List[dict]]:
+    """Split dwell-ordered branches into ``n`` contiguous groups of roughly
+    equal leaf count, so the columns come out about the same height while the
+    biggest-dwell branches stay in the first column."""
+    if n <= 1 or len(branches) <= 1:
+        return [branches]
+    total = sum(b["_leaves"] for b in branches) or 1
+    groups: List[List[dict]] = []
+    current: List[dict] = []
+    acc = 0
+    for i, branch in enumerate(branches):
+        current.append(branch)
+        acc += branch["_leaves"]
+        remaining = len(branches) - i - 1
+        # close this column once it holds its share, provided enough branches
+        # are left to fill the columns still to come
+        if (
+            len(groups) < n - 1
+            and acc >= total * (len(groups) + 1) / n
+            and remaining >= (n - 1 - len(groups))
+        ):
+            groups.append(current)
+            current = []
+    groups.append(current)
+    return [g for g in groups if g]
+
+
 def build_tree(
     table: pd.DataFrame,
     levels: Sequence[str],
     level_labels: Sequence[str],
     include_root: bool = True,
+    columns: int = 1,
 ):
     """Lay a dwell hierarchy out as a left-to-right node-link tree.
 
-    Returns ``(nodes, edges)``: nodes carry ``x`` (depth), ``y`` (row), label,
-    dwell and depth; edges are elbow paths from parent to child.  Children are
-    ordered by dwell, and a parent sits at the mean row of its children.
+    Returns ``(nodes, edges)``: nodes carry ``x`` (depth, offset by column),
+    ``y`` (row within the column), ``col`` (column index), label, dwell and
+    depth; edges are elbow paths from parent to child.  Children are ordered by
+    dwell, and a parent sits at the mean row of its children.
 
-    ``include_root`` keeps the synthetic "All" node.  Drawing leaves it out -
-    a single root just adds a column of dead space, and the running total is
+    ``columns`` breaks the outermost level (the eNBs) across that many
+    side-by-side sub-trees, balanced by leaf count, so a tree of hundreds of
+    paths is a few short columns instead of one unreadable strip.  Columns only
+    apply with ``include_root=False`` (the root joins every branch, so it
+    cannot sit in one column); the root is placed at column 0 otherwise.
+
+    ``include_root`` keeps the synthetic "All" node.  Drawing leaves it out - a
+    single root just adds a column of dead space, and the running total is
     already in the caption above the figure.
     """
     root = {"id": "", "label": "All", "depth": 0, "dwell": 0.0, "children": []}
     nodes = {"": root}
 
-    columns = [table[level].tolist() for level in levels]
+    cols = [table[level].tolist() for level in levels]
     dwells = table["dwell_s"].tolist()
 
     for row in range(len(table)):
         path = ""
         for depth, label in enumerate(level_labels, start=1):
-            value = columns[depth - 1][row]
+            value = cols[depth - 1][row]
             path_next = f"{path}/{depth}={value}"
             node = nodes.get(path_next)
             if node is None:
@@ -510,32 +545,65 @@ def build_tree(
             path = path_next
         root["dwell"] += float(dwells[row])
 
-    # depth-first, biggest branch first, assigning each leaf its own row
-    order: List[dict] = []
-    counter = [0]
+    # dwell-order every sibling list, and count the leaves under each node
+    def count_leaves(node) -> int:
+        if not node["children"]:
+            node["_leaves"] = 1
+        else:
+            node["children"].sort(key=lambda c: -c["dwell"])
+            node["_leaves"] = sum(count_leaves(c) for c in node["children"])
+        return node["_leaves"]
 
-    def place(node):
+    count_leaves(root)
+
+    n_cols = 1
+    if not include_root and root["children"]:
+        n_cols = max(1, min(int(columns), len(root["children"])))
+    groups = (
+        _balanced_columns(root["children"], n_cols)
+        if not include_root
+        else [root["children"]]
+    )
+
+    # one column occupies the depth span plus a gutter wide enough for the
+    # rightmost (leaf) labels of the column to its left
+    col_width = len(levels) + 2.6
+
+    order: List[dict] = []
+
+    def place(node, counter, x_offset, col_index):
         if not node["children"]:
             node["y"] = float(counter[0])
             counter[0] += 1
         else:
-            node["children"].sort(key=lambda c: -c["dwell"])
             for child in node["children"]:
-                place(child)
+                place(child, counter, x_offset, col_index)
             node["y"] = float(
                 sum(c["y"] for c in node["children"]) / len(node["children"])
             )
-        node["x"] = float(node["depth"])
+        node["x"] = float(node["depth"]) + x_offset
+        node["col"] = col_index
         order.append(node)
 
-    place(root)
-    if not include_root:
+    for col_index, group in enumerate(groups):
+        counter = [0]
+        x_offset = col_index * col_width
+        for branch in group:
+            place(branch, counter, x_offset, col_index)
+
+    if include_root:
+        top = root["children"]
+        root["x"] = 0.0
+        root["y"] = (
+            float(sum(c["y"] for c in top) / len(top)) if top else 0.0
+        )
+        root["col"] = 0
+        order.append(root)
+    else:
         order = [n for n in order if n["depth"] > 0]
 
     edges = []
     for node in order:
-        if not include_root and node["depth"] == 0:
-            continue
         for child in node["children"]:
             # elbow: out from the parent, down the trunk, in to the child
             trunk = child["x"] - 0.45
@@ -549,16 +617,20 @@ def build_tree(
             )
     return order, edges
 
-
 def tree_figure(
     table: pd.DataFrame,
     levels: Sequence[str],
     level_labels: Sequence[str],
     mode: str = "light",
     max_leaves: int = 150,
+    columns: int = 1,
     height: Optional[int] = None,
 ) -> go.Figure:
-    """Node-link tree over ``levels``, with dwell time on every node."""
+    """Node-link tree over ``levels``, with dwell time on every node.
+
+    ``columns`` splits the eNBs across that many side-by-side sub-trees, so a
+    tall strip of hundreds of paths becomes a few short, readable columns.
+    """
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
     if table.empty or not levels:
@@ -569,16 +641,20 @@ def tree_figure(
         levels,
         level_labels,
         include_root=False,
+        columns=columns,
     )
     if not nodes:
         return fig
 
-    # Held time is worth reading off the outermost grouping and off the leaves;
-    # putting it on every intermediate node just crowds the picture.
+    # Held time is worth reading off the leaves, and off the outermost grouping
+    # too when there is horizontal room for it. Split into columns the room is
+    # gone - the eNB label would run into the sector level - so drop it there
+    # and leave it to the hover; the leaves keep it either way.
     outermost = min(n["depth"] for n in nodes)
+    show_outer_time = columns <= 1
     labels = [
         f"{n['label']} · {_held_text(n['dwell'])}"
-        if n["depth"] == outermost or not n["children"]
+        if (not n["children"]) or (n["depth"] == outermost and show_outer_time)
         else n["label"]
         for n in nodes
     ]
@@ -607,11 +683,18 @@ def tree_figure(
             y=[n["y"] for n in nodes],
             mode="markers+text",
             text=labels,
-            # A node with children has a branch line leaving it at its own
-            # height, so its label goes above the line; leaves have no
-            # outgoing line and read better beside the marker.
+            # Leaves read best beside the marker. Inner nodes have a branch
+            # line leaving them, so their label goes above it. The outermost
+            # (eNB) node in a multi-column layout puts its label to the LEFT,
+            # into the empty gutter, so a long gNB-Id cannot run into the
+            # sector level of a narrow column.
             textposition=[
-                "middle right" if not n["children"] else "top right" for n in nodes
+                "middle right"
+                if not n["children"]
+                else ("middle left"
+                      if n["depth"] == outermost and columns > 1
+                      else "top right")
+                for n in nodes
             ],
             textfont=dict(family=FONT_FAMILY, size=11, color=chrome["text_primary"]),
             marker=dict(
@@ -627,9 +710,15 @@ def tree_figure(
         )
     )
 
-    leaves = sum(1 for n in nodes if not n["children"])
+    # height follows the tallest column, not the total leaf count - that is the
+    # whole point of columns
+    per_column: Dict[int, int] = {}
+    for n in nodes:
+        if not n["children"]:
+            per_column[n["col"]] = per_column.get(n["col"], 0) + 1
+    tallest = max(per_column.values(), default=1)
     if height is None:
-        height = int(min(2800, max(320, 26 * leaves + 80)))
+        height = int(min(2800, max(320, 26 * tallest + 80)))
 
     fig.update_layout(
         height=height,
@@ -639,8 +728,12 @@ def tree_figure(
         margin=dict(l=8, r=8, t=8, b=8),
         hoverlabel=dict(font_family=FONT_FAMILY),
     )
+    # left labels of column 0 spill left of its eNB nodes (x=1) in multi-column
+    # mode, so widen the left margin to keep them on canvas
+    right = max((n["x"] for n in nodes), default=float(len(levels)))
+    left = -1.0 if columns > 1 else 0.6
     fig.update_xaxes(
-        visible=False, range=[0.6, len(levels) + 2.1], fixedrange=False
+        visible=False, range=[left, right + 1.8], fixedrange=False
     )
     fig.update_yaxes(
         visible=False, autorange="reversed", range=None

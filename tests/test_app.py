@@ -283,3 +283,8 @@ def test_hierarchy_can_focus_one_branch(fixture_dir, monkeypatch, tmp_path):
 
     # the leaf cap goes far beyond the old 600 now
     assert app.number_input(key="identity_leaves").max == 5000
+    # and the tree can be split into balanced columns (default 2)
+    cols = app.number_input(key="identity_columns")
+    assert cols.value == 2 and cols.max == 4
+    cols.set_value(3).run()
+    _assert_clean(app)

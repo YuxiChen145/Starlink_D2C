@@ -124,12 +124,14 @@ Two views:
   muted "Other" rather than cycling hues. Four figures above the plot: distinct
   identities, dwell runs, median dwell and changes per minute.
 - **Hierarchy** — a node-link tree of eNB → sector → PCI, branches ordered
-  longest-held first and nodes sized by dwell, with held time written on the
-  outermost level and on the leaves. The full tree runs to ~1,400 paths, which
-  is a wall rather than a picture, so the drawn set is capped (longest-held
-  first) and the caption says how much of the dwell time that covers. To read
-  one branch whole, **focus** on a single eNB. The table and CSV under the
-  chart are always the complete set, however many paths that is.
+  longest-held first and nodes sized by dwell. The full tree runs to ~1,400
+  paths, which is a wall in one strip, so the eNBs are laid out across two
+  **columns** by default (balanced by leaf count, so the columns come out the
+  same height) — set 1 to 4 as you like; the drawn set is still capped
+  longest-held first, with a caption saying how much of the dwell time that
+  covers, and **focus** on a single eNB reads that branch whole. Held time is
+  written on the leaves, and on the eNB too in a single column; the table and
+  CSV under the chart are always the complete set.
 - **Structure** — the fan-out, as a table and a chart: how many sectors an eNB
   carries and how many PCIs a sector carries, with min / median / P90 / max /
   mean per relationship, splittable by technology, direction, collection or
