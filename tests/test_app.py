@@ -240,3 +240,46 @@ def test_shared_mode_restricts_the_data_to_the_intersection(
     app.multiselect(key="f_pcis").select(123).run()
     _assert_clean(app)
     assert int(app.metric[0].value.replace(",", "")) < everything
+
+
+def test_structure_view_renders_summary_and_chart(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+
+    app.radio(key="identity_view").set_value("Structure").run()
+    _assert_clean(app)
+    assert app.multiselect(key="structure_levels").value == ["enb", "sector", "pci"]
+
+    app.selectbox(key="structure_split").set_value("tech").run()
+    _assert_clean(app)
+    app.checkbox(key="structure_cdf").set_value(True).run()
+    _assert_clean(app)
+
+
+def test_structure_view_needs_two_levels(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    app.radio(key="identity_view").set_value("Structure").run()
+    _assert_clean(app)
+    app.multiselect(key="structure_levels").set_value(["enb"]).run()
+    _assert_clean(app)
+    assert any("at least two levels" in i.value for i in app.info)
+
+
+def test_hierarchy_can_focus_one_branch(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    app.radio(key="identity_view").set_value("Hierarchy").run()
+    _assert_clean(app)
+
+    focus = app.selectbox(key="identity_focus_branch")
+    assert focus.value == "All"
+    assert len(focus.options) > 1
+    focus.set_value(focus.options[1]).run()
+    _assert_clean(app)
+
+    # the leaf cap goes far beyond the old 600 now
+    assert app.number_input(key="identity_leaves").max == 5000

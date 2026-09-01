@@ -549,7 +549,10 @@ with tab_cells:
             + f" — {len(cells):,} samples."
         )
         view = st.radio(
-            "View", ["Timeline", "Hierarchy"], horizontal=True, key="identity_view"
+            "View",
+            ["Timeline", "Hierarchy", "Structure"],
+            horizontal=True,
+            key="identity_view",
         )
 
         if view == "Timeline":
@@ -616,7 +619,7 @@ with tab_cells:
                         file_name=f"{level}_dwell_runs.csv",
                         mime="text/csv",
                     )
-        else:
+        elif view == "Hierarchy":
             default_levels = [l for l in ("enb", "sector", "pci") if l in levels]
             chosen = st.multiselect(
                 "Levels, outer → inner",
@@ -631,6 +634,24 @@ with tab_cells:
                 st.info("Pick at least one level.")
             else:
                 table = identity.hierarchy(cells, chosen)
+                # A tree of a thousand leaves is a wall, not a picture. Focus on
+                # one branch to read a subtree whole; the download is always the
+                # complete set either way.
+                outer = chosen[0]
+                branches = (
+                    table.groupby(outer, observed=True)["dwell_s"]
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+                focus = st.selectbox(
+                    f"Focus on one {identity.label_for(outer)}",
+                    options=["All"] + [str(v) for v in branches.index],
+                    key="identity_focus_branch",
+                    help="Longest-held first. Picking one shows that branch "
+                         "complete, however many leaves it has.",
+                )
+                if focus != "All":
+                    table = table[table[outer].astype(str) == focus]
                 if table.empty:
                     st.info(
                         "No rows carry every level in that path — try dropping "
@@ -642,10 +663,11 @@ with tab_cells:
                     )
                     st.caption(f"{counts} · {table['dwell_s'].sum() / 60:.1f} minutes held in total.")
                     max_leaves = st.number_input(
-                        "Max leaves",
-                        min_value=10, max_value=600, value=150, step=10,
+                        "Max leaves drawn",
+                        min_value=10, max_value=5000, value=150, step=10,
                         key="identity_leaves",
-                        help="Longest-held paths win when there are more.",
+                        help="Longest-held paths win when there are more. The "
+                             "download below is always the complete set.",
                     )
                     st.plotly_chart(
                         charts.tree_figure(
@@ -656,9 +678,12 @@ with tab_cells:
                         width="stretch",
                     )
                     if len(table) > max_leaves:
+                        drawn = table.nlargest(int(max_leaves), "dwell_s")
+                        covered = drawn["dwell_s"].sum() / table["dwell_s"].sum()
                         st.caption(
-                            f"Showing the {int(max_leaves)} longest-held of "
-                            f"{len(table)} paths."
+                            f"Drawing the {int(max_leaves):,} longest-held of "
+                            f"{len(table):,} paths — {covered:.0%} of the dwell "
+                            f"time in view. The table and CSV below are complete."
                         )
                     with st.expander("Hierarchy as a table"):
                         pretty = table.rename(
@@ -666,9 +691,92 @@ with tab_cells:
                         ).rename(columns={"dwell_s": "Held (s)", "samples": "Samples"})
                         st.dataframe(pretty.round(1), width="stretch", hide_index=True, height=320)
                         st.download_button(
-                            "Download hierarchy (CSV)",
+                            f"Download all {len(pretty):,} paths (CSV)",
                             pretty.to_csv(index=False).encode(),
                             file_name="cell_hierarchy.csv",
+                            mime="text/csv",
+                        )
+
+
+        if view == "Structure":
+            st.caption(
+                "How wide the identity tree is: how many sectors an eNB / gNB "
+                "carries, and how many PCIs a sector carries."
+            )
+            row = st.columns([2, 2, 2])
+            struct_levels = row[0].multiselect(
+                "Levels, outer → inner",
+                options=levels,
+                default=[l for l in ("enb", "sector", "pci") if l in levels] or levels[:2],
+                format_func=identity.label_for,
+                key="structure_levels",
+            )
+            split_by = row[1].selectbox(
+                "Split by",
+                options=["None", "tech", "link", "collection", "operator"],
+                format_func=lambda c: "Nothing" if c == "None" else stats.GROUP_DIMENSIONS.get(c, c.title()),
+                key="structure_split",
+                help="Compare populations — terrestrial and satellite fan out "
+                     "very differently.",
+            )
+            as_cdf = row[2].checkbox(
+                "Show as CDF", value=False, key="structure_cdf",
+                help="The same population read as P(children ≤ n).",
+            )
+
+            if len(struct_levels) < 2:
+                st.info("Pick at least two levels — fan-out needs a parent and a child.")
+            else:
+                counts = identity.fan_out_counts(
+                    cells,
+                    struct_levels,
+                    group_by=None if split_by == "None" else split_by,
+                )
+                summary = identity.fan_out_summary(counts)
+                if summary.empty:
+                    st.info("No rows carry two complete levels.")
+                else:
+                    st.dataframe(
+                        summary.round(2), width="stretch", hide_index=True
+                    )
+                    st.download_button(
+                        "Download fan-out summary (CSV)",
+                        summary.to_csv(index=False).encode(),
+                        file_name="cell_fan_out_summary.csv",
+                        mime="text/csv",
+                    )
+
+                    dist = identity.fan_out_distribution(counts)
+                    relationship = st.selectbox(
+                        "Chart",
+                        options=identity.relationship_order(counts),
+                        key="structure_relationship",
+                        help="Tree order: the outermost pair first, which is "
+                             "usually the one that varies.",
+                    )
+                    st.plotly_chart(
+                        charts.fan_out_figure(
+                            dist, relationship, mode=MODE, cumulative=as_cdf
+                        ),
+                        width="stretch",
+                    )
+                    with st.expander("Distribution as a table"):
+                        pretty = dist.rename(
+                            columns={
+                                "relationship": "Relationship",
+                                "group": "Group",
+                                "children": "Children",
+                                "parents": "Parents",
+                                "share": "Share",
+                            }
+                        )
+                        st.dataframe(
+                            pretty.round(4), width="stretch", hide_index=True, height=320
+                        )
+                        st.download_button(
+                            "Download distribution (CSV)",
+                            pretty.to_csv(index=False).encode(),
+                            file_name="cell_fan_out_distribution.csv",
                             mime="text/csv",
                         )
 

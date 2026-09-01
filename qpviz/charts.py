@@ -646,3 +646,111 @@ def tree_figure(
         visible=False, autorange="reversed", range=None
     )
     return fig
+
+
+def fan_out_figure(
+    dist: pd.DataFrame,
+    relationship: str,
+    mode: str = "light",
+    cumulative: bool = False,
+    normalise: bool = False,
+    height: int = 420,
+) -> go.Figure:
+    """How many parents carry N children.
+
+    The counts are small integers, so bars are the honest default; the
+    cumulative form is the same population read as "P(children <= n)".
+    """
+    chrome = CHROME.get(mode, CHROME["light"])
+    fig = go.Figure()
+    sub = dist[dist["relationship"] == relationship] if not dist.empty else dist
+    if sub.empty:
+        return fig
+
+    ranked = (
+        sub.groupby("group", observed=True)["parents"].sum().sort_values(ascending=False)
+    )
+    groups, folded = list(ranked.index[:8]), list(ranked.index[8:])
+    if folded:
+        sub = sub.copy()
+        sub.loc[sub["group"].isin(folded), "group"] = f"Other ({len(folded)})"
+        sub = (
+            sub.groupby(["relationship", "group", "children"], observed=True)
+            .agg(parents=("parents", "sum"))
+            .reset_index()
+        )
+        totals = sub.groupby("group", observed=True)["parents"].transform("sum")
+        sub["share"] = sub["parents"] / totals
+        groups = groups + [f"Other ({len(folded)})"]
+
+    single = len(groups) == 1
+    y_title = "Share of parents" if (normalise or cumulative) else "Parents"
+
+    for i, group in enumerate(groups):
+        part = sub[sub["group"] == group].sort_values("children")
+        if part.empty:
+            continue
+        color = OTHER_COLOR if str(group).startswith("Other (") else series_style(i, mode)[0]
+        if cumulative:
+            fig.add_trace(
+                go.Scatter(
+                    x=part["children"],
+                    y=part["share"].cumsum(),
+                    mode="lines+markers",
+                    line=dict(color=color, width=2, shape="hv"),
+                    marker=dict(size=8, color=color),
+                    name=str(group),
+                    hovertemplate=(
+                        f"<b>{group}</b><br>≤ %{{x}} children"
+                        "<br>%{y:.1%} of parents<extra></extra>"
+                    ),
+                )
+            )
+        else:
+            values = part["share"] if normalise else part["parents"]
+            fig.add_trace(
+                go.Bar(
+                    x=part["children"],
+                    y=values,
+                    name=str(group),
+                    marker=dict(color=color, cornerradius=4, line=dict(width=0)),
+                    text=part["parents"] if single else None,
+                    textposition="outside",
+                    textfont=dict(color=chrome["text_secondary"], size=11),
+                    hovertemplate=(
+                        f"<b>{group}</b><br>%{{x}} children"
+                        "<br>%{y}<extra></extra>"
+                    ),
+                )
+            )
+
+    fig.update_layout(
+        height=height,
+        barmode="group",
+        bargap=0.28,
+        bargroupgap=0.08,
+        paper_bgcolor=chrome["surface"],
+        plot_bgcolor=chrome["surface"],
+        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
+        margin=dict(l=64, r=24, t=16, b=52),
+        hovermode="closest",
+        hoverlabel=dict(font_family=FONT_FAMILY),
+        showlegend=len(groups) >= 2,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+            font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
+        ),
+    )
+    fig.update_xaxes(
+        title=dict(text=relationship, font=dict(color=chrome["text_secondary"], size=12)),
+        dtick=1, gridcolor="rgba(0,0,0,0)", zeroline=False,
+        linecolor=chrome["axis"], tickfont=dict(color=chrome["muted"], size=11),
+    )
+    fig.update_yaxes(
+        title=dict(text=y_title, font=dict(color=chrome["text_secondary"], size=12)),
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11),
+        tickformat=".0%" if (normalise or cumulative) else None,
+        range=[0, 1.02] if cumulative else None,
+    )
+    return fig

@@ -10,7 +10,7 @@ across eNB / sector / PCI.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -227,3 +227,139 @@ def hierarchy(
         .reset_index(drop=True)
     )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Fan-out: how many children each parent carries
+# --------------------------------------------------------------------------- #
+
+
+def relationships(levels: Sequence[str]) -> List[Tuple[Tuple[str, ...], str]]:
+    """The parent/child pairs implied by a level path.
+
+    Each adjacent pair, with the parent scoped by the whole prefix above it
+    (a sector id only means something inside its eNB), plus the outermost to
+    the innermost when the path is deeper than two.
+    """
+    levels = list(levels)
+    pairs = [(tuple(levels[: i + 1]), levels[i + 1]) for i in range(len(levels) - 1)]
+    if len(levels) > 2:
+        pairs.append(((levels[0],), levels[-1]))
+    return pairs
+
+
+def relationship_label(parent_levels: Sequence[str], child_level: str) -> str:
+    return f"{label_for(child_level)} per {label_for(parent_levels[-1])}"
+
+
+def fan_out_counts(
+    frame: pd.DataFrame,
+    levels: Sequence[str],
+    group_by: Optional[str] = None,
+) -> pd.DataFrame:
+    """One row per parent: how many distinct children it carries.
+
+    Columns: ``relationship, group, children``.  ``group_by`` splits the
+    population (by technology, operator, collection, ...); without it
+    everything lands in one group called "All".
+    """
+    empty = pd.DataFrame(columns=["relationship", "group", "children"])
+    levels = [l for l in levels if l in frame.columns]
+    if frame.empty or len(levels) < 2:
+        return empty
+
+    rows = []
+    for parent_levels, child_level in relationships(levels):
+        needed = list(dict.fromkeys([*parent_levels, child_level]))
+        keys = list(parent_levels)
+        if group_by and group_by in frame.columns:
+            needed = list(dict.fromkeys([group_by, *needed]))
+            keys = [group_by, *keys]
+        work = frame[needed].dropna()
+        if work.empty:
+            continue
+        counts = work.groupby(keys, observed=True)[child_level].nunique()
+        if counts.empty:
+            continue
+        group = (
+            counts.index.get_level_values(0).astype(str)
+            if group_by and group_by in frame.columns
+            else "All"
+        )
+        rows.append(
+            pd.DataFrame(
+                {
+                    "relationship": relationship_label(parent_levels, child_level),
+                    "group": group,
+                    "children": counts.to_numpy(dtype="int64"),
+                }
+            )
+        )
+
+    if not rows:
+        return empty
+    out = pd.concat(rows, ignore_index=True)
+    # Keep tree order (outer pair first), not alphabetical: "Sector per eNB"
+    # is the relationship worth looking at, and it should lead.
+    order = list(dict.fromkeys(out["relationship"]))
+    out["relationship"] = pd.Categorical(out["relationship"], categories=order, ordered=True)
+    return out
+
+
+FAN_OUT_PERCENTILES = (50, 90)
+
+
+def fan_out_summary(counts: pd.DataFrame) -> pd.DataFrame:
+    """Descriptive statistics per relationship (and group)."""
+    if counts.empty:
+        return pd.DataFrame()
+    out = (
+        counts.groupby(["relationship", "group"], observed=True)["children"]
+        .agg(
+            Parents="size",
+            Children="sum",
+            Min="min",
+            Median="median",
+            Mean="mean",
+            Max="max",
+        )
+        .reset_index()
+    )
+    p90 = (
+        counts.groupby(["relationship", "group"], observed=True)["children"]
+        .quantile(0.9)
+        .reset_index(name="P90")
+    )
+    out = out.merge(p90, on=["relationship", "group"])
+    out = out.rename(columns={"relationship": "Relationship", "group": "Group"})
+    columns = ["Relationship", "Group", "Parents", "Children", "Min", "Median", "P90", "Max", "Mean"]
+    out = out.sort_values(["Relationship", "Group"]).reset_index(drop=True)
+    out["Relationship"] = out["Relationship"].astype(str)
+    return out[columns]
+
+
+def fan_out_distribution(counts: pd.DataFrame) -> pd.DataFrame:
+    """How many parents carry exactly N children.
+
+    Columns: ``relationship, group, children, parents, share``.
+    """
+    if counts.empty:
+        return pd.DataFrame(columns=["relationship", "group", "children", "parents", "share"])
+    out = (
+        counts.groupby(["relationship", "group", "children"], observed=True)
+        .size()
+        .reset_index(name="parents")
+    )
+    totals = out.groupby(["relationship", "group"], observed=True)["parents"].transform("sum")
+    out["share"] = out["parents"] / totals
+    return out.sort_values(["relationship", "group", "children"]).reset_index(drop=True)
+
+
+def relationship_order(counts: pd.DataFrame) -> List[str]:
+    """Relationship labels in tree order (outermost pair first)."""
+    if counts.empty or "relationship" not in counts.columns:
+        return []
+    column = counts["relationship"]
+    if isinstance(column.dtype, pd.CategoricalDtype):
+        return [c for c in column.cat.categories if c in set(column)]
+    return list(dict.fromkeys(column))

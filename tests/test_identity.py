@@ -242,3 +242,120 @@ def test_loader_pins_the_time_resolution(fixture_dir, cache_dir):
     assert frame["time"].dtype == "datetime64[ns]"
     cached = load(fixture_dir, ["lte_radio"], cache_dir)
     assert cached["time"].dtype == "datetime64[ns]"
+
+
+# --------------------------------------------------------------------------- #
+# Fan-out
+# --------------------------------------------------------------------------- #
+
+
+def _tree_frame():
+    """eNB 10 has 3 sectors, eNB 11 has 1; every sector has exactly 1 PCI
+    except sector 3, which has 2."""
+    rows = [
+        (10, 1, 100), (10, 2, 200), (10, 3, 300), (10, 3, 301), (11, 9, 900),
+    ]
+    return pd.DataFrame(
+        {
+            "time": pd.date_range("2026-07-22 14:00:00", periods=len(rows), freq="1s"),
+            "collection": "C",
+            "tech": ["LTE"] * 4 + ["NR"],
+            "enb": pd.array([r[0] for r in rows], dtype="Int64"),
+            "sector": pd.array([r[1] for r in rows], dtype="Int32"),
+            "pci": pd.array([r[2] for r in rows], dtype="Int32"),
+        }
+    )
+
+
+def test_relationships_pairs_each_level_with_its_prefix():
+    assert identity.relationships(["enb", "sector", "pci"]) == [
+        (("enb",), "sector"),
+        (("enb", "sector"), "pci"),
+        (("enb",), "pci"),  # outer to inner, only when deeper than two
+    ]
+    assert identity.relationships(["enb", "sector"]) == [(("enb",), "sector")]
+    assert identity.relationships(["enb"]) == []
+
+
+def test_relationship_label_names_the_immediate_parent():
+    assert identity.relationship_label(("enb", "sector"), "pci") == "PCI per Sector Id"
+
+
+def test_fan_out_counts_one_row_per_parent():
+    counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
+    sectors = counts[counts["relationship"] == "Sector Id per eNB / gNB-Id"]
+    assert sorted(sectors["children"]) == [1, 3]
+    pcis = counts[counts["relationship"] == "PCI per Sector Id"]
+    assert sorted(pcis["children"]) == [1, 1, 1, 2]
+    assert set(counts["group"]) == {"All"}
+
+
+def test_sector_ids_are_scoped_to_their_enb():
+    """Two eNBs reusing sector id 1 are two parents, not one."""
+    frame = pd.DataFrame(
+        {
+            "enb": pd.array([10, 10, 11, 11], dtype="Int64"),
+            "sector": pd.array([1, 1, 1, 1], dtype="Int32"),
+            "pci": pd.array([100, 101, 200, 201], dtype="Int32"),
+        }
+    )
+    counts = identity.fan_out_counts(frame, ["enb", "sector", "pci"])
+    pcis = counts[counts["relationship"] == "PCI per Sector Id"]
+    assert sorted(pcis["children"]) == [2, 2]
+
+
+def test_fan_out_counts_can_split_the_population():
+    counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector"], group_by="tech")
+    assert set(counts["group"]) == {"LTE", "NR"}
+
+
+def test_fan_out_summary_columns_and_values():
+    summary = identity.fan_out_summary(
+        identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
+    )
+    assert list(summary.columns) == [
+        "Relationship", "Group", "Parents", "Children", "Min", "Median", "P90", "Max", "Mean"
+    ]
+    sectors = summary[summary["Relationship"] == "Sector Id per eNB / gNB-Id"].iloc[0]
+    assert sectors["Parents"] == 2 and sectors["Children"] == 4
+    assert sectors["Min"] == 1 and sectors["Max"] == 3
+    assert sectors["Mean"] == pytest.approx(2.0)
+
+
+def test_fan_out_distribution_counts_parents_and_shares():
+    dist = identity.fan_out_distribution(
+        identity.fan_out_counts(_tree_frame(), ["enb", "sector"])
+    )
+    assert dist["parents"].sum() == 2
+    assert dist["share"].sum() == pytest.approx(1.0)
+    assert sorted(dist["children"]) == [1, 3]
+
+
+def test_fan_out_handles_too_few_levels_and_empty_frames():
+    assert identity.fan_out_counts(_tree_frame(), ["enb"]).empty
+    assert identity.fan_out_counts(pd.DataFrame(), ["enb", "sector"]).empty
+    assert identity.fan_out_summary(pd.DataFrame()).empty
+    assert identity.fan_out_distribution(pd.DataFrame()).empty
+
+
+def test_fan_out_on_the_synthetic_export(fixture_dir, cache_dir):
+    frame = identity.serving_only(load(fixture_dir, ["lte_radio"], cache_dir))
+    summary = identity.fan_out_summary(
+        identity.fan_out_counts(frame, ["enb", "sector", "pci"])
+    )
+    assert not summary.empty
+    assert (summary["Min"] >= 1).all()
+    assert (summary["Median"] <= summary["Max"]).all()
+
+
+def test_relationships_keep_tree_order_not_alphabetical():
+    counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
+    order = identity.relationship_order(counts)
+    assert order == [
+        "Sector Id per eNB / gNB-Id",  # the outer pair leads
+        "PCI per Sector Id",
+        "PCI per eNB / gNB-Id",
+    ]
+    assert sorted(order) != order  # i.e. this is not alphabetical
+    assert identity.fan_out_summary(counts)["Relationship"].tolist() == order
+    assert identity.relationship_order(pd.DataFrame()) == []

@@ -77,7 +77,7 @@ Point-in-polygon is an even-odd ray cast, so concave shapes work correctly.
 |---|---|
 | Map | Each sample coloured by the chosen metric, on OSM / Carto / Esri satellite tiles. Diverging red↔blue about a midpoint you set, or a single-hue sequential ramp, with a colour bar legend (round-number ticks; each band as tall as the value range it covers). Or colour categorically by serving PCI / eNB / sector — the eight most common take a hue each and the rest fold into "Other". Hover any point for its value, collection, PCI, carrier and timestamp. |
 | CDF curves | One ECDF per group, all on the same canvas. CCDF toggle. |
-| Cell identity | Who is serving you and for how long — a dwell timeline and an eNB → sector → PCI tree. See below. |
+| Cell identity | Who is serving you and for how long — a dwell timeline, an eNB → sector → PCI tree, and the tree's fan-out statistics. See below. |
 | Statistics | Per-group n / mean / std / min / P5 / P10 / P50 / P90 / P95 / max, downloadable as CSV. |
 | Data | The filtered rows, downloadable as CSV. |
 
@@ -125,9 +125,22 @@ Two views:
   identities, dwell runs, median dwell and changes per minute.
 - **Hierarchy** — a node-link tree of eNB → sector → PCI, branches ordered
   longest-held first and nodes sized by dwell, with held time written on the
-  outermost level and on the leaves. On D2C the median eNB-Id carries about
-  2 sectors and each sector maps to essentially one PCI, so a PCI is a beam;
-  terrestrial sectorisation looks different.
+  outermost level and on the leaves. The full tree runs to ~1,400 paths, which
+  is a wall rather than a picture, so the drawn set is capped (longest-held
+  first) and the caption says how much of the dwell time that covers. To read
+  one branch whole, **focus** on a single eNB. The table and CSV under the
+  chart are always the complete set, however many paths that is.
+- **Structure** — the fan-out, as a table and a chart: how many sectors an eNB
+  carries and how many PCIs a sector carries, with min / median / P90 / max /
+  mean per relationship, splittable by technology, direction, collection or
+  operator. Counts are small integers so bars are the default; a CDF toggle
+  reads the same population as P(children ≤ n). Both tables download as CSV.
+
+What that says about the data: across every collection, an eNB-Id carries a
+**median of 3 sectors** (mean 3.5, up to 13), while a sector carries **exactly
+one PCI in 1,372 of 1,391 cases**. So sector and PCI are all but the same
+thing — a PCI is a beam — and the fan-out that matters is beams per eNB. D2C
+averages 3.6 sectors per eNB against T-Mobile's 1.9.
 
 Both views take whatever the sidebar filters leave — there is no second
 collection picker here.
@@ -198,10 +211,11 @@ qpviz/
   schema.py          the ten exports and their column maps; metric registry
   loader.py          CSV -> canonical frame, dtype coercion, parquet cache
   filters.py         filter set, point-in-polygon region test
-  identity.py        serving-cell scope, dwell runs, dwell-weighted hierarchy
+  identity.py        serving-cell scope, dwell runs, dwell-weighted hierarchy,
+                     parent/child fan-out
   stats.py           ECDF + grouped summary statistics
-  charts.py          plotly figures: CDF, dwell timeline, identity tree;
-                     map colour binning and legends
+  charts.py          plotly figures: CDF, dwell timeline, identity tree,
+                     fan-out bars; map colour binning and legends
   mapview.py         folium map, draw control, GeoJSON -> polygons
   theme.py           colour tokens (categorical / sequential / diverging)
 tests/               pytest suite, incl. a headless run of the whole app
@@ -213,6 +227,10 @@ tests/               pytest suite, incl. a headless run of the whole app
 pip install -r requirements-dev.txt
 pytest
 ```
+
+Streamlit re-executes `app.py` on every rerun but keeps already-imported
+modules in memory, so a change under `qpviz/` needs the server restarted, not
+just the page refreshed.
 
 The suite builds small synthetic CSVs that reuse the real column names, so it
 runs without the measurement data. `tests/test_app.py` executes `app.py`

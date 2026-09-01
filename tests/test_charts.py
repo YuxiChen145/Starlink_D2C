@@ -449,3 +449,65 @@ def test_timeline_folds_collections_past_the_eight_categorical_slots():
     # no colour is ever reused between two named collections
     colors = [t.marker.color for t in fig.data[:8]]
     assert len(set(colors)) == 8
+
+
+# --------------------------------------------------------------------------- #
+# Fan-out figure
+# --------------------------------------------------------------------------- #
+
+
+def _dist(groups=("All",)):
+    import pandas as pd
+
+    rows = []
+    for g in groups:
+        for children, parents in [(1, 10), (2, 6), (3, 4)]:
+            rows.append(
+                {"relationship": "Sector Id per eNB / gNB-Id", "group": g,
+                 "children": children, "parents": parents, "share": parents / 20}
+            )
+    return pd.DataFrame(rows)
+
+
+def test_fan_out_bars_by_default():
+    fig = charts.fan_out_figure(_dist(), "Sector Id per eNB / gNB-Id")
+    assert len(fig.data) == 1
+    assert fig.data[0].type == "bar"
+    assert list(fig.data[0].x) == [1, 2, 3]
+    assert fig.layout.showlegend is False  # one series needs no legend
+    # a single series gets its values written on the bars
+    assert list(fig.data[0].text) == [10, 6, 4]
+
+
+def test_fan_out_cumulative_reaches_one():
+    fig = charts.fan_out_figure(_dist(), "Sector Id per eNB / gNB-Id", cumulative=True)
+    assert fig.data[0].type == "scatter"
+    assert fig.data[0].line.shape == "hv"  # a step, these are integers
+    assert float(fig.data[0].y[-1]) == pytest.approx(1.0)
+    assert fig.layout.yaxis.range == (0, 1.02)
+
+
+def test_fan_out_legend_and_colours_for_several_groups():
+    fig = charts.fan_out_figure(_dist(("LTE", "NR")), "Sector Id per eNB / gNB-Id")
+    assert len(fig.data) == 2
+    assert fig.layout.showlegend is True
+    assert {t.marker.color for t in fig.data} == set(theme.CATEGORICAL["light"][:2])
+    # no value labels once there is more than one series
+    assert all(t.text is None for t in fig.data)
+
+
+def test_fan_out_folds_past_eight_groups():
+    fig = charts.fan_out_figure(
+        _dist(tuple(f"G{i}" for i in range(11))), "Sector Id per eNB / gNB-Id"
+    )
+    names = [t.name for t in fig.data]
+    assert len(names) == 9
+    assert names[-1] == "Other (3)"
+    assert fig.data[-1].marker.color == charts.OTHER_COLOR
+
+
+def test_fan_out_ignores_other_relationships_and_empty_input():
+    import pandas as pd
+
+    assert len(charts.fan_out_figure(_dist(), "PCI per Sector Id").data) == 0
+    assert len(charts.fan_out_figure(pd.DataFrame(), "anything").data) == 0
