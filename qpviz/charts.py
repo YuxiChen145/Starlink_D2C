@@ -710,15 +710,19 @@ def tree_figure(
         )
     )
 
-    # height follows the tallest column, not the total leaf count - that is the
-    # whole point of columns
+    # Height follows the tallest column, not the total leaf count - that is the
+    # whole point of columns. Each leaf needs its own row plus a line for the
+    # sector label above it, so the figure GROWS with the leaf count (the page
+    # scrolls) rather than compressing rows into an unreadable smear once a
+    # column passes ~100 leaves. The ceiling is a safety limit, not a target:
+    # past it, focus on one eNB or lower the leaf cap.
     per_column: Dict[int, int] = {}
     for n in nodes:
         if not n["children"]:
             per_column[n["col"]] = per_column.get(n["col"], 0) + 1
     tallest = max(per_column.values(), default=1)
     if height is None:
-        height = int(min(2800, max(320, 26 * tallest + 80)))
+        height = int(min(11000, max(320, 30 * tallest + 80)))
 
     fig.update_layout(
         height=height,

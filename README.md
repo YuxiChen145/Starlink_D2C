@@ -127,11 +127,13 @@ Two views:
   longest-held first and nodes sized by dwell. The full tree runs to ~1,400
   paths, which is a wall in one strip, so the eNBs are laid out across two
   **columns** by default (balanced by leaf count, so the columns come out the
-  same height) — set 1 to 4 as you like; the drawn set is still capped
-  longest-held first, with a caption saying how much of the dwell time that
-  covers, and **focus** on a single eNB reads that branch whole. Held time is
-  written on the leaves, and on the eNB too in a single column; the table and
-  CSV under the chart are always the complete set.
+  same height) — set 1 to 4 as you like. Every row keeps a fixed height and the
+  figure grows to fit, so raising the leaf cap makes a taller chart you scroll
+  rather than an unreadable smear; the drawn set is still capped longest-held
+  first, with a caption saying how much of the dwell time that covers, and
+  **focus** on a single eNB reads that branch whole. Held time is written on
+  the leaves, and on the eNB too in a single column; the table and CSV under
+  the chart are always the complete set.
 - **Structure** — the fan-out, as a table and a chart: how many sectors an eNB
   carries and how many PCIs a sector carries, with min / median / P90 / max /
   mean per relationship, splittable by technology, direction, collection or
