@@ -608,3 +608,19 @@ def test_columns_capped_at_the_branch_count():
         include_root=False, columns=3,
     )
     assert {n["col"] for n in nodes} == {0, 1}
+
+
+def test_pdf_figure_overlays_normalised_histograms():
+    import numpy as np
+    from qpviz.stats import Curve
+    curves = [
+        Curve(key=("a",), name="B25", x=np.full(300, 25.0), y=np.linspace(0, 1, 300), n=300),
+        Curve(key=("b",), name="B50", x=np.full(200, 50.0), y=np.linspace(0, 1, 200), n=200),
+    ]
+    fig = charts.pdf_figure(curves, "RSRQ N-factor (RB)", bins=40)
+    assert len(fig.data) == 2
+    assert all(t.type == "histogram" for t in fig.data)
+    assert all(t.histnorm == "probability" for t in fig.data)
+    assert fig.layout.barmode == "overlay"
+    # empty input is handled
+    assert len(charts.pdf_figure([], "x").data) == 0

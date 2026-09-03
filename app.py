@@ -6,20 +6,24 @@ Run with:  streamlit run app.py
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
 import pandas as pd
 import streamlit as st
 
-from qpviz import charts, filters as flt, identity, loader, mapview, stats
+from qpviz import charts, filters as flt, identity, loader, mapview, satellites, stats
 from qpviz.schema import (
+    ALL_DATASETS_BY_KEY,
     DATASETS_BY_KEY,
     METRICS,
+    PRISM_DATASETS_BY_KEY,
     TECHNOLOGIES,
     Dataset,
     datasets_for,
     metrics_available,
+    prism_datasets_for,
 )
 
 APP_TITLE = "Starlink D2C — Measurement Explorer"
@@ -100,9 +104,67 @@ def load_frame(data_dir: str, dataset_keys: Tuple[str, ...]) -> pd.DataFrame:
     return loader.load(data_dir, list(dataset_keys))
 
 
+@st.cache_data(show_spinner="Loading PRISM data…")
+def load_prism_frame(prism_dir: str, dataset_keys: Tuple[str, ...]) -> pd.DataFrame:
+    return loader.load_prism(prism_dir, list(dataset_keys))
+
+
 @st.cache_data(show_spinner=False)
 def available(data_dir: str) -> List[str]:
     return [d.key for d in loader.available_datasets(data_dir)]
+
+
+@st.cache_data(show_spinner=False)
+def prism_present_keys(prism_dir: str) -> List[str]:
+    return loader.prism_available(prism_dir)
+
+
+@st.cache_data(show_spinner=False)
+def tle_summary(tle_dir: str, tle_fp: str) -> dict:
+    return satellites.archive_summary(satellites.load_tle_dir(tle_dir))
+
+
+@st.cache_data(show_spinner="Propagating D2C satellites (SGP4)…")
+def visibility_columns(
+    _frame: pd.DataFrame,
+    cache_key: Tuple,
+    tle_dir: str,
+    tle_fp: str,
+    offset_hours: float,
+    masks: Tuple[int, ...],
+) -> pd.DataFrame:
+    """Per-sample D2C visibility columns for ``_frame`` (heavy → cached).
+
+    ``_frame`` is not part of the cache key (leading underscore); ``cache_key``
+    carries the identifiers that actually determine its rows, plus the TLE
+    fingerprint and UTC offset, so the propagation reruns only when those change.
+    """
+    sats = satellites.filter_dtc(satellites.load_tle_dir(tle_dir))
+    annotated = satellites.annotate_frame(
+        _frame.reset_index(drop=True),
+        sats,
+        masks=list(masks),
+        utc_offset_hours=offset_hours,
+    )
+    cols = [f"sat_vis_{m}" for m in masks] + ["sat_max_elev"]
+    return annotated[cols].reset_index(drop=True)
+
+
+@st.cache_data(show_spinner="Counting distinct satellites…")
+def distinct_sats(
+    _sel: pd.DataFrame, cache_key: Tuple, tle_dir: str, tle_fp: str,
+    mask: int, offset_hours: float,
+) -> int:
+    """Distinct D2C satellites ever above ``mask`` across the current selection.
+
+    Unlike the per-sample count (how many are up at an instant), this counts the
+    different satellites that passed through the whole window. Cached on a
+    fingerprint of the selection so it only recomputes when the filter changes.
+    """
+    sats = satellites.filter_dtc(satellites.load_tle_dir(tle_dir))
+    return satellites.distinct_visible_count(
+        _sel, sats, float(mask), utc_offset_hours=float(offset_hours)
+    )
 
 
 def theme_mode() -> str:
@@ -135,37 +197,87 @@ st.session_state.setdefault("regions", [])
 with st.sidebar:
     st.markdown(f"### {APP_TITLE}")
 
-    default_dir = os.environ.get("QP_DATA_DIR", str(Path(__file__).parent / "QP CSV"))
-    data_dir = st.text_input("Data folder", value=default_dir)
+    default_qp = os.environ.get("QP_DATA_DIR", str(Path(__file__).parent / "QP CSV"))
+    default_prism = os.environ.get(
+        "PRISM_DATA_DIR", str(Path(__file__).parent / "PRISM CSV")
+    )
+    qp_dir = st.text_input("QP data folder", value=default_qp)
+    prism_dir = st.text_input(
+        "PRISM data folder",
+        value=default_prism,
+        help="PRISM SDR scan exports. Leave as-is if you have none — the app "
+             "simply reads whichever sources are present.",
+    )
     if st.button("Reload data", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 
-    present = available(data_dir)
-    if not present:
-        st.error(f"No QP CSV files found in `{data_dir}`.")
+    qp_present = available(qp_dir)
+    prism_present = prism_present_keys(prism_dir)
+    providers_present = (["QP"] if qp_present else []) + (
+        ["PRISM"] if prism_present else []
+    )
+    if not providers_present:
+        st.error(
+            f"No QP CSV files in `{qp_dir}` and no PRISM CSV files in `{prism_dir}`."
+        )
         st.stop()
 
     st.divider()
     st.markdown("#### 1 · Data source")
+
+    # QP (Qualipoc phone) vs PRISM (SDR scanner) are genuinely different
+    # measurements, so they get their own top-level filter. Empty means pool all
+    # present sources; the same idiom as every other filter below.
+    if len(providers_present) > 1:
+        provider_sel = st.multiselect(
+            "Measurement source",
+            options=providers_present,
+            default=[],
+            key="f_providers",
+            help="QP is the Qualipoc phone (connected-mode logs, one serving "
+                 "cell); PRISM is the SDR scanner (every audible cell, signal "
+                 "only). Leave empty to pool both; split CDF/Statistics by "
+                 "“Measurement source” to compare them.",
+            placeholder=f"All ({len(providers_present)})",
+        )
+    else:
+        provider_sel = []
+        st.caption(f"Measurement source: **{providers_present[0]}**")
+    providers_active = provider_sel or providers_present
 
     tech = st.radio(
         "Technology",
         list(TECHNOLOGIES),
         horizontal=True,
         key="tech_choice",
-        help="Which radio technology to read. The matching Qualipoc exports are "
-             "selected automatically from the metric you pick below.",
+        help="Which radio technology to read. The matching exports are selected "
+             "automatically from the metric you pick below.",
     )
     tech_value = TECHNOLOGIES[tech]
-    in_tech = [
-        k for k in present if tech_value is None or DATASETS_BY_KEY[k].tech == tech_value
-    ]
-    if not in_tech:
-        st.warning(f"No {tech} exports in this folder.")
+
+    qp_in_tech = (
+        [k for k in qp_present if tech_value is None or DATASETS_BY_KEY[k].tech == tech_value]
+        if "QP" in providers_active
+        else []
+    )
+    prism_in_tech = (
+        [
+            k
+            for k in prism_present
+            if tech_value is None or PRISM_DATASETS_BY_KEY[k].tech == tech_value
+        ]
+        if "PRISM" in providers_active
+        else []
+    )
+    if not qp_in_tech and not prism_in_tech:
+        st.warning(f"No {tech} exports for the selected measurement source(s).")
         st.stop()
 
-    metric_keys = metrics_available(in_tech)
+    metric_keys = metrics_available(qp_in_tech + prism_in_tech)
+    if not metric_keys:
+        st.warning("No offered metric is available for this selection.")
+        st.stop()
     metric = st.selectbox(
         "Metric",
         options=metric_keys,
@@ -174,14 +286,23 @@ with st.sidebar:
         key="metric_choice",
     )
 
-    source_keys = [d.key for d in datasets_for(metric, tech_value, available=in_tech)]
+    qp_source_keys = [d.key for d in datasets_for(metric, tech_value, available=qp_in_tech)]
+    prism_source_keys = [
+        d.key for d in prism_datasets_for(metric, tech_value, available=prism_in_tech)
+    ]
+    reading = qp_source_keys + prism_source_keys
     st.caption(
         "Reading "
-        + ", ".join(f"**{DATASETS_BY_KEY[k].label}**" for k in source_keys)
+        + ", ".join(f"**{ALL_DATASETS_BY_KEY[k].label}**" for k in reading)
         + ". Narrow this with the Direction and Data source filters below."
     )
 
-frame = load_frame(data_dir, tuple(sorted(source_keys)))
+_parts = []
+if qp_source_keys:
+    _parts.append(load_frame(qp_dir, tuple(sorted(qp_source_keys))))
+if prism_source_keys:
+    _parts.append(load_prism_frame(prism_dir, tuple(sorted(prism_source_keys))))
+frame = loader.concat_frames(_parts)
 frame = frame[frame[metric].notna()] if metric in frame.columns else frame.iloc[0:0]
 freq_label = loader.freq_label_for(frame)
 freq_prefix = loader.freq_prefix_for(frame)
@@ -203,12 +324,12 @@ with st.sidebar:
     )
     step0 = flt.apply_filters(frame, flt.Filters(links=links))
 
-    source_options = [k for k in source_keys if k in set(step0["source"].dropna())]
+    source_options = [k for k in reading if k in set(step0["source"].dropna())]
     sources = st.multiselect(
         "Data source",
         options=source_options,
         default=[],
-        format_func=lambda k: DATASETS_BY_KEY[k].label,
+        format_func=lambda k: ALL_DATASETS_BY_KEY[k].label,
         key="f_sources",
         help="Leave empty to include all of the exports listed above.",
         placeholder=f"All ({len(source_options)})",
@@ -284,6 +405,111 @@ with st.sidebar:
         help="LTE PUCCH has no GPS columns; enable to keep such rows when a region is drawn.",
     )
 
+    # ------------------------------------------------------------------- #
+    # Time window
+    # ------------------------------------------------------------------- #
+    # Data spans many days, so a fixed slider over the whole span is useless
+    # for picking a few minutes. Instead the window is bounded by the data that
+    # survives every *other* filter (collection, band, PCI, region) — draw a
+    # spot or pick a collection and the slider auto-scales to that session, so a
+    # 10-minute window is easy to select.
+    st.markdown("**Time window**")
+    _time_scope = flt.apply_filters(
+        frame,
+        flt.Filters(
+            links=links, sources=sources, collections=collections, bands=bands,
+            freqs=freqs, pcis=effective_pcis, regions=st.session_state["regions"],
+            require=("pci", "freq") if drop_unknown else (),
+            keep_ungeolocated=keep_ungeo,
+        ),
+    )
+    _tt = pd.to_datetime(_time_scope["time"], errors="coerce").dropna()
+    time_range = None
+    _windows = flt.data_windows(_tt, gap_seconds=300.0)
+    if _tt.empty or _tt.min() == _tt.max():
+        st.caption("Not enough time span in the current selection to window.")
+    else:
+        tmin = _tt.min().to_pydatetime()
+        tmax = _tt.max().to_pydatetime()
+        # actual data coverage (sum of session lengths), not the empty raw span
+        data_min = sum(
+            (e - s).total_seconds() for s, e, _ in _windows
+        ) / 60.0
+        # A readable list of the sessions that actually hold data, so you can put
+        # the window on one instead of a dead gap between days.
+        def _win_label(s, e, n):
+            same_day = s.date() == e.date()
+            tail = f"{e:%H:%M}" if same_day else f"{e:%m/%d %H:%M}"
+            return f"{s:%m/%d %H:%M}–{tail} ({(e - s).total_seconds() / 60:.0f}m)"
+
+        _labels = [_win_label(s, e, n) for s, e, n in _windows]
+        shown = " · ".join(_labels[:6]) + (
+            f"  +{len(_labels) - 6} more" if len(_labels) > 6 else ""
+        )
+        st.caption(
+            f"**{len(_windows)} data window(s), {data_min:.0f} min total** "
+            f"across {(tmax - tmin).total_seconds() / 86400:.1f} days:  {shown}"
+        )
+
+        use_time = st.checkbox(
+            "Limit to a time window",
+            value=False,
+            key="use_time_window",
+            help="Count what you saw at a spot over a few minutes — pair it with "
+                 "a region drawn on the map.",
+        )
+        if use_time:
+            # Jump straight to a session so you never land in an empty gap.
+            if len(_labels) > 1:
+                jump = st.selectbox(
+                    "Jump to a data window",
+                    ["(manual)"] + _labels,
+                    key="time_jump",
+                    help="Sets the window start to that session's first sample.",
+                )
+                if jump != "(manual)" and st.session_state.get("_time_jump_prev") != jump:
+                    st.session_state["time_start"] = _windows[_labels.index(jump)][0].to_pydatetime()
+                    st.session_state["_time_jump_prev"] = jump
+                    st.rerun()
+                if jump == "(manual)":
+                    st.session_state["_time_jump_prev"] = "(manual)"
+            # Keep the stored start inside the current bounds (they change when
+            # you pick a collection or draw a region).
+            if "time_start" not in st.session_state or not (
+                tmin <= st.session_state["time_start"] <= tmax
+            ):
+                st.session_state["time_start"] = tmin
+            start = st.slider(
+                "Window start",
+                min_value=tmin, max_value=tmax,
+                step=timedelta(minutes=1), format="MM/DD HH:mm", key="time_start",
+            )
+            dur = st.number_input(
+                "Window length (minutes)",
+                min_value=1, max_value=int(max(2, data_min)) + 1,
+                value=int(min(10, max(1, data_min))), step=1, key="time_len",
+            )
+            end = min(start + timedelta(minutes=int(dur)), tmax)
+            time_range = (pd.Timestamp(start), pd.Timestamp(end))
+            _in_win = int(((_tt >= time_range[0]) & (_tt <= time_range[1])).sum())
+            st.caption(
+                f"{start:%m/%d %H:%M} → {end:%m/%d %H:%M} · "
+                f"**{_in_win:,} samples** in window"
+                + ("" if _in_win else " — this window is empty; pick a data window above.")
+            )
+
+    # When the time window changes, the satellite estimate (computed for the
+    # previous window) is stale, so clear the "Estimate visible D2C satellites"
+    # toggle rather than show misleading numbers. The sat checkbox is rendered
+    # below, so unsetting its state here makes it come up unchecked; a hint there
+    # invites re-enabling to recompute for the new window.
+    _wr = (str(time_range[0]), str(time_range[1])) if time_range else None
+    if "_last_time_range" in st.session_state and st.session_state["_last_time_range"] != _wr:
+        if st.session_state.get("sat_enable"):
+            st.session_state["sat_enable"] = False
+            st.session_state["_sat_window_dropped"] = True
+    st.session_state["_last_time_range"] = _wr
+
     st.divider()
     with st.expander("Display options"):
         min_samples = st.number_input(
@@ -292,7 +518,6 @@ with st.sidebar:
         max_curve_points = st.number_input(
             "Max points per curve", min_value=100, max_value=100000, value=2000, step=500
         )
-        complementary = st.checkbox("Plot CCDF (1 − CDF)", value=False)
         max_map_points = st.number_input(
             "Max points on map", min_value=200, max_value=20000, value=3000, step=500
         )
@@ -305,6 +530,95 @@ with st.sidebar:
             index=1,
         )
 
+    st.divider()
+    with st.expander("🛰️ Satellite visibility (D2C)"):
+        sat_enable = st.checkbox(
+            "Estimate visible D2C satellites",
+            value=False,
+            key="sat_enable",
+            help="Propagate Starlink Direct-to-Cell TLEs with SGP4 and count how "
+                 "many were above the elevation mask at each QP sample's time and "
+                 "location. Needs TLE files (see below); QP GPS rows only.",
+        )
+        if sat_enable:
+            st.session_state["_sat_window_dropped"] = False
+        elif st.session_state.get("_sat_window_dropped"):
+            st.info("Time window changed — tick above to recompute for the new window.")
+        default_tle = os.environ.get(
+            "TLE_DATA_DIR", str(Path(__file__).parent / "TLE")
+        )
+        tle_dir = st.text_input("TLE folder", value=default_tle)
+        tle_fp = satellites.tle_fingerprint(tle_dir)
+        summary = tle_summary(tle_dir, tle_fp)
+        if summary["objects"]:
+            emin, emax = summary["epoch_min"], summary["epoch_max"]
+            span = (
+                f"{emin:%Y-%m-%d} → {emax:%Y-%m-%d}" if emin and emax else "—"
+            )
+            st.caption(
+                f"**{summary['dtc_unique']}** D2C satellites "
+                f"({summary['dtc']} TLEs) of {summary['objects']} objects · "
+                f"epochs {span}"
+            )
+        else:
+            st.caption(
+                "No TLE files found. Drop `*.tle` snapshots into this folder "
+                "(D2C sats carry a `[DTC]` name tag), or fetch below."
+            )
+        sat_mask = st.select_slider(
+            "Elevation mask (°)",
+            options=list(satellites.DEFAULT_MASKS),
+            value=25,
+            help="A satellite counts as visible at or above this elevation angle. "
+                 "25° is typical for direct-to-cell.",
+        )
+        sat_offset = st.number_input(
+            "Measurement clock → UTC offset (hours)",
+            value=0.0, step=1.0, format="%.1f",
+            help="Set to your logs' UTC offset so satellite geometry lines up "
+                 "with real time. e.g. −4 if the timestamps are US/Eastern (EDT). "
+                 "0 means the timestamps are already UTC.",
+        )
+        if st.button("Fetch today's Starlink TLEs", width="stretch"):
+            try:
+                path = satellites.fetch_celestrak(tle_dir)
+                st.success(f"Fetched → {Path(path).name}")
+                tle_summary.clear()
+                st.rerun()
+            except Exception as exc:  # network is often unavailable in-session
+                st.warning(f"Could not fetch: {exc}")
+
+# --------------------------------------------------------------------------- #
+# Satellite visibility annotation (before filtering, so every tab inherits it)
+# --------------------------------------------------------------------------- #
+
+sat_columns = [f"sat_vis_{m}" for m in satellites.DEFAULT_MASKS] + ["sat_max_elev"]
+sat_missing_dep = bool(sat_enable) and not satellites.HAVE_SGP4
+if sat_missing_dep:
+    st.warning(
+        "Satellite visibility needs the **sgp4** package, which isn't installed "
+        "in this environment. Install it and restart:  `pip install sgp4`  "
+        "(or `pip install -r requirements.txt`)."
+    )
+sat_active = (
+    bool(sat_enable)
+    and satellites.HAVE_SGP4
+    and tle_summary(tle_dir, tle_fp)["dtc"] > 0
+)
+sat_vis_col = f"sat_vis_{int(sat_mask)}" if sat_enable else None
+if sat_active and not frame.empty:
+    frame = frame.reset_index(drop=True)
+    _vis_key = (
+        qp_dir, tuple(sorted(qp_source_keys)), prism_dir,
+        tuple(sorted(prism_source_keys)), metric, float(sat_offset), tle_fp,
+    )
+    _vis = visibility_columns(
+        frame, _vis_key, tle_dir, tle_fp, float(sat_offset),
+        tuple(satellites.DEFAULT_MASKS),
+    )
+    for c in sat_columns:
+        frame[c] = _vis[c].to_numpy()
+
 active = flt.apply_filters(
     frame,
     flt.Filters(
@@ -315,6 +629,7 @@ active = flt.apply_filters(
         freqs=freqs,
         pcis=effective_pcis,
         regions=st.session_state["regions"],
+        time_range=time_range,
         metric=metric,
         require=("pci", "freq") if drop_unknown else (),
         keep_ungeolocated=keep_ungeo,
@@ -331,6 +646,7 @@ unregioned = flt.apply_filters(
         bands=bands,
         freqs=freqs,
         pcis=effective_pcis,
+        time_range=time_range,
         metric=metric,
         require=("pci", "freq") if drop_unknown else (),
     ),
@@ -342,20 +658,68 @@ unregioned = flt.apply_filters(
 # --------------------------------------------------------------------------- #
 
 metric_meta = METRICS[metric]
-head = st.columns([2, 1, 1, 1, 1])
+show_sat_kpi = sat_active and sat_vis_col in active.columns and active[sat_vis_col].notna().any()
+show_enb_kpi = "enb" in active.columns and active["enb"].notna().any()
+
+# Distinct D2C satellites across the whole selection — shown in the header so it
+# is visible on every tab. It is a propagation, so only compute it when the
+# selection is a window or otherwise small; on the full multi-day set it is both
+# slow and not meaningful (it would approach the whole catalogue).
+hdr_distinct = None
+if show_sat_kpi:
+    _hgeo = active[active[sat_vis_col].notna()]
+    _windowed = time_range is not None
+    if _windowed or len(_hgeo) <= 6000:
+        _hlat = pd.to_numeric(_hgeo["lat"], errors="coerce")
+        _hlon = pd.to_numeric(_hgeo["lon"], errors="coerce")
+        _ht = pd.to_datetime(_hgeo["time"], errors="coerce")
+        _hk = (
+            len(_hgeo), str(_ht.min()), str(_ht.max()),
+            round(float(_hlat.sum()), 2), round(float(_hlon.sum()), 2),
+            int(sat_mask), tle_fp, float(sat_offset),
+        )
+        hdr_distinct = distinct_sats(_hgeo, _hk, tle_dir, tle_fp, int(sat_mask), float(sat_offset))
+
+widths = (
+    [2, 1, 1, 1, 1]
+    + ([1] if show_enb_kpi else [])
+    + ([1] if show_sat_kpi else [])
+)
+head = st.columns(widths)
 head[0].markdown(f"### {metric_meta.label} · {tech}")
 head[1].metric("Samples", f"{len(active):,}")
 head[2].metric("Collections", f"{active['collection'].nunique():,}")
 head[3].metric("PCIs", f"{active['pci'].nunique():,}")
 head[4].metric(freq_label, f"{active['freq'].nunique():,}")
+_next = 5
+if show_enb_kpi:
+    head[_next].metric("eNB / gNB", f"{active['enb'].nunique():,}")
+    _next += 1
+if show_sat_kpi:
+    head[_next].metric(
+        f"Distinct sats ≥{int(sat_mask)}°",
+        f"{hdr_distinct:,}" if hdr_distinct is not None else "—",
+        help="Distinct D2C satellites that passed through the whole selection "
+             "(grows with the window — compare against the eNB count). "
+             "Shown for a time window or a small selection; set a Time window in "
+             "the sidebar to compute it on the full data." if hdr_distinct is None
+             else "Distinct D2C satellites that passed through the whole selection "
+                  "(grows with the window — compare against the eNB count).",
+    )
 
 if active.empty:
     st.info("No samples match the current filters.")
     st.stop()
 
-tab_map, tab_cdf, tab_cells, tab_stats, tab_data = st.tabs(
-    ["🗺️ Map", "📈 CDF curves", "🛰️ Cell identity", "📊 Statistics", "🧾 Data"]
-)
+tab_labels = ["🗺️ Map", "📈 CDF curves", "🛰️ Cell identity", "📊 Statistics", "🧾 Data"]
+if sat_enable:
+    tab_labels.insert(1, "🛰️ D2C visibility")
+_tabs = st.tabs(tab_labels)
+if sat_enable:
+    tab_map, tab_sat, tab_cdf, tab_cells, tab_stats, tab_data = _tabs
+else:
+    tab_map, tab_cdf, tab_cells, tab_stats, tab_data = _tabs
+    tab_sat = None
 
 
 # --------------------------------------------------------------------------- #
@@ -367,17 +731,54 @@ with tab_map:
 
     left, right = st.columns([4, 1])
     with right:
+        _SAT_OPT = "D2C satellites visible"
         color_options = ["Metric"] + [
             l for l in identity.available_levels(active) if l != "ssb"
         ]
+        if show_sat_kpi:
+            color_options.append(_SAT_OPT)
         color_choice = st.selectbox(
             "Colour by",
             color_options,
-            format_func=lambda c: "Metric" if c == "Metric" else identity.label_for(c),
-            help="Colouring by an identity shows how the serving cell changes "
-                 "along the route: terrestrial cells hold whole stretches, "
-                 "satellite cells interleave.",
+            format_func=lambda c: c if c in ("Metric", _SAT_OPT) else identity.label_for(c),
+            help="Colour each point by the metric, categorically by serving PCI / "
+                 "eNB-gNB / Sector, or (when enabled) by how many D2C satellites "
+                 "were overhead at that instant.",
         )
+
+        # When colouring by an identity there can be dozens of PCIs or eNBs.
+        # "Every cell" gives each its own generated colour (no grey dump);
+        # "Top N + Other" keeps the busiest N and folds the rest into grey.
+        color_all = False
+        color_max_slots = 8
+        if color_choice not in ("Metric", _SAT_OPT):
+            n_ids = int(active[color_choice].nunique())
+            cat_scheme = st.radio(
+                "Colour scheme",
+                ["Every cell", "Top N + Other"],
+                key="map_cat_scheme",
+                help="“Every cell” gives all "
+                     f"{n_ids} {identity.label_for(color_choice)} their own "
+                     "colour so none are lost to grey; the legend scrolls. "
+                     "“Top N + Other” keeps only the busiest N.",
+            )
+            if cat_scheme == "Every cell":
+                color_all = True
+                st.caption(
+                    f"{n_ids:,} distinct {identity.label_for(color_choice)}, "
+                    "each its own colour"
+                    + (" (capped at 60)." if n_ids > 60 else ".")
+                )
+            else:
+                color_max_slots = st.slider(
+                    "Coloured cells",
+                    min_value=2,
+                    max_value=int(min(40, max(2, n_ids))),
+                    value=int(min(8, max(2, n_ids))),
+                    key="map_cat_slots",
+                    help="The rest fold into a single grey “Other”.",
+                )
+
         apply_region_to_map = st.checkbox("Apply region to map", value=False)
         marker_radius = st.slider("Marker size", 2, 12, 4)
         midpoint = st.number_input(
@@ -391,20 +792,29 @@ with tab_map:
             "region. It applies to every tab."
         )
 
+    # Colouring by satellite count is a continuous scale over the sat_vis column,
+    # not the signal metric; everything else colours by the metric.
+    sat_color = color_choice == _SAT_OPT
+    map_metric = sat_vis_col if sat_color else metric
+    map_metric_label = (
+        f"D2C satellites ≥{int(sat_mask)}°" if sat_color else metric_meta.axis_label
+    )
     map_source = active if apply_region_to_map else unregioned
     fmap, _, _ = mapview.build_map(
         map_source,
-        metric,
-        metric_meta.axis_label,
-        scale=map_scale,
+        map_metric,
+        map_metric_label,
+        scale="sequential" if sat_color else map_scale,
         midpoint=midpoint,
         max_points=int(max_map_points),
         tiles=tiles,
         mode=MODE,
         regions=st.session_state["regions"],
         radius=int(marker_radius),
-        color_by=None if color_choice == "Metric" else color_choice,
-        color_by_label="" if color_choice == "Metric" else identity.label_for(color_choice),
+        color_by=None if color_choice in ("Metric", _SAT_OPT) else color_choice,
+        color_by_label="" if color_choice in ("Metric", _SAT_OPT) else identity.label_for(color_choice),
+        color_max_slots=int(color_max_slots),
+        color_all=bool(color_all),
     )
     with left:
         result = st_folium(
@@ -425,6 +835,183 @@ with tab_map:
         f"{geo_rows:,} geolocated samples · showing up to {int(max_map_points):,} "
         f"(evenly thinned). Rows without GPS are never drawn."
     )
+    if "provider" in map_source.columns:
+        prism_rows = int((map_source["provider"] == "PRISM").sum())
+        prism_geo = int((flt.geolocated(map_source)["provider"] == "PRISM").sum())
+        if prism_rows and not prism_geo:
+            st.info(
+                f"{prism_rows:,} PRISM scan rows carry no GPS fix, so they are not "
+                "drawn on the map — see the CDF curves, Statistics and Data tabs "
+                "to compare them by location and cell."
+            )
+
+
+# --------------------------------------------------------------------------- #
+# D2C satellite visibility
+# --------------------------------------------------------------------------- #
+
+if tab_sat is not None:
+    with tab_sat:
+        if not sat_active:
+            st.info(
+                "No Direct-to-Cell TLEs loaded. Put dated Starlink TLE files "
+                "(objects tagged `[DTC]`) in the **TLE folder** set in the sidebar "
+                "— historical snapshots for the campaign dates, refreshed daily "
+                "going forward — then this tab estimates how many D2C satellites "
+                "were overhead at each QP sample."
+            )
+        else:
+            vis = active[active[sat_vis_col].notna()].copy()
+            if vis.empty:
+                st.info(
+                    "No geolocated QP samples in the current filter to compute "
+                    "visibility for (PRISM rows have no GPS and are excluded)."
+                )
+            else:
+                counts = pd.to_numeric(vis[sat_vis_col], errors="coerce")
+                elev = pd.to_numeric(vis["sat_max_elev"], errors="coerce")
+                summ = tle_summary(tle_dir, tle_fp)
+                emin, emax = summ["epoch_min"], summ["epoch_max"]
+                dmin = pd.to_datetime(vis["time"]).min()
+                dmax = pd.to_datetime(vis["time"]).max()
+
+                # Distinct satellites that passed through the *whole* selection —
+                # this grows with the window, unlike the instantaneous count.
+                _vlat = pd.to_numeric(vis["lat"], errors="coerce")
+                _vlon = pd.to_numeric(vis["lon"], errors="coerce")
+                _dk = (
+                    len(vis), str(dmin), str(dmax),
+                    round(float(_vlat.sum()), 2), round(float(_vlon.sum()), 2),
+                    int(sat_mask), tle_fp, float(sat_offset),
+                )
+                n_distinct = distinct_sats(
+                    vis, _dk, tle_dir, tle_fp, int(sat_mask), float(sat_offset)
+                )
+                win_min = (dmax - dmin).total_seconds() / 60.0 if pd.notna(dmin) else 0.0
+
+                k = st.columns(6)
+                k[0].metric(f"Distinct in window ≥{int(sat_mask)}°", f"{n_distinct:,}")
+                k[1].metric("Median at once", f"{counts.median():.0f}")
+                k[2].metric("Max at once", f"{int(counts.max())}")
+                k[3].metric("Mean", f"{counts.mean():.1f}")
+                k[4].metric("Samples with ≥1", f"{100*(counts>=1).mean():.0f}%")
+                k[5].metric("D2C sats in TLEs", f"{summ['dtc_unique']}")
+
+                st.markdown(
+                    f"**{n_distinct} distinct D2C satellites** rose above "
+                    f"{int(sat_mask)}° across the selection "
+                    f"({win_min:.0f} min, {len(vis):,} samples) — versus a peak of "
+                    f"**{int(counts.max())}** overhead at any one instant."
+                )
+                if emin and emax:
+                    st.caption(
+                        f"TLE epochs span {emin:%Y-%m-%d}→{emax:%Y-%m-%d}; data here "
+                        f"spans {dmin:%Y-%m-%d}→{dmax:%Y-%m-%d}. Each sample is "
+                        "propagated from the nearest-epoch TLE — the closer the "
+                        "epoch, the more accurate the count. Mask and UTC offset "
+                        "are set in the sidebar."
+                    )
+
+                view = st.radio(
+                    "View",
+                    ["Cells vs satellites", "Over time", "Distribution"],
+                    horizontal=True,
+                    key="sat_view",
+                )
+
+                if view == "Cells vs satellites":
+                    have_enb = "enb" in vis.columns and vis["enb"].notna().any()
+                    d_enb = int(vis["enb"].nunique()) if have_enb else 0
+                    d_pci = int(vis["pci"].nunique())
+                    kk = st.columns(5)
+                    kk[0].metric("Distinct eNB/gNB", f"{d_enb:,}" if have_enb else "—")
+                    kk[1].metric("Distinct PCI", f"{d_pci:,}")
+                    kk[2].metric(f"Distinct D2C sats ≥{int(sat_mask)}°", f"{n_distinct:,}")
+                    kk[3].metric(
+                        "eNB per satellite",
+                        f"{d_enb / n_distinct:.1f}" if (have_enb and n_distinct > 0) else "—",
+                    )
+                    kk[4].metric(
+                        "PCI per satellite",
+                        f"{d_pci / n_distinct:.1f}" if n_distinct > 0 else "—",
+                    )
+                    st.caption(
+                        "**Draw a region on the Map and set a Time window in the "
+                        "sidebar** to read this for one spot over a few minutes. "
+                        "eNB identity needs the connected radio, so use the "
+                        "**RSRP · LTE** (or NR) metric. The ratios divide the "
+                        "*distinct* eNB/PCI seen by the *distinct* satellites that "
+                        "passed through the window (not the ~handful up at any "
+                        "instant) — a rough sense of how many cells ride one "
+                        "spacecraft."
+                    )
+                    # Per-collection (per-session) breakdown, so it is useful even
+                    # before you window down to a single spot. Distinct-per-session
+                    # is a propagation per group, so only do it for a few sessions.
+                    groups = list(vis.groupby("collection", observed=True))
+                    per_distinct = len(groups) <= 12
+                    _dtc = (
+                        satellites.filter_dtc(satellites.load_tle_dir(tle_dir))
+                        if per_distinct else None
+                    )
+                    rows = []
+                    for coll, g in groups:
+                        c = pd.to_numeric(g[sat_vis_col], errors="coerce")
+                        gt = pd.to_datetime(g["time"], errors="coerce")
+                        mins = (gt.max() - gt.min()).total_seconds() / 60 if gt.notna().any() else 0.0
+                        e = int(g["enb"].nunique()) if have_enb else 0
+                        p = int(g["pci"].nunique())
+                        peak = int(c.max()) if c.notna().any() else 0
+                        row = {
+                            "Collection": coll, "Minutes": round(mins, 1),
+                            "Samples": len(g), "eNB": e, "PCI": p, "Peak sats": peak,
+                        }
+                        if per_distinct:
+                            ds = satellites.distinct_visible_count(
+                                g, _dtc, int(sat_mask), utc_offset_hours=float(sat_offset)
+                            )
+                            row["Distinct sats"] = ds
+                            row["eNB/sat"] = round(e / ds, 2) if (ds and have_enb) else None
+                            row["PCI/sat"] = round(p / ds, 2) if ds else None
+                        rows.append(row)
+                    bd = pd.DataFrame(rows).sort_values("Samples", ascending=False)
+                    with st.expander("Per-collection breakdown", expanded=True):
+                        if not per_distinct:
+                            st.caption(
+                                f"{len(groups)} collections selected — narrow the "
+                                "filters (or window down) to under 12 to get the "
+                                "per-session distinct-satellite count and ratios."
+                            )
+                        st.dataframe(bd, width="stretch", hide_index=True, height=300)
+                        st.download_button(
+                            "Download (CSV)", bd.to_csv(index=False).encode(),
+                            file_name="cells_vs_satellites.csv", mime="text/csv",
+                        )
+                elif view == "Over time":
+                    ts = vis[["time", "collection", sat_vis_col]].copy()
+                    ts["time"] = pd.to_datetime(ts["time"], errors="coerce")
+                    ts = ts.dropna(subset=["time"]).sort_values("time")
+                    fig = charts.sat_timeseries_figure(
+                        ts, sat_vis_col, int(sat_mask), mode=MODE
+                    )
+                    st.plotly_chart(fig, width="stretch")
+                elif view == "Distribution":
+                    fig = charts.sat_histogram_figure(counts, int(sat_mask), mode=MODE)
+                    st.plotly_chart(fig, width="stretch")
+
+                with st.expander("Per-sample visibility as a table"):
+                    tbl = vis[["time", "collection", "pci", sat_vis_col, "sat_max_elev"]].rename(
+                        columns={sat_vis_col: f"visible≥{int(sat_mask)}°",
+                                 "sat_max_elev": "max elev (°)"}
+                    )
+                    st.dataframe(tbl.head(5000), width="stretch", height=340, hide_index=True)
+                    st.download_button(
+                        "Download visibility (CSV)",
+                        vis[["time", "collection", "lat", "lon", "pci", sat_vis_col,
+                             "sat_max_elev"]].to_csv(index=False).encode(),
+                        file_name=f"d2c_visibility_{int(sat_mask)}deg.csv",
+                        mime="text/csv",
+                    )
 
 
 # --------------------------------------------------------------------------- #
@@ -448,7 +1035,20 @@ with tab_cdf:
         "Max curves", min_value=1, max_value=60, value=12, step=1,
         help="Largest samples first.",
     )
-    sort_note = controls[2].empty()
+    plot_as = controls[2].radio(
+        "Plot as", ["CDF", "CCDF", "PDF"], horizontal=True, key="cdf_plot_as",
+        help="CDF/CCDF are cumulative curves; PDF is an overlaid histogram — best "
+             "for seeing where the mass piles up (e.g. the N-factor at 25/50/100).",
+    )
+    complementary = plot_as == "CCDF"
+    pdf_bins = 60
+    if plot_as == "PDF":
+        pdf_bins = st.slider(
+            "Histogram bins", min_value=10, max_value=200, value=60, step=5,
+            key="cdf_pdf_bins",
+            help="More bins → finer resolution near the integer values.",
+        )
+    sort_note = st.empty()
 
     curves = stats.cdf_curves(
         active,
@@ -470,15 +1070,15 @@ with tab_cdf:
             "sidebar or widen the filters."
         )
     else:
-        st.plotly_chart(
-            charts.cdf_figure(
-                curves,
-                metric_meta.axis_label,
-                mode=MODE,
-                complementary=complementary,
-            ),
-            width="stretch",
-        )
+        if plot_as == "PDF":
+            fig = charts.pdf_figure(
+                curves, metric_meta.axis_label, mode=MODE, bins=int(pdf_bins)
+            )
+        else:
+            fig = charts.cdf_figure(
+                curves, metric_meta.axis_label, mode=MODE, complementary=complementary
+            )
+        st.plotly_chart(fig, width="stretch")
         with st.expander("Curve values as a table"):
             st.dataframe(
                 pd.DataFrame(
@@ -504,11 +1104,20 @@ with tab_cdf:
 
 with tab_cells:
     # Serving-cell identity is a property of the connection, not of the metric
-    # you happen to be plotting - and only the Radio exports carry eNB/gNB-Id
-    # and Sector Id. So this tab reads those directly, under the same filters.
+    # you happen to be plotting - and only the QP Radio exports carry a serving
+    # cell over time. PRISM is a scanner: it hears every cell at once, so there
+    # is no single serving cell to build a dwell timeline from.
+    if "QP" not in providers_active:
+        st.info(
+            "Cell identity (serving cell, dwell, hand-overs) comes from Qualipoc "
+            "connected-mode logs. Add **QP** as a measurement source to use this "
+            "tab — PRISM is a scanner with no single serving cell."
+        )
+        st.stop()
+
     radio_keys = tuple(
         k
-        for k in sorted(present)
+        for k in sorted(qp_present)
         if k in ("lte_radio", "nr_radio")
         and (tech_value is None or DATASETS_BY_KEY[k].tech == tech_value)
     )
@@ -516,7 +1125,7 @@ with tab_cells:
         st.info("No Radio [connected] export for this technology, so no cell identity.")
         st.stop()
 
-    radio = load_frame(data_dir, radio_keys)
+    radio = load_frame(qp_dir, radio_keys)
 
     def _intersecting(values, column):
         """Only carry a filter across if it means anything in the radio frame."""
@@ -533,6 +1142,7 @@ with tab_cells:
             freqs=_intersecting(freqs, "freq"),
             pcis=_intersecting(effective_pcis, "pci"),
             regions=st.session_state["regions"],
+            time_range=time_range,
             keep_ungeolocated=keep_ungeo,
             require=("pci",) if drop_unknown else (),
         ),
@@ -845,6 +1455,8 @@ with tab_data:
         "lon",
         metric,
     ]
+    if sat_active and sat_vis_col in active.columns:
+        show_cols += [sat_vis_col, "sat_max_elev"]
     show_cols = [c for c in show_cols if c in active.columns]
     st.dataframe(active[show_cols].head(5000), width="stretch", height=520)
     st.caption(f"Showing the first 5,000 of {len(active):,} filtered rows.")

@@ -13,8 +13,11 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
-def _run(data_dir, timeout=120):
+def _run(data_dir, timeout=120, prism_dir=None):
     os.environ["QP_DATA_DIR"] = str(data_dir)
+    # Isolate from any real PRISM folder next to app.py: unless a test opts in,
+    # point PRISM at a directory with no CSVs so these QP assertions stay QP-only.
+    os.environ["PRISM_DATA_DIR"] = str(prism_dir) if prism_dir else "/no-prism-dir"
     app = AppTest.from_file(APP, default_timeout=timeout)
     app.run()
     return app
@@ -288,3 +291,18 @@ def test_hierarchy_can_focus_one_branch(fixture_dir, monkeypatch, tmp_path):
     assert cols.value == 2 and cols.max == 4
     cols.set_value(3).run()
     _assert_clean(app)
+
+
+def test_time_window_filter_narrows_samples(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    before = int(app.metric[0].value.replace(",", ""))
+
+    app.checkbox(key="use_time_window").set_value(True).run()
+    _assert_clean(app)
+    # a 1-minute window is shorter than the fixture's ~2-minute span
+    app.number_input(key="time_len").set_value(1).run()
+    _assert_clean(app)
+    after = int(app.metric[0].value.replace(",", ""))
+    assert after < before

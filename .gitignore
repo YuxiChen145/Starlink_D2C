@@ -1,5 +1,5 @@
-# Measurement data - the Qualipoc exports are large and stay out of the repo
-QP CSV/
+# Measurement data: raw CSVs stay local (large); the gzipped copies (*.csv.gz)
+# are committed so a plain clone / cloud deploy has data. The loader reads either.
 *.csv
 
 # Parquet cache built by qpviz.loader
@@ -18,3 +18,12 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Satellite TLE snapshots (downloaded / archived, not committed)
+TLE/*.tle
+TLE/*.txt
+!TLE/README.md
+
+# Local agent / tooling directories
+.agents/
+.claude/

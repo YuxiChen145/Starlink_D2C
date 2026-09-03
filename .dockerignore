@@ -1,0 +1,17 @@
+# Keep the image small and free of data/secrets — mount data at run time.
+QP CSV/
+PRISM CSV/
+TLE/*.tle
+TLE/*.txt
+.cache/
+*.parquet
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.git/
+.DS_Store
+.idea/
+.vscode/
+docs/*.png

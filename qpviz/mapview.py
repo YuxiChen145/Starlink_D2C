@@ -10,6 +10,7 @@ import pandas as pd
 from .charts import (
     OTHER_COLOR,
     categorical_bins,
+    categorical_counts,
     categorical_legend_html,
     color_bins,
     color_for,
@@ -72,13 +73,16 @@ def build_map(
     radius: int = 4,
     color_by: Optional[str] = None,
     color_by_label: str = "",
+    color_max_slots: int = 8,
+    color_all: bool = False,
 ):
     """Build a folium map with a rectangle/polygon draw control.
 
     Points are coloured by ``metric`` on a continuous scale, or - when
-    ``color_by`` names an identity column such as ``pci`` - categorically, with
-    the eight most common values taking the categorical slots and the rest
-    folding into a muted "Other".
+    ``color_by`` names an identity column such as ``pci`` or ``enb`` -
+    categorically. ``color_all`` gives every distinct value its own colour (no
+    grey "Other" bucket); otherwise the ``color_max_slots`` most common values
+    are coloured and the rest fold into a muted "Other".
     """
     import folium
     from folium.plugins import Draw
@@ -118,9 +122,15 @@ def build_map(
     values = pd.to_numeric(plotted[metric], errors="coerce").to_numpy(dtype="float64")
 
     categorical = bool(color_by) and color_by in plotted.columns
+    legend_counts = None
     if categorical:
         identities = plotted[color_by].to_numpy()
-        order, palette, other_count = categorical_bins(identities, mode=mode)
+        n_distinct = int(pd.Series(identities).nunique(dropna=True))
+        slots = n_distinct if color_all else int(color_max_slots)
+        order, palette, other_count = categorical_bins(
+            identities, max_slots=slots, mode=mode
+        )
+        legend_counts = categorical_counts(identities)
         edges, colors = [], []
     else:
         edges, colors = color_bins(values, scale=scale, midpoint=midpoint)
@@ -131,15 +141,24 @@ def build_map(
     pci = plotted["pci"].astype("object").to_numpy()
     freq = plotted["freq"].astype("object").to_numpy()
     coll = plotted["collection"].astype("object").to_numpy()
+    enb = (
+        plotted["enb"].astype("object").to_numpy()
+        if "enb" in plotted.columns
+        else np.full(len(plotted), None)
+    )
     times = pd.to_datetime(plotted["time"], errors="coerce").dt.strftime(
         "%Y-%m-%d %H:%M:%S"
     ).to_numpy()
+
+    def _fmt(value) -> str:
+        return "n/a" if value is None or pd.isna(value) else str(value)
 
     for i in range(len(plotted)):
         value = values[i]
         tooltip = (
             f"<b>{metric_label}: {value:.2f}</b><br>{coll[i]}<br>"
-            f"PCI {pci[i]} · ARFCN {freq[i]}<br>{times[i]}"
+            f"PCI {_fmt(pci[i])} · eNB/gNB {_fmt(enb[i])} · ARFCN {_fmt(freq[i])}"
+            f"<br>{times[i]}"
         )
         if categorical:
             fill = palette.get(identities[i], OTHER_COLOR)
@@ -173,6 +192,7 @@ def build_map(
         legend = categorical_legend_html(
             order, palette, color_by_label or color_by, mode, other_count,
             value_prefix=f"{color_by_label or color_by} " if color_by_label else "",
+            counts=legend_counts,
         )
     else:
         legend = legend_html(edges, colors, metric_label, mode)

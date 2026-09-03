@@ -117,3 +117,67 @@ def test_freq_prefix_for_is_short():
     assert loader.freq_prefix_for(pd.DataFrame({"tech": ["LTE"]})) == "EARFCN"
     assert loader.freq_prefix_for(pd.DataFrame({"tech": ["NR"]})) == "NR-ARFCN"
     assert loader.freq_prefix_for(pd.DataFrame({"tech": ["LTE", "NR"]})) == "ARFCN"
+
+
+def test_spectral_efficiency_derived_metric(fixture_dir, cache_dir):
+    ds = DATASETS_BY_KEY["lte_pdsch_pc"]
+    frame = loader.read_dataset(fixture_dir, ds, cache_dir)
+    # both derived metrics exist and are finite where throughput + RBs are present
+    assert "spec_eff" in frame.columns and "tput_per_rb" in frame.columns
+    ok = frame["throughput"].notna() & frame["spec_eff"].notna()
+    assert ok.any()
+    # exact relation: bits/RB = spec_eff x 12 x 15kHz x 1ms = spec_eff x 180 (LTE)
+    sub = frame.loc[ok]
+    ratio = (sub["tput_per_rb"] / sub["spec_eff"]).round(3)
+    assert (ratio == 180.0).all()
+    # and they are positive
+    assert (sub["spec_eff"] > 0).all()
+
+
+def test_spectral_efficiency_only_on_pdsch_pusch(fixture_dir, cache_dir):
+    # the RSRP radio export carries no throughput/RB, so no spectral efficiency;
+    # the PDSCH export does. After pooling, radio rows are NaN, PDSCH rows filled.
+    frame = loader.load(fixture_dir, ["lte_radio", "lte_pdsch_pc"], cache_dir)
+    assert frame.loc[frame["source"] == "lte_radio", "spec_eff"].isna().all()
+    assert frame.loc[frame["source"] == "lte_pdsch_pc", "spec_eff"].notna().any()
+
+
+def test_n_factor_derived_metric(fixture_dir, cache_dir):
+    frame = loader.read_dataset(fixture_dir, DATASETS_BY_KEY["lte_radio"], cache_dir)
+    assert "n_factor" in frame.columns
+    ok = frame[["rsrp", "rsrq", "rssi"]].notna().all(axis=1)
+    # N = 10^((RSRQ - RSRP + RSSI)/10), exactly
+    import numpy as np
+    expect = 10.0 ** ((frame.loc[ok, "rsrq"] - frame.loc[ok, "rsrp"] + frame.loc[ok, "rssi"]) / 10.0)
+    assert np.allclose(frame.loc[ok, "n_factor"], expect, rtol=1e-9)
+    assert (frame.loc[ok, "n_factor"] > 0).all()
+
+
+def test_n_factor_absent_without_rssi(fixture_dir, cache_dir):
+    # NR radio has RSRP/RSRQ/SINR but no RSSI, so it must not declare N-factor
+    assert "n_factor" not in DATASETS_BY_KEY["nr_radio"].metrics
+    frame = loader.load(fixture_dir, ["nr_radio", "lte_radio"], cache_dir)
+    assert frame.loc[frame["source"] == "nr_radio", "n_factor"].isna().all()
+    assert frame.loc[frame["source"] == "lte_radio", "n_factor"].notna().any()
+
+
+def test_reads_gzipped_csv(fixture_dir, tmp_path):
+    # gzip a copy of an export into a fresh dir; the loader must read it as if raw
+    import gzip, shutil
+    src = fixture_dir / DATASETS_BY_KEY["lte_radio"].filename
+    d = tmp_path / "gz"
+    d.mkdir()
+    with open(src, "rb") as f, gzip.open(d / (src.name + ".gz"), "wb") as g:
+        shutil.copyfileobj(f, g)
+    # only the .gz is present
+    assert loader._resolve_csv(d, DATASETS_BY_KEY["lte_radio"].filename).name.endswith(".gz")
+    assert {x.key for x in loader.available_datasets(d)} == {"lte_radio"}
+    frame = loader.read_dataset(d, DATASETS_BY_KEY["lte_radio"], cache_dir=None)
+    assert len(frame) > 0 and "rsrp" in frame.columns
+
+
+def test_prism_collection_strips_gz_suffix():
+    from pathlib import Path
+    a = loader.prism_collection(Path("2026_09_01_ LTE_8665_Cushing202_static.csv"))
+    b = loader.prism_collection(Path("2026_09_01_ LTE_8665_Cushing202_static.csv.gz"))
+    assert a == b == "Cushing202 static"

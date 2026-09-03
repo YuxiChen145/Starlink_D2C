@@ -89,9 +89,16 @@ def write_dataset(directory: Path, ds: Dataset, rows: int = 240, seed: int = 7) 
             if "ssb" in ds.dims:
                 row[ds.dims["ssb"]] = (i % 2) * 2
             for metric, source_col in ds.metrics.items():
+                if source_col == "@derived":
+                    continue  # spec_eff / tput_per_rb are computed, not read
                 lo, hi = METRIC_RANGES[metric]
                 # every 17th row leaves the metric blank, like the real exports
                 row[source_col] = "" if i % 17 == 0 else f"{rng.uniform(lo, hi):.3f}"
+            # RBs-allocated + SCS feed the derived spectral-efficiency metrics
+            if ds.rb_all_col:
+                row[ds.rb_all_col] = f"{rng.uniform(0.05, 8.0):.4f}"
+            if ds.scs_col:
+                row[ds.scs_col] = 15 if i % 2 == 0 else 30
             writer.writerow(row)
     return path
 
@@ -114,3 +121,87 @@ def lte_radio(fixture_dir, cache_dir):
     from qpviz import loader
 
     return loader.read_dataset(fixture_dir, DATASETS_BY_KEY["lte_radio"], cache_dir)
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic PRISM (SDR scanner) fixtures
+# --------------------------------------------------------------------------- #
+
+# Real column headers taken from the PRISM exports. PRISM has no Collection
+# column (the collection is in the file name), lower-case names, ISO timestamps,
+# and one file per technology + carrier.
+_PRISM_LTE_COLUMNS = [
+    "tech", "band", "earfcn", "frequency_mhz", "bandwidth_mhz", "rssi", "rsrp",
+    "rsrq", "sinr", "physical_cell_id", "mcc", "mnc", "tac", "cell_identity",
+    "e_node_b", "sector_id", "mib", "sib1", "sib2", "sib3", "sib4", "latitude",
+    "longitude", "altitude", "fix_type", "satellite_count",
+    "horizontal_dilution_of_precision", "gps_date_time", "system_date_time",
+    "cp", "rcs_cp", "survey_id", "scan_iteration",
+]
+_PRISM_NR_COLUMNS = [
+    "tech", "band", "nrarfcn", "frequency_mhz", "ssb_subcarrier_spacing_hz",
+    "physical_cell_id", "ss_rssi", "ss_sinr", "ss_rsrp", "ss_rsrq", "issb",
+    "mib", "mcc", "mnc", "tac", "cell_identity", "dl_freq_band_indicator",
+    "latitude", "longitude", "altitude", "fix_type", "satellite_count",
+    "horizontal_dilution_of_precision", "gps_date_time", "system_date_time",
+    "cp", "rcs_cp", "survey_id", "scan_iteration",
+]
+
+_PRISM_PCIS = [281, 163, 305, 118, 536, 742, 3, 269, 90, 131, 160, 200]
+
+
+def _write_prism(directory, filename, columns, tech, arfcn, rows, seed, geo=True):
+    rng = random.Random(seed)
+    path = directory / filename
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        base = pd.Timestamp("2026-09-01 19:00:00")
+        for i in range(rows):
+            row = {c: "" for c in columns}
+            row["tech"] = tech
+            row["band"] = "25"
+            row["physical_cell_id"] = _PRISM_PCIS[i % len(_PRISM_PCIS)]
+            row["system_date_time"] = (
+                base + pd.Timedelta(seconds=i)
+            ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+            if geo:
+                row["latitude"] = f"{41.6990 + (i % 30) * 0.0004:.6f}"
+                row["longitude"] = f"{-86.2400 + (i % 30) * 0.0004:.6f}"
+            if tech == "lte":
+                row["earfcn"] = arfcn
+                row["rssi"] = f"{rng.uniform(-100, -60):.2f}"
+                row["rsrp"] = f"{rng.uniform(-125, -80):.2f}"
+                row["rsrq"] = f"{rng.uniform(-18, -6):.2f}"
+                row["sinr"] = f"{rng.uniform(-8, 20):.2f}"
+                # eNB / sector only decoded on a fraction of scans, as in reality
+                if i % 4 == 0:
+                    row["e_node_b"] = 11000 + (i // 8) % 6
+                    row["sector_id"] = 10 + (i // 3) % 3
+            else:
+                row["nrarfcn"] = arfcn
+                row["ss_rssi"] = f"{rng.uniform(-90, -60):.2f}"
+                row["ss_rsrp"] = f"{rng.uniform(-125, -95):.2f}"
+                row["ss_rsrq"] = f"{rng.uniform(-16, -5):.2f}"
+                row["ss_sinr"] = f"{rng.uniform(-10, 12):.2f}"
+                row["issb"] = i % 4
+            writer.writerow(row)
+    return path
+
+
+@pytest.fixture(scope="session")
+def prism_dir(tmp_path_factory) -> Path:
+    directory = tmp_path_factory.mktemp("prism_csv")
+    _write_prism(
+        directory, "2026_09_01_ LTE_8665_Test_Kitchen_static.csv",
+        _PRISM_LTE_COLUMNS, "lte", 8665, rows=200, seed=1,
+    )
+    _write_prism(
+        directory, "2026_09_01_ NR_397970_Test_Kitchen_static.csv",
+        _PRISM_NR_COLUMNS, "nr", 397970, rows=160, seed=2,
+    )
+    _write_prism(
+        directory, "2026_09_02_LTE_8665_Test_Bedroom_static.csv",
+        _PRISM_LTE_COLUMNS, "lte", 8665, rows=180, seed=3,
+    )
+    return directory

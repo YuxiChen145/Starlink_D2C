@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 
 from .stats import Curve
 from .theme import (
+    CATEGORICAL,
     CHROME,
     DIVERGING_RED_BLUE,
     FONT_FAMILY,
@@ -104,6 +105,81 @@ def cdf_figure(
         linecolor=chrome["axis"],
         tickfont=dict(color=chrome["muted"], size=11),
         tickformat=".0%",
+    )
+    return fig
+
+
+def pdf_figure(
+    curves: Sequence[Curve],
+    axis_label: str,
+    mode: str = "light",
+    bins: int = 60,
+    height: int = 560,
+) -> go.Figure:
+    """Overlaid histograms (a PDF per group) sharing one set of bins.
+
+    Each group is normalised to a probability (its bars sum to 1), so groups of
+    different sizes are comparable and the mass piling up at particular values
+    (e.g. the RSRQ N-factor at 25 / 50 / 100 RBs) is easy to read.
+    """
+    chrome = CHROME.get(mode, CHROME["light"])
+    fig = go.Figure()
+
+    allx = np.concatenate(
+        [np.asarray(c.x, dtype="float64") for c in curves if len(c.x)]
+    ) if curves else np.array([])
+    allx = allx[np.isfinite(allx)]
+    if allx.size:
+        lo, hi = float(allx.min()), float(allx.max())
+        if hi <= lo:
+            hi = lo + 1.0
+        size = (hi - lo) / max(1, int(bins))
+        xbins = dict(start=lo, end=hi + size, size=size)
+    else:
+        xbins = None
+
+    for i, curve in enumerate(curves):
+        color, _ = series_style(i, mode)
+        fig.add_trace(
+            go.Histogram(
+                x=curve.x,
+                name=f"{curve.name}  (n={curve.n:,})",
+                histnorm="probability",
+                xbins=xbins,
+                marker=dict(color=color, line=dict(width=0)),
+                opacity=0.55 if len(curves) > 1 else 0.85,
+                hovertemplate=(
+                    f"<b>{curve.name}</b><br>{axis_label}: %{{x}}"
+                    "<br>%{y:.1%} of samples<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        height=height,
+        barmode="overlay",
+        bargap=0.02,
+        paper_bgcolor=chrome["surface"],
+        plot_bgcolor=chrome["surface"],
+        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
+        margin=dict(l=64, r=24, t=16, b=56),
+        hovermode="closest",
+        hoverlabel=dict(font_family=FONT_FAMILY),
+        showlegend=len(curves) >= 2,
+        legend=dict(
+            orientation="v", yanchor="top", y=1, xanchor="left", x=1.01,
+            font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
+        ),
+    )
+    fig.update_xaxes(
+        title=dict(text=axis_label, font=dict(color=chrome["text_secondary"], size=12)),
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11),
+    )
+    fig.update_yaxes(
+        title=dict(text="Fraction of samples", font=dict(color=chrome["text_secondary"], size=12)),
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11), tickformat=".0%",
     )
     return fig
 
@@ -264,25 +340,70 @@ def legend_html(
     )
 
 
-#: everything past the eight categorical slots folds into one muted "Other"
+#: everything past the coloured slots folds into one muted "Other"
 OTHER_COLOR = "#898781"
+
+#: how many of the validated categorical hues exist before the palette has to be
+#: generated; also the point past which the legend gains a count and scrolls
+_BASE_SLOTS = 8
+
+
+def generate_palette(n: int, mode: str = "light") -> List[str]:
+    """``n`` visually distinct colours, so a categorical map never runs out.
+
+    The first eight are the validated categorical hues; beyond that, colours are
+    generated on a golden-angle hue rotation with rotating lightness/saturation
+    tiers, which keeps neighbours in the sequence far apart. Hues are never
+    cycled, so two colours always mean two different identities.
+    """
+    if n <= 0:
+        return []
+    base = CATEGORICAL.get(mode, CATEGORICAL["light"])
+    if n <= len(base):
+        return list(base[:n])
+
+    import colorsys
+
+    dark = mode == "dark"
+    lightness = [0.60, 0.74, 0.46] if dark else [0.50, 0.66, 0.38]
+    saturation = [0.72, 0.52, 0.88]
+    golden = 0.6180339887498949
+    colours = list(base)  # keep the eight validated hues up front
+    for i in range(len(base), n):
+        hue = (i * golden) % 1.0
+        light = lightness[i % len(lightness)]
+        sat = saturation[(i // len(lightness)) % len(saturation)]
+        r, g, b = colorsys.hls_to_rgb(hue, light, sat)
+        colours.append(f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}")
+    return colours[:n]
 
 
 def categorical_bins(values, max_slots: int = 8, mode: str = "light"):
-    """Assign the ``max_slots`` most common values a categorical hue each.
+    """Assign the ``max_slots`` most common values a distinct colour each.
 
-    Hues are never cycled: a ninth value is not given a repeated colour, it
-    folds into "Other" - so two differently coloured points always mean two
-    different identities.
+    Hues are never cycled: a value past ``max_slots`` is not given a repeated
+    colour, it folds into "Other" - so two differently coloured points always
+    mean two different identities. Raise ``max_slots`` up to the number of
+    distinct values to colour every cell instead of folding the tail into grey.
     """
     series = pd.Series(values).dropna()
     if series.empty:
         return [], {}, 0
     counts = series.value_counts()
-    top = list(counts.index[:max_slots])
-    colors = {value: series_style(i, mode)[0] for i, value in enumerate(top)}
-    others = int(counts.iloc[max_slots:].sum()) if len(counts) > max_slots else 0
+    slots = max(1, int(max_slots))
+    top = list(counts.index[:slots])
+    palette = generate_palette(len(top), mode)
+    colors = {value: palette[i] for i, value in enumerate(top)}
+    others = int(counts.iloc[slots:].sum()) if len(counts) > slots else 0
     return top, colors, others
+
+
+def categorical_counts(values) -> Dict:
+    """How many points carry each identity value - used for the legend counts."""
+    series = pd.Series(values).dropna()
+    if series.empty:
+        return {}
+    return {k: int(v) for k, v in series.value_counts().to_dict().items()}
 
 
 def categorical_legend_html(
@@ -292,24 +413,47 @@ def categorical_legend_html(
     mode: str = "light",
     other_count: int = 0,
     value_prefix: str = "",
+    counts: Optional[dict] = None,
 ) -> str:
-    """Swatch legend for a categorically coloured map."""
+    """Swatch legend for a categorically coloured map.
+
+    ``counts`` (value -> points) writes a per-cell tally beside each swatch. Once
+    there are many entries - colouring every cell rather than the top eight - the
+    list scrolls inside a fixed height instead of running off the map.
+    """
     chrome = CHROME.get(mode, CHROME["light"])
+
+    def _row(swatch: str, label: str) -> str:
+        return (
+            f'<div style="display:flex;align-items:center;gap:6px;line-height:1.6">'
+            f'<span style="flex:0 0 auto;width:12px;height:12px;border-radius:3px;'
+            f'background:{swatch};box-shadow:0 0 0 1px rgba(11,11,11,.12)">'
+            f"</span><span>{label}</span></div>"
+        )
+
     rows = []
     for value in order:
-        rows.append(
-            f'<div style="display:flex;align-items:center;gap:6px;line-height:1.6">'
-            f'<span style="width:12px;height:12px;border-radius:3px;'
-            f'background:{colors[value]};box-shadow:0 0 0 1px rgba(11,11,11,.12)">'
-            f"</span><span>{value_prefix}{value}</span></div>"
-        )
+        label = f"{value_prefix}{value}"
+        if counts and value in counts:
+            label += (
+                f'<span style="color:{chrome["muted"]}"> · '
+                f"{counts[value]:,}</span>"
+            )
+        rows.append(_row(colors[value], label))
     if other_count:
-        rows.append(
-            f'<div style="display:flex;align-items:center;gap:6px;line-height:1.6">'
-            f'<span style="width:12px;height:12px;border-radius:3px;'
-            f'background:{OTHER_COLOR};box-shadow:0 0 0 1px rgba(11,11,11,.12)">'
-            f'</span><span>Other ({other_count:,} pts)</span></div>'
+        rows.append(_row(OTHER_COLOR, f"Other ({other_count:,} pts)"))
+
+    # a header count so "colour all" is legible at a glance
+    subtitle = ""
+    n_shown = len(order)
+    if n_shown > _BASE_SLOTS:
+        subtitle = (
+            f'<div style="color:{chrome["text_secondary"]};font-size:10px;'
+            f'margin:-2px 0 6px">{n_shown} coloured</div>'
         )
+
+    # scroll the swatch list once it is long, so a busy map keeps its legend
+    scroll = "max-height:min(48vh,360px);overflow-y:auto;" if n_shown > 14 else ""
     return (
         f'<div style="position:fixed;bottom:24px;left:12px;z-index:9999;'
         f'background:{chrome["surface"]};color:{chrome["text_primary"]};'
@@ -317,7 +461,8 @@ def categorical_legend_html(
         f'font-family:{FONT_FAMILY};font-size:11px;line-height:1.4;'
         f'box-shadow:0 2px 8px rgba(0,0,0,.12);font-variant-numeric:tabular-nums">'
         f'<div style="font-weight:600;font-size:12px;margin-bottom:6px">{title}</div>'
-        + "".join(rows)
+        f"{subtitle}"
+        f'<div style="{scroll}">' + "".join(rows) + "</div>"
         + "</div>"
     )
 
@@ -851,3 +996,100 @@ def fan_out_figure(
         range=[0, 1.02] if cumulative else None,
     )
     return fig
+
+
+# --------------------------------------------------------------------------- #
+# D2C satellite visibility
+# --------------------------------------------------------------------------- #
+
+
+def _sat_layout(fig, chrome, x_title, y_title, height=460, legend=False):
+    fig.update_layout(
+        height=height,
+        paper_bgcolor=chrome["surface"],
+        plot_bgcolor=chrome["surface"],
+        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
+        margin=dict(l=64, r=24, t=16, b=52),
+        hovermode="closest",
+        hoverlabel=dict(font_family=FONT_FAMILY),
+        showlegend=legend,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+            font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
+        ),
+    )
+    fig.update_xaxes(
+        title=dict(text=x_title, font=dict(color=chrome["text_secondary"], size=12)),
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11),
+    )
+    fig.update_yaxes(
+        title=dict(text=y_title, font=dict(color=chrome["text_secondary"], size=12)),
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11),
+    )
+    return fig
+
+
+def sat_timeseries_figure(
+    ts: pd.DataFrame, count_col: str, mask: int, mode: str = "light", height: int = 460
+) -> go.Figure:
+    """Visible-satellite count over time, one trace per collection.
+
+    ``ts`` has columns ``time``, ``collection`` and ``count_col`` and is already
+    time-sorted. The eight busiest collections take the categorical hues; the
+    rest fold into one muted "Other", so hues are never cycled.
+    """
+    chrome = CHROME.get(mode, CHROME["light"])
+    fig = go.Figure()
+    if ts.empty:
+        return _sat_layout(fig, chrome, "Time", f"D2C satellites ≥{mask}°", height)
+
+    ranked = ts["collection"].value_counts().index.tolist()
+    top, folded = ranked[:8], ranked[8:]
+
+    def _add(sub, name, color):
+        if sub.empty:
+            return
+        fig.add_trace(
+            go.Scattergl(
+                x=sub["time"], y=sub[count_col], mode="markers",
+                name=str(name),
+                marker=dict(color=color, size=5, opacity=0.7, line=dict(width=0)),
+                hovertemplate=(
+                    f"<b>{name}</b><br>%{{x|%Y-%m-%d %H:%M:%S}}"
+                    f"<br>%{{y}} sats ≥{mask}°<extra></extra>"
+                ),
+            )
+        )
+
+    for i, coll in enumerate(top):
+        _add(ts[ts["collection"] == coll], coll, series_style(i, mode)[0])
+    if folded:
+        _add(ts[ts["collection"].isin(folded)], f"Other ({len(folded)})", OTHER_COLOR)
+
+    return _sat_layout(
+        fig, chrome, "Time", f"D2C satellites ≥{mask}°", height,
+        legend=len(top) + (1 if folded else 0) >= 2,
+    )
+
+
+def sat_histogram_figure(
+    counts: pd.Series, mask: int, mode: str = "light", height: int = 420
+) -> go.Figure:
+    """Distribution of the visible-satellite count across samples."""
+    chrome = CHROME.get(mode, CHROME["light"])
+    fig = go.Figure()
+    vals = pd.to_numeric(counts, errors="coerce").dropna().astype(int)
+    if vals.empty:
+        return _sat_layout(fig, chrome, f"D2C satellites ≥{mask}°", "Samples", height)
+    dist = vals.value_counts().sort_index()
+    fig.add_trace(
+        go.Bar(
+            x=dist.index, y=dist.values,
+            marker=dict(color=series_style(0, mode)[0], cornerradius=4, line=dict(width=0)),
+            hovertemplate=f"%{{x}} sats ≥{mask}°<br>%{{y}} samples<extra></extra>",
+        )
+    )
+    fig.update_xaxes(dtick=1)
+    return _sat_layout(fig, chrome, f"D2C satellites visible (≥{mask}°)", "Samples", height)

@@ -201,3 +201,17 @@ def test_shared_values_on_the_real_shape_is_a_subset_of_the_union(fixture_dir, c
     frame = _load(fixture_dir, ["lte_radio", "nr_radio"], cache_dir)
     union = set(pd.Series(frame["pci"]).dropna().unique())
     assert set(flt.shared_values(frame, "pci")) <= union
+
+
+def test_data_windows_splits_on_gaps():
+    import pandas as pd
+    from qpviz import filters as flt
+    t = pd.to_datetime([
+        "2026-08-25 18:11:00", "2026-08-25 18:11:30", "2026-08-25 18:12:00",
+        "2026-08-27 18:00:00", "2026-08-27 18:00:30",   # >5 min gap -> new window
+    ])
+    wins = flt.data_windows(t, gap_seconds=300)
+    assert len(wins) == 2
+    assert wins[0][2] == 3 and wins[1][2] == 2          # sample counts
+    assert wins[0][0] == pd.Timestamp("2026-08-25 18:11:00")
+    assert flt.data_windows([]) == []

@@ -191,3 +191,23 @@ def geolocated(frame: pd.DataFrame) -> pd.DataFrame:
     lon = pd.to_numeric(frame["lon"], errors="coerce")
     keep = lat.notna() & lon.notna() & (lat.abs() > 1e-9) & (lon.abs() > 1e-9)
     return frame.loc[keep.to_numpy()]
+
+
+def data_windows(times, gap_seconds: float = 300.0):
+    """Contiguous time spans that actually contain samples.
+
+    The measurements come in short sessions on different days, so the raw
+    min→max span is mostly empty. This splits the timestamps wherever there is a
+    gap longer than ``gap_seconds`` and returns one ``(start, end, count)`` per
+    session, chronologically — what the time-window control shows so you can land
+    a window on real data instead of a dead gap.
+    """
+    t = pd.to_datetime(pd.Series(list(times)), errors="coerce").dropna().sort_values()
+    if t.empty:
+        return []
+    gap = t.diff() > pd.Timedelta(seconds=gap_seconds)
+    group = gap.cumsum()
+    out = []
+    for _, g in t.groupby(group):
+        out.append((g.iloc[0], g.iloc[-1], int(len(g))))
+    return out
