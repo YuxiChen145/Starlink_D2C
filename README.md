@@ -18,8 +18,8 @@ against how many D2C satellites were overhead.
 ## Contents
 
 1. [Prerequisites](#1-prerequisites)
-2. [Install](#2-install)
-3. [Add your data](#3-add-your-data)
+2. [Quick start](#2-quick-start)
+3. [The data (already in the repo)](#3-the-data-already-in-the-repo)
 4. [Run it](#4-run-it)
 5. [Configuration](#5-configuration)
 6. [Share it with others (deploy)](#6-share-it-with-others-deploy)
@@ -33,52 +33,63 @@ against how many D2C satellites were overhead.
 ## 1. Prerequisites
 
 - **Python 3.10+** (developed on 3.12).
-- **git** (to clone), and ~200 MB free disk for the data + parquet cache.
-- Your measurement CSVs (the QP / PRISM exports). They are **not** shipped with
-  the code.
+- **git**, and ~200 MB free disk for the repo, its data, and the parquet cache.
+- Access to this **private** GitHub repo. The measurement data lives inside it
+  (gzipped), so a clone gives you both the code and the data in one step — no
+  separate download.
 
-## 2. Install
+## 2. Quick start
 
 ```bash
-git clone <your-repo-url> Starlink_D2C
+git clone https://github.com/YuxiChen145/Starlink_D2C.git
 cd Starlink_D2C
 
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+streamlit run app.py
 ```
 
-## 3. Add your data
+That's it — the clone already contains the data, so the app has something to
+show on first run. Streamlit opens `http://localhost:8501`.
 
-The app reads three folders next to `app.py`. Only what you have needs to be
-present — either measurement source alone is enough to run.
+## 3. The data (already in the repo)
+
+The measurement CSVs **ship in the repo, gzipped** (`*.csv.gz`, ~13 MB total),
+so a fresh `git clone` already has them and the loader reads `.csv` or
+`.csv.gz` transparently. The app reads three folders next to `app.py`:
 
 ```
 Starlink_D2C/
-├── QP CSV/       ← Qualipoc exports (the ten "… - Limited.csv" files)
+├── QP CSV/       ← Qualipoc exports (the "… - Limited.csv[.gz]" files)
 ├── PRISM CSV/    ← PRISM SDR scan CSVs (one file per location/carrier)
 └── TLE/          ← (optional) Starlink TLEs for satellite visibility
 ```
 
-- **QP CSV/** — drop in whichever of the ten known Qualipoc exports you have
-  (`LTE Radio [connected] - Limited.csv`, `NR PDSCH [per-carrier] - Limited.csv`,
-  …). The app auto-detects which are present.
-- **PRISM CSV/** — drop in the SDR scan files (D2C sats identified by tech; the
-  collection name comes from the file name). PRISM carries signal metrics only
-  and has no GPS in the current captures.
-- **TLE/** — optional; only needed for the **D2C visibility** tab. See
+- **QP CSV/** — the Qualipoc exports (`LTE Radio [connected] - Limited.csv.gz`,
+  `NR PDSCH [per-carrier] - Limited.csv.gz`, …). The app auto-detects which are
+  present. Either measurement source alone is enough to run.
+- **PRISM CSV/** — the SDR scan files (the collection name comes from the file
+  name). PRISM carries signal metrics only and has no GPS in the current
+  captures, so it is excluded from the map and satellite tabs.
+- **TLE/** — optional; only needed for the **D2C visibility** tab. TLEs are
+  *not* committed; fetch them locally — see
   [`docs/FETCHING_TLE.md`](docs/FETCHING_TLE.md).
 
-The measurement data **ships in the repo, gzipped** (`*.csv.gz`, ~13 MB total),
-so a fresh `git clone` — or a Streamlit Cloud deploy — already has it; the loader
-reads `.csv` or `.csv.gz` transparently. Raw `.csv` files stay local and
-git-ignored (a local raw file is preferred over its gzip). To add or refresh
-data, drop the CSVs in and re-gzip:
+**Refreshing or adding data.** Raw `.csv` files stay local and git-ignored (a
+local raw file is preferred over its gzip when both exist). To publish new or
+updated data, drop the CSVs in, re-gzip, and commit the `.gz`:
 
 ```bash
 for f in "QP CSV"/*.csv "PRISM CSV"/*.csv; do gzip -c "$f" > "$f.gz"; done
-git add "QP CSV"/*.csv.gz "PRISM CSV"/*.csv.gz && git commit -m "Update data"
+git add "QP CSV"/*.csv.gz "PRISM CSV"/*.csv.gz
+git commit -m "Update data" && git push
 ```
+
+> **Privacy.** The QP exports carry GPS coordinates. That is why the repo is
+> **private** — keep it that way, and share access (or any deploy) only with
+> people who should see the measurement locations.
 
 A parquet cache is built under `.cache/qpviz/` on first load and reused after.
 
@@ -88,9 +99,8 @@ A parquet cache is built under `.cache/qpviz/` on first load and reused after.
 streamlit run app.py
 ```
 
-Streamlit opens `http://localhost:8501` in your browser. First load parses the
-CSVs (a few seconds for the full ~110 MB export) and caches them; later loads
-are near-instant. Use **Reload data** in the sidebar after replacing a file.
+First load parses the CSVs (a few seconds) and caches them; later loads are
+near-instant. Use **Reload data** in the sidebar after replacing a file.
 
 ## 5. Configuration
 
@@ -124,15 +134,14 @@ and, for the historical campaign dates, pull the Space-Track archive (see the
 ## 6. Share it with others (deploy)
 
 The app is a normal Streamlit server, so anyone with the URL can use it — no
-install on their side. Pick the option that fits. **Note on data:** the CSVs are
-git-ignored, so any host that pulls only the repo starts empty; you must get the
-data onto the host (copy it, mount a volume, or add a small sample) — except the
-tunnel option, where the data stays on your machine.
+install on their side. Because the data is committed to the (private) repo, any
+host that pulls the repo also gets the data — no separate upload step. Pick the
+option that fits.
 
-### A. Quick public link — tunnel your local app (easiest, data stays local)
+### A. Quick public link — tunnel your local app (easiest)
 
 Run the app locally, then expose that port with a tunnel. Others open the URL;
-nothing runs on their machine and your data never leaves yours.
+nothing runs on their machine.
 
 ```bash
 # terminal 1 — run the app
@@ -146,10 +155,19 @@ ngrok http 8501                                      # ngrok (free account)
 Great for demos and sharing with a few people. The link lives only while your
 app + tunnel are running.
 
-### B. Self-host with Docker (persistent, your own server)
+### B. Streamlit Community Cloud (free hosting from GitHub)
+
+At <https://share.streamlit.io>, connect this repo and point at `app.py`. It
+builds from `requirements.txt` automatically, and because the data is in the
+repo, the deployed app has it — nothing extra to upload. Since the repo is
+private, authorize Streamlit's access to it when prompted. Anyone you give the
+**app URL** to can use the app; the repo itself stays private.
+
+### C. Self-host with Docker (persistent, your own server)
 
 A `Dockerfile` and `.dockerignore` are included. The image contains the **code
-only**; you mount your data at run time, so nothing sensitive is baked in.
+only**; you mount your data at run time, so nothing sensitive is baked into the
+image.
 
 ```bash
 # build once
@@ -160,26 +178,13 @@ docker run -p 8501:8501 -v "/absolute/path/to/data:/data" starlink-d2c
 ```
 
 Then open `http://<server-ip>:8501`. On a cloud VM (EC2, a droplet, your lab
-box), put it behind nginx/Caddy for HTTPS and a domain. This is the best option
-for a stable, always-on internal site.
+box), put it behind nginx/Caddy for HTTPS and a domain. Best for a stable,
+always-on internal site — and keep it access-controlled, since the mounted data
+includes GPS.
 
-### C. Streamlit Community Cloud (free hosting from GitHub)
-
-Push the repo to GitHub, then at <https://share.streamlit.io> connect it and
-point at `app.py`. It builds from `requirements.txt` automatically. Because the
-CSVs are git-ignored, the deployed app has **no data** unless you either commit
-a small sample dataset, or load data from a bucket/URL you add (e.g. via
-Streamlit **Secrets**). Best when the data can be shared or reduced to a demo
-set.
-
-### D. Hugging Face Spaces (free, Streamlit template)
-
-Create a **Streamlit Space**, push the code, and it runs the same way — again,
-add the data (commit a sample, or fetch from storage). Similar trade-off to (C).
-
-**Rule of thumb:** share a quick view → **tunnel (A)**; a stable site with the
-full data → **Docker on a server (B)**; a public demo with a small dataset →
-**Community Cloud (C)**.
+**Rule of thumb:** share a quick view → **tunnel (A)**; a hosted site straight
+from GitHub → **Community Cloud (B)**; a stable, controlled internal site →
+**Docker on a server (C)**.
 
 ---
 
@@ -245,7 +250,7 @@ headlessly; if a real `QP CSV/` folder is present it also smoke-tests against it
 
 | Symptom | Fix |
 |---|---|
-| `No QP CSV files found` | Put exports in `QP CSV/` (or set `QP_DATA_DIR`); check the sidebar folder box. |
+| `No QP CSV files found` | Confirm `QP CSV/` has the `*.csv.gz` files (or set `QP_DATA_DIR`); check the sidebar folder box. |
 | Satellite tab says *sgp4 not installed* | `pip install -r requirements.txt` (adds `sgp4`), restart. |
 | TLE fetch `CERTIFICATE_VERIFY_FAILED` | macOS Python has no CA bundle — the `certifi` dependency fixes it; see the [TLE guide](docs/FETCHING_TLE.md). |
 | Stale numbers after replacing a CSV | Click **Reload data**; the parquet cache re-keys on file size/mtime, or delete `.cache/`. |
