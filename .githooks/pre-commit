@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# pre-commit: auto-gzip any new/changed measurement CSV and stage the .gz,
+# so the committed data never lags behind the raw files.
+#
+# Enable once (per clone):   git config core.hooksPath .githooks
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+staged=0
+for dir in "QP CSV" "PRISM CSV"; do
+  [ -d "$dir" ] || continue
+  while IFS= read -r -d '' raw; do
+    gz="$raw.gz"
+    if [ ! -f "$gz" ] || [ "$raw" -nt "$gz" ]; then
+      gzip -c "$raw" > "$gz"
+      git add "$gz"
+      staged=1
+    fi
+  done < <(find "$dir" -maxdepth 1 -type f -name '*.csv' -print0)
+done
+[ "$staged" -eq 1 ] && echo "pre-commit: refreshed gzipped data"
+exit 0

@@ -77,15 +77,32 @@ Starlink_D2C/
   *not* committed; fetch them locally — see
   [`docs/FETCHING_TLE.md`](docs/FETCHING_TLE.md).
 
-**Refreshing or adding data.** Raw `.csv` files stay local and git-ignored (a
-local raw file is preferred over its gzip when both exist). To publish new or
-updated data, drop the CSVs in, re-gzip, and commit the `.gz`:
+**Refreshing or adding data — just run `./sync.sh`.** Drop new or updated CSVs
+in, then:
 
 ```bash
-for f in "QP CSV"/*.csv "PRISM CSV"/*.csv; do gzip -c "$f" > "$f.gz"; done
-git add "QP CSV"/*.csv.gz "PRISM CSV"/*.csv.gz
-git commit -m "Update data" && git push
+./sync.sh                 # gzips new/changed CSVs, commits, and pushes
+./sync.sh "your message"  # ...with your own commit message
 ```
+
+`sync.sh` re-gzips only what changed, writes a sensible commit message, and
+pushes. Run it any time — if nothing changed, it does nothing. Raw `.csv` files
+stay local and git-ignored (a local raw file is preferred over its gzip when
+both exist).
+
+Two more levels of automation are set up, so you never have to remember:
+
+- **Pre-commit hook** — your normal `git commit` auto-gzips new data first.
+  Enable once: `git config core.hooksPath .githooks`.
+- **launchd watcher (macOS)** — drop a CSV in a data folder and it pushes
+  itself, no command. Install once: `bash scripts/install-autosync.sh`.
+
+See **[`docs/AUTOSYNC.md`](docs/AUTOSYNC.md)** for all three.
+
+> **Why does this run on your Mac, not from Claude?** Pushing to GitHub needs
+> *your* GitHub login, which lives in your Mac's keychain — not in a Claude
+> session (a session's sandbox has no access to your credentials). So the sync
+> runs on your machine, where the login already is.
 
 > **Privacy.** The QP exports carry GPS coordinates. That is why the repo is
 > **private** — keep it that way, and share access (or any deploy) only with
@@ -230,8 +247,11 @@ qpviz/
   mapview.py         folium map, draw control, categorical colouring
   satellites.py      TLE ingest, SGP4 propagation, D2C visibility
   theme.py           colour tokens
-docs/                screenshots + the TLE fetch guide
+docs/                screenshots + TLE and auto-sync guides
 tests/               pytest suite (synthetic data; no measurement CSVs needed)
+sync.sh              gzip new data, commit, push (see docs/AUTOSYNC.md)
+scripts/             auto-sync installer + launchd watcher (macOS)
+.githooks/           pre-commit hook: auto-gzip data on commit
 Dockerfile           container image for self-hosting
 ```
 
