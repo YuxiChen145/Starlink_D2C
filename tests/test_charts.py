@@ -624,3 +624,46 @@ def test_pdf_figure_overlays_normalised_histograms():
     assert fig.layout.barmode == "overlay"
     # empty input is handled
     assert len(charts.pdf_figure([], "x").data) == 0
+
+
+# --------------------------------------------------------------------------- #
+# PCI reuse figure
+# --------------------------------------------------------------------------- #
+
+
+def _reuse_runs():
+    import pandas as pd
+    from qpviz import identity
+    times = pd.date_range("2026-07-22 14:00:00", periods=4, freq=pd.Timedelta(seconds=1))
+    frame = pd.DataFrame(
+        {
+            "time": times,
+            "collection": "C",
+            "pci": pd.array([7, 7, 7, 7], dtype="Int32"),
+            "enb": pd.array([1, 1, 2, 2], dtype="Int64"),
+            "sector": pd.array([1, 1, 1, 1], dtype="Int32"),
+            "cell_type": "MCG PCell",
+        }
+    )
+    return identity.pci_reuse_runs(frame)
+
+
+def test_pci_reuse_figure_draws_one_trace_per_enb():
+    runs = _reuse_runs()
+    fig = charts.pci_reuse_figure(runs, [7])
+    assert len(fig.data) == 2                       # one bar trace per eNB
+    assert {t.name for t in fig.data} == {"1", "2"}
+    assert all(t.orientation == "h" for t in fig.data)
+
+
+def test_pci_reuse_figure_two_enbs_get_two_distinct_colours():
+    runs = _reuse_runs()
+    fig = charts.pci_reuse_figure(runs, [7])
+    colours = {t.marker.color for t in fig.data}
+    assert len(colours) == 2                        # a collision must be visible
+
+
+def test_pci_reuse_figure_empty_runs_is_blank():
+    import pandas as pd
+    fig = charts.pci_reuse_figure(pd.DataFrame(columns=["pci", "enb", "start"]), [])
+    assert len(fig.data) == 0

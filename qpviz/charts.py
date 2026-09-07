@@ -595,6 +595,127 @@ def timeline_figure(
     return fig
 
 
+def pci_reuse_figure(
+    runs: pd.DataFrame,
+    pci_order: Sequence,
+    mode: str = "light",
+    x_axis: str = "absolute",
+    height: Optional[int] = None,
+    color_level: str = "enb",
+    color_label: str = "eNB / gNB-Id",
+) -> go.Figure:
+    """A swimlane keyed on PCI, each stretch coloured by the eNB serving it.
+
+    ``pci_order`` fixes the rows (top-to-bottom). Every distinct eNB gets its own
+    hue and hues are never cycled, so two colours on one PCI row always mean two
+    different eNBs reusing that PCI - and the same colour returning after a gap is
+    the same eNB+PCI coming back. ``x_axis`` is wall-clock ``absolute`` or
+    ``elapsed`` active minutes within each collection.
+    """
+    chrome = CHROME.get(mode, CHROME["light"])
+    fig = go.Figure()
+    labels = [str(v) for v in pci_order]
+    keep = set(pci_order)
+    sub_all = runs[runs["pci"].isin(keep)] if not runs.empty else runs
+
+    # eNBs ordered by first appearance, so the legend reads in the order the
+    # cells showed up rather than alphabetically.
+    if sub_all.empty or color_level not in sub_all.columns:
+        groups: List = []
+    else:
+        first = sub_all.groupby(color_level, observed=True)["start"].min().sort_values()
+        groups = [g for g in first.index]
+    palette = generate_palette(len(groups), mode)
+    color_map = {g: palette[i] for i, g in enumerate(groups)}
+
+    def _add(sub, name, color):
+        if sub.empty:
+            return
+        if x_axis == "absolute":
+            base = sub["start"]
+            width = (sub["end"] - sub["start"]).dt.total_seconds() * 1000.0
+            hover_x = "%{base|%Y-%m-%d %H:%M:%S}"
+        else:
+            base = sub["elapsed_start"] / 60.0
+            width = sub["duration_s"] / 60.0
+            hover_x = "%{base:.2f} min"
+        sector = (
+            sub["sector"].astype(str) if "sector" in sub.columns
+            else pd.Series(["—"] * len(sub), index=sub.index)
+        )
+        fig.add_trace(
+            go.Bar(
+                x=width,
+                y=[str(v) for v in sub["pci"]],
+                base=base,
+                orientation="h",
+                name=str(name),
+                marker=dict(color=color, line=dict(width=0.5, color=chrome["surface"])),
+                width=0.72,
+                customdata=np.stack(
+                    [
+                        sub["duration_s"].to_numpy(),
+                        sub["samples"].to_numpy(),
+                        sub["collection"].astype(str).to_numpy(),
+                        sub[color_level].astype(str).to_numpy(),
+                        sector.to_numpy(),
+                    ],
+                    axis=-1,
+                ),
+                hovertemplate=(
+                    "<b>PCI %{y}</b>"
+                    "<br>eNB %{customdata[3]} · sector %{customdata[4]}"
+                    f"<br>%{{customdata[2]}}<br>start {hover_x}"
+                    "<br>held %{customdata[0]:.1f}s (%{customdata[1]} samples)"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    for g in groups:
+        _add(sub_all[sub_all[color_level] == g], g, color_map[g])
+
+    if height is None:
+        height = int(min(1400, max(320, 24 * len(labels) + 120)))
+
+    # A legend of every eNB is unreadable past a dozen or so; beyond that the
+    # colours plus hover carry it and the summary table names the eNBs.
+    show_legend = 2 <= len(groups) <= 16
+    fig.update_layout(
+        barmode="overlay",
+        bargap=0.25,
+        height=height,
+        paper_bgcolor=chrome["surface"],
+        plot_bgcolor=chrome["surface"],
+        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
+        margin=dict(l=8, r=16, t=8, b=48),
+        hovermode="closest",
+        hoverlabel=dict(font_family=FONT_FAMILY),
+        showlegend=show_legend,
+        legend=dict(
+            title=dict(text=color_label, font=dict(size=11, color=chrome["text_secondary"])),
+            orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+            font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
+        ),
+    )
+    fig.update_xaxes(
+        title=dict(
+            text="Time" if x_axis == "absolute" else "Elapsed (minutes)",
+            font=dict(color=chrome["text_secondary"], size=12),
+        ),
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11),
+    )
+    fig.update_yaxes(
+        title=dict(text="PCI", font=dict(color=chrome["text_secondary"], size=12)),
+        type="category", categoryorder="array", categoryarray=labels,
+        autorange="reversed",  # first row at the top, time reads downward
+        gridcolor=chrome["grid"], linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=10),
+    )
+    return fig
+
+
 #: one step of the sequential ramp per tree depth (an ordinal encoding - never
 #: a cycled categorical hue, which would imply groups that do not exist)
 _DEPTH_COLORS = ["#256abf", "#3987e5", "#6da7ec", "#9ec5f4", "#cde2fb"]

@@ -188,6 +188,140 @@ def order_identities(
 
 
 # --------------------------------------------------------------------------- #
+# PCI reuse: is the same PCI served by more than one eNB, and does an eNB+PCI
+# come back?
+# --------------------------------------------------------------------------- #
+
+#: identity columns that describe *which* cell, in the order the reuse view keys
+#: on them. ``pci`` and ``enb`` carry the question; ``sector`` refines it.
+REUSE_KEYS = ("enb", "sector", "pci")
+
+
+def pci_reuse_runs(
+    frame: pd.DataFrame,
+    gap_seconds: float = DEFAULT_GAP_SECONDS,
+) -> pd.DataFrame:
+    """Contiguous serving stretches keyed on the whole ``eNB / sector / PCI``.
+
+    ``dwell_runs`` breaks a run whenever *one* level changes; here a run is a
+    stretch where the whole identity tuple stays put. So a PCI served first by
+    one eNB and later by another becomes two runs sharing a PCI - exactly the
+    reuse to look at. Columns: ``collection, enb, sector, pci[, cell_id], start,
+    end, duration_s, samples, elapsed_start, elapsed_end``.
+    """
+    carry = [c for c in ("enb", "sector", "pci", "cell_id") if c in frame.columns]
+    key_cols = [c for c in REUSE_KEYS if c in frame.columns]
+    empty = pd.DataFrame(
+        columns=["collection", *carry, "start", "end", "duration_s",
+                 "samples", "elapsed_start", "elapsed_end"]
+    )
+    if (
+        frame.empty
+        or "time" not in frame.columns
+        or "pci" not in frame.columns
+        or not key_cols
+    ):
+        return empty
+
+    work = frame[["time", "collection", *carry]].copy()
+    work["time"] = pd.to_datetime(work["time"], errors="coerce")
+    work = work.dropna(subset=["time", "pci"])
+    if work.empty:
+        return empty
+
+    rows = []
+    for collection, group in work.groupby("collection", observed=True, sort=True):
+        group = group.sort_values("time")
+        times = group["time"]
+        dt = _effective_dt(times, gap_seconds)
+        active = np.concatenate([[0.0], np.cumsum(dt)[:-1]]) if len(dt) else dt
+
+        # One string per sample from the identity tuple; NA folds to a sentinel
+        # so an unknown eNB does not raise on comparison and does not silently
+        # merge with a known one.
+        key = (
+            group[key_cols].astype("string").fillna("~").agg("|".join, axis=1).to_numpy()
+        )
+        since_previous = times.diff().dt.total_seconds().to_numpy()
+        changed = np.ones(len(group), dtype=bool)
+        if len(group) > 1:
+            changed[1:] = (key[1:] != key[:-1]) | (
+                np.nan_to_num(since_previous[1:], nan=np.inf) > gap_seconds
+            )
+        run_id = np.cumsum(changed)
+
+        detail = group.assign(_run=run_id, _dt=dt, _active=active)
+        detail["_time"] = times.to_numpy()
+        for _, run in detail.groupby("_run", sort=True):
+            start = pd.Timestamp(run["_time"].iloc[0])
+            duration = float(run["_dt"].sum())
+            elapsed_start = float(run["_active"].iloc[0])
+            row = {
+                "collection": collection,
+                "start": start,
+                "end": start + pd.Timedelta(seconds=duration),
+                "duration_s": duration,
+                "samples": int(len(run)),
+                "elapsed_start": elapsed_start,
+                "elapsed_end": elapsed_start + duration,
+            }
+            for c in carry:
+                row[c] = run[c].iloc[0]
+            rows.append(row)
+
+    runs = pd.DataFrame(rows)
+    if runs.empty:
+        return empty
+    return runs.sort_values(["collection", "start"]).reset_index(drop=True)
+
+
+def pci_reuse_summary(runs: pd.DataFrame) -> pd.DataFrame:
+    """One row per PCI: how many eNBs used it, and whether an eNB+PCI recurs.
+
+    Columns: ``pci, n_enb, enbs, n_sectors, runs, return_runs, collides, recurs,
+    dwell_s, first_seen, last_seen``. ``collides`` is *the same PCI seen from
+    more than one eNB*; ``recurs`` is *the same eNB+PCI coming back in a later
+    run*; ``return_runs`` counts those extra returns. Sorted to put collisions,
+    then recurrences, then the longest-dwelling PCIs first.
+    """
+    cols = ["pci", "n_enb", "enbs", "n_sectors", "runs", "return_runs",
+            "collides", "recurs", "dwell_s", "first_seen", "last_seen"]
+    if runs.empty or "pci" not in runs.columns:
+        return pd.DataFrame(columns=cols)
+
+    has_enb = "enb" in runs.columns
+    out_rows = []
+    for pci, g in runs.groupby("pci", observed=True):
+        if has_enb:
+            enbs = list(pd.unique(g["enb"].dropna()))
+            per_enb = g.dropna(subset=["enb"]).groupby("enb", observed=True).size()
+            # a return is any run beyond the first on the same eNB+PCI
+            return_runs = int((per_enb[per_enb > 1] - 1).sum()) if not per_enb.empty else 0
+            recurs = bool((per_enb > 1).any())
+        else:
+            enbs, return_runs, recurs = [], 0, False
+        out_rows.append(
+            {
+                "pci": pci,
+                "n_enb": len(enbs),
+                "enbs": ", ".join(str(e) for e in enbs),
+                "n_sectors": int(g["sector"].nunique()) if "sector" in g.columns else 0,
+                "runs": int(len(g)),
+                "return_runs": return_runs,
+                "collides": len(enbs) > 1,
+                "recurs": recurs,
+                "dwell_s": float(g["duration_s"].sum()),
+                "first_seen": g["start"].min(),
+                "last_seen": g["end"].max(),
+            }
+        )
+    out = pd.DataFrame(out_rows, columns=cols)
+    return out.sort_values(
+        ["collides", "recurs", "dwell_s"], ascending=[False, False, False]
+    ).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
 # Hierarchy
 # --------------------------------------------------------------------------- #
 

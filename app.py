@@ -1160,12 +1160,105 @@ with tab_cells:
         )
         view = st.radio(
             "View",
-            ["Timeline", "Hierarchy", "Structure"],
+            ["Timeline", "PCI reuse", "Hierarchy", "Structure"],
             horizontal=True,
             key="identity_view",
         )
 
-        if view == "Timeline":
+        if view == "PCI reuse":
+            st.caption(
+                "Each bar is a stretch on one PCI, coloured by the **eNB** serving "
+                "it. A PCI row in two or more colours is a PCI **reused across "
+                "eNBs**; the same colour returning after a gap is the **same "
+                "eNB+PCI coming back**."
+            )
+            reuse_runs = identity.pci_reuse_runs(cells)
+            if reuse_runs.empty or "enb" not in reuse_runs.columns:
+                st.info(
+                    "This needs the connected radio to carry both an eNB/gNB-Id and "
+                    "a PCI. No eNB is decoded in the current selection."
+                )
+            else:
+                reuse = identity.pci_reuse_summary(reuse_runs)
+                kpi = st.columns(4)
+                kpi[0].metric("Distinct PCIs", f"{reuse['pci'].nunique():,}")
+                kpi[1].metric(
+                    "Reused across eNBs", f"{int(reuse['collides'].sum()):,}",
+                    help="PCIs served by more than one eNB.",
+                )
+                kpi[2].metric(
+                    "Recurring eNB+PCI", f"{int(reuse['recurs'].sum()):,}",
+                    help="PCIs where the same eNB+PCI comes back in a later run.",
+                )
+                kpi[3].metric("Distinct eNBs", f"{reuse_runs['enb'].nunique():,}")
+
+                ctl = st.columns([2, 2, 2])
+                only = ctl[0].selectbox(
+                    "Show",
+                    ["All PCIs", "Reused across eNBs", "Recurring eNB+PCI"],
+                    key="reuse_only",
+                    help="Narrow to just the PCIs that collide across eNBs, or "
+                         "those where an eNB+PCI returns.",
+                )
+                x_axis = ctl[1].selectbox(
+                    "X axis", ["absolute", "elapsed"], key="reuse_x",
+                    help="Absolute wall-clock, or active minutes within each "
+                         "collection (paused time excluded).",
+                )
+                max_rows = ctl[2].number_input(
+                    "Max PCIs", min_value=5, max_value=400, value=60, step=5,
+                    key="reuse_maxrows",
+                    help="Collisions, then recurrences, then longest-dwelling win.",
+                )
+
+                selected = reuse
+                if only == "Reused across eNBs":
+                    selected = reuse[reuse["collides"]]
+                elif only == "Recurring eNB+PCI":
+                    selected = reuse[reuse["recurs"]]
+
+                if selected.empty:
+                    st.info("No PCIs match that filter in the current selection.")
+                else:
+                    order = selected["pci"].tolist()[: int(max_rows)]
+                    plot_runs = reuse_runs[reuse_runs["pci"].isin(order)]
+                    st.plotly_chart(
+                        charts.pci_reuse_figure(
+                            plot_runs, order, mode=MODE, x_axis=x_axis,
+                            color_label=identity.label_for("enb"),
+                        ),
+                        width="stretch",
+                    )
+                    if len(order) < len(selected):
+                        st.caption(
+                            f"Showing {len(order)} of {len(selected)} PCIs "
+                            "(collisions and recurrences first)."
+                        )
+                    with st.expander("PCI reuse table"):
+                        table = selected.rename(
+                            columns={
+                                "pci": "PCI",
+                                "n_enb": "eNBs",
+                                "enbs": "eNB ids",
+                                "n_sectors": "Sectors",
+                                "runs": "Runs",
+                                "return_runs": "Returns",
+                                "collides": "Reused across eNBs",
+                                "recurs": "Recurs",
+                                "dwell_s": "Dwell (s)",
+                                "first_seen": "First seen",
+                                "last_seen": "Last seen",
+                            }
+                        )
+                        st.dataframe(table, width="stretch", hide_index=True, height=340)
+                        st.download_button(
+                            "Download PCI reuse (CSV)",
+                            table.to_csv(index=False).encode(),
+                            file_name="pci_reuse.csv",
+                            mime="text/csv",
+                        )
+
+        elif view == "Timeline":
             row = st.columns([2, 2, 2, 2])
             level = row[0].selectbox(
                 "Identity", levels, format_func=identity.label_for, key="identity_level"

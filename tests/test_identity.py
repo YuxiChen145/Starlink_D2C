@@ -359,3 +359,74 @@ def test_relationships_keep_tree_order_not_alphabetical():
     assert sorted(order) != order  # i.e. this is not alphabetical
     assert identity.fan_out_summary(counts)["Relationship"].tolist() == order
     assert identity.relationship_order(pd.DataFrame()) == []
+
+
+# --------------------------------------------------------------------------- #
+# PCI reuse: same PCI across eNBs, and eNB+PCI coming back
+# --------------------------------------------------------------------------- #
+
+
+def _rframe(pci, enb, sector=None, collection="C", start="2026-07-22 14:00:00", step_s=1.0):
+    times = pd.date_range(start, periods=len(pci), freq=pd.Timedelta(seconds=step_s))
+    data = {
+        "time": times,
+        "collection": collection,
+        "pci": pd.array(pci, dtype="Int32"),
+        "enb": pd.array(enb, dtype="Int64"),
+        "cell_type": "MCG PCell",
+    }
+    if sector is not None:
+        data["sector"] = pd.array(sector, dtype="Int32")
+    return pd.DataFrame(data)
+
+
+def test_reuse_runs_break_when_the_enb_changes_under_a_constant_pci():
+    # PCI stays 7 throughout, but the eNB goes 1 -> 2 -> 1: three runs, one PCI
+    frame = _rframe([7, 7, 7, 7, 7, 7], [1, 1, 2, 2, 1, 1], [1, 1, 1, 1, 1, 1])
+    runs = identity.pci_reuse_runs(frame)
+    assert runs["pci"].tolist() == [7, 7, 7]
+    assert runs["enb"].tolist() == [1, 2, 1]
+    assert runs["samples"].tolist() == [2, 2, 2]
+
+
+def test_reuse_summary_flags_collision_and_recurrence():
+    frame = _rframe([7, 7, 7, 7, 7, 7], [1, 1, 2, 2, 1, 1], [1, 1, 1, 1, 1, 1])
+    summary = identity.pci_reuse_summary(identity.pci_reuse_runs(frame))
+    row = summary[summary["pci"] == 7].iloc[0]
+    assert row["n_enb"] == 2            # PCI 7 served by eNB 1 and eNB 2
+    assert bool(row["collides"]) is True
+    assert bool(row["recurs"]) is True  # eNB 1 + PCI 7 came back
+    assert row["return_runs"] == 1
+    assert row["runs"] == 3
+
+
+def test_reuse_summary_clean_pci_has_no_collision_or_recurrence():
+    frame = _rframe([9, 9, 9], [3, 3, 3], [2, 2, 2])
+    row = identity.pci_reuse_summary(identity.pci_reuse_runs(frame)).iloc[0]
+    assert row["n_enb"] == 1
+    assert bool(row["collides"]) is False
+    assert bool(row["recurs"]) is False
+    assert row["return_runs"] == 0
+
+
+def test_reuse_summary_puts_collisions_first():
+    clean = _rframe([9, 9], [3, 3], [1, 1], collection="A")
+    collide = _rframe([7, 7], [1, 2], [1, 1], collection="B", start="2026-07-22 15:00:00")
+    summary = identity.pci_reuse_summary(
+        identity.pci_reuse_runs(pd.concat([clean, collide], ignore_index=True))
+    )
+    assert summary.iloc[0]["pci"] == 7  # the colliding PCI leads
+    assert bool(summary.iloc[0]["collides"]) is True
+
+
+def test_reuse_runs_and_summary_are_empty_on_empty_input():
+    assert identity.pci_reuse_runs(pd.DataFrame()).empty
+    assert identity.pci_reuse_summary(pd.DataFrame()).empty
+
+
+def test_reuse_runs_survive_an_unknown_enb():
+    # a sample with no eNB must not raise, and must not merge with a known one
+    frame = _rframe([7, 7, 7], [1, pd.NA, 1], [1, 1, 1])
+    runs = identity.pci_reuse_runs(frame)
+    assert runs["pci"].tolist() == [7, 7, 7]
+    assert runs["samples"].tolist() == [1, 1, 1]
