@@ -627,43 +627,48 @@ def test_pdf_figure_overlays_normalised_histograms():
 
 
 # --------------------------------------------------------------------------- #
-# PCI reuse figure
+# Identity tracks (PCI / sector / eNB, time-aligned)
 # --------------------------------------------------------------------------- #
 
 
-def _reuse_runs():
+def _tracks_frame():
     import pandas as pd
-    from qpviz import identity
     times = pd.date_range("2026-07-22 14:00:00", periods=4, freq=pd.Timedelta(seconds=1))
-    frame = pd.DataFrame(
+    # PCI: 7,7,9,9 (one change) ; sector: 1,1,1,2 (one change) ; eNB: 1,1,1,1 (none)
+    return pd.DataFrame(
         {
             "time": times,
-            "collection": "C",
-            "pci": pd.array([7, 7, 7, 7], dtype="Int32"),
-            "enb": pd.array([1, 1, 2, 2], dtype="Int64"),
-            "sector": pd.array([1, 1, 1, 1], dtype="Int32"),
-            "cell_type": "MCG PCell",
+            "pci": pd.array([7, 7, 9, 9], dtype="Int32"),
+            "sector": pd.array([1, 1, 1, 2], dtype="Int32"),
+            "enb": pd.array([1, 1, 1, 1], dtype="Int64"),
         }
     )
-    return identity.pci_reuse_runs(frame)
 
 
-def test_pci_reuse_figure_draws_one_trace_per_enb():
-    runs = _reuse_runs()
-    fig = charts.pci_reuse_figure(runs, [7])
-    assert len(fig.data) == 2                       # one bar trace per eNB
-    assert {t.name for t in fig.data} == {"1", "2"}
-    assert all(t.orientation == "h" for t in fig.data)
+def test_identity_tracks_one_stacked_row_per_level():
+    fig = charts.identity_tracks_figure(_tracks_frame(), levels=("pci", "sector", "enb"))
+    step_lines = [t for t in fig.data if t.mode == "lines"]
+    assert len(step_lines) == 3                       # one step track per level
+    assert all(t.line.shape == "hv" for t in step_lines)
+    yaxes = [k for k in fig.layout if k.startswith("yaxis")]
+    assert len(yaxes) == 3                            # three vertically stacked axes
 
 
-def test_pci_reuse_figure_two_enbs_get_two_distinct_colours():
-    runs = _reuse_runs()
-    fig = charts.pci_reuse_figure(runs, [7])
-    colours = {t.marker.color for t in fig.data}
-    assert len(colours) == 2                        # a collision must be visible
+def test_identity_tracks_dot_marks_every_transition():
+    fig = charts.identity_tracks_figure(_tracks_frame(), levels=("pci", "sector", "enb"))
+    marker_traces = [t for t in fig.data if t.mode == "markers"]
+    # PCI changes once, sector once, eNB never -> two transition points total
+    assert sum(len(t.x) for t in marker_traces) == 2
 
 
-def test_pci_reuse_figure_empty_runs_is_blank():
+def test_identity_tracks_shares_one_x_axis():
+    fig = charts.identity_tracks_figure(_tracks_frame(), levels=("pci", "sector", "enb"))
+    # every track matches the bottom x-axis, so changes line up vertically
+    assert fig.layout.xaxis.matches == "x3"
+    assert fig.layout.xaxis2.matches == "x3"
+
+
+def test_identity_tracks_empty_is_blank():
     import pandas as pd
-    fig = charts.pci_reuse_figure(pd.DataFrame(columns=["pci", "enb", "start"]), [])
+    fig = charts.identity_tracks_figure(pd.DataFrame(columns=["time", "pci"]))
     assert len(fig.data) == 0

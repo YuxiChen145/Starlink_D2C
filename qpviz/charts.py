@@ -595,123 +595,110 @@ def timeline_figure(
     return fig
 
 
-def pci_reuse_figure(
-    runs: pd.DataFrame,
-    pci_order: Sequence,
+def identity_tracks_figure(
+    frame: pd.DataFrame,
+    levels: Sequence[str] = ("pci", "sector", "enb"),
+    labels: Optional[Sequence[str]] = None,
     mode: str = "light",
     x_axis: str = "absolute",
     height: Optional[int] = None,
-    color_level: str = "enb",
-    color_label: str = "eNB / gNB-Id",
 ) -> go.Figure:
-    """A swimlane keyed on PCI, each stretch coloured by the eNB serving it.
+    """Stacked, time-aligned step tracks of several identity levels.
 
-    ``pci_order`` fixes the rows (top-to-bottom). Every distinct eNB gets its own
-    hue and hues are never cycled, so two colours on one PCI row always mean two
-    different eNBs reusing that PCI - and the same colour returning after a gap is
-    the same eNB+PCI coming back. ``x_axis`` is wall-clock ``absolute`` or
-    ``elapsed`` active minutes within each collection.
+    One row per level, all sharing the time axis, so a change in one line can be
+    read straight down against the others: at a PCI change, did the sector or eNB
+    change too? At a sector change, did the eNB? Each track is a step line with a
+    larger dot at every transition, and hovering a time reads all three values at
+    once. ``x_axis`` is wall-clock ``absolute`` or ``elapsed`` minutes from the
+    first sample (intended for one collection at a time).
     """
+    from plotly.subplots import make_subplots
+
     chrome = CHROME.get(mode, CHROME["light"])
-    fig = go.Figure()
-    labels = [str(v) for v in pci_order]
-    keep = set(pci_order)
-    sub_all = runs[runs["pci"].isin(keep)] if not runs.empty else runs
+    levels = [l for l in levels if l in frame.columns]
+    n = len(levels)
+    if frame.empty or n == 0:
+        return go.Figure()
+    label_map = {
+        l: (labels[i] if labels is not None and i < len(labels) else l)
+        for i, l in enumerate(levels)
+    }
 
-    # eNBs ordered by first appearance, so the legend reads in the order the
-    # cells showed up rather than alphabetically.
-    if sub_all.empty or color_level not in sub_all.columns:
-        groups: List = []
+    work = frame[["time", *levels]].copy()
+    work["time"] = pd.to_datetime(work["time"], errors="coerce")
+    work = work.dropna(subset=["time"]).sort_values("time")
+    if work.empty:
+        return go.Figure()
+
+    if x_axis == "elapsed":
+        x = ((work["time"] - work["time"].iloc[0]).dt.total_seconds() / 60.0).to_numpy()
+        x_title = "Elapsed (minutes)"
     else:
-        first = sub_all.groupby(color_level, observed=True)["start"].min().sort_values()
-        groups = [g for g in first.index]
-    palette = generate_palette(len(groups), mode)
-    color_map = {g: palette[i] for i, g in enumerate(groups)}
+        x = work["time"].to_numpy()
+        x_title = "Time"
 
-    def _add(sub, name, color):
-        if sub.empty:
-            return
-        if x_axis == "absolute":
-            base = sub["start"]
-            width = (sub["end"] - sub["start"]).dt.total_seconds() * 1000.0
-            hover_x = "%{base|%Y-%m-%d %H:%M:%S}"
-        else:
-            base = sub["elapsed_start"] / 60.0
-            width = sub["duration_s"] / 60.0
-            hover_x = "%{base:.2f} min"
-        sector = (
-            sub["sector"].astype(str) if "sector" in sub.columns
-            else pd.Series(["—"] * len(sub), index=sub.index)
-        )
+    palette = generate_palette(n, mode)
+    fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.06)
+
+    for i, level in enumerate(levels):
+        colour = palette[i]
+        vals = work[level].astype("string")
+        order = list(dict.fromkeys(vals.dropna().tolist()))
+        yv = vals.where(vals.notna(), None).to_numpy()
+        # step line: the value held until it jumps, so a change is a visible step
         fig.add_trace(
-            go.Bar(
-                x=width,
-                y=[str(v) for v in sub["pci"]],
-                base=base,
-                orientation="h",
-                name=str(name),
-                marker=dict(color=color, line=dict(width=0.5, color=chrome["surface"])),
-                width=0.72,
-                customdata=np.stack(
-                    [
-                        sub["duration_s"].to_numpy(),
-                        sub["samples"].to_numpy(),
-                        sub["collection"].astype(str).to_numpy(),
-                        sub[color_level].astype(str).to_numpy(),
-                        sector.to_numpy(),
-                    ],
-                    axis=-1,
-                ),
-                hovertemplate=(
-                    "<b>PCI %{y}</b>"
-                    "<br>eNB %{customdata[3]} · sector %{customdata[4]}"
-                    f"<br>%{{customdata[2]}}<br>start {hover_x}"
-                    "<br>held %{customdata[0]:.1f}s (%{customdata[1]} samples)"
-                    "<extra></extra>"
-                ),
-            )
+            go.Scatter(
+                x=x, y=yv, mode="lines",
+                line=dict(shape="hv", color=colour, width=2),
+                connectgaps=False, name=label_map[level],
+                showlegend=False,
+                hovertemplate=f"<b>{label_map[level]}</b> %{{y}}<extra></extra>",
+            ),
+            row=i + 1, col=1,
         )
-
-    for g in groups:
-        _add(sub_all[sub_all[color_level] == g], g, color_map[g])
+        # a bigger dot at each transition, to draw the eye to the changes and let
+        # coincident changes across rows line up vertically
+        changed = vals.ne(vals.shift()) & vals.notna()
+        if len(changed):
+            changed.iloc[0] = False
+        if changed.any():
+            cx = np.asarray(x)[changed.to_numpy()]
+            fig.add_trace(
+                go.Scatter(
+                    x=cx, y=vals[changed].to_numpy(), mode="markers",
+                    marker=dict(size=9, color=colour,
+                                line=dict(width=1.5, color=chrome["surface"])),
+                    showlegend=False, hoverinfo="skip",
+                ),
+                row=i + 1, col=1,
+            )
+        fig.update_yaxes(
+            type="category", categoryorder="array", categoryarray=order,
+            title=dict(text=label_map[level],
+                       font=dict(color=chrome["text_secondary"], size=12)),
+            gridcolor=chrome["grid"], linecolor=chrome["axis"],
+            tickfont=dict(color=chrome["muted"], size=10),
+            row=i + 1, col=1,
+        )
 
     if height is None:
-        height = int(min(1400, max(320, 24 * len(labels) + 120)))
-
-    # A legend of every eNB is unreadable past a dozen or so; beyond that the
-    # colours plus hover carry it and the summary table names the eNBs.
-    show_legend = 2 <= len(groups) <= 16
+        height = int(min(1200, 150 * n + 120))
     fig.update_layout(
-        barmode="overlay",
-        bargap=0.25,
         height=height,
-        paper_bgcolor=chrome["surface"],
-        plot_bgcolor=chrome["surface"],
+        paper_bgcolor=chrome["surface"], plot_bgcolor=chrome["surface"],
         font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=8, r=16, t=8, b=48),
-        hovermode="closest",
+        margin=dict(l=8, r=16, t=10, b=48),
+        hovermode="x unified",
         hoverlabel=dict(font_family=FONT_FAMILY),
-        showlegend=show_legend,
-        legend=dict(
-            title=dict(text=color_label, font=dict(size=11, color=chrome["text_secondary"])),
-            orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
-            font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
-        ),
     )
     fig.update_xaxes(
-        title=dict(
-            text="Time" if x_axis == "absolute" else "Elapsed (minutes)",
-            font=dict(color=chrome["text_secondary"], size=12),
-        ),
         gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
         tickfont=dict(color=chrome["muted"], size=11),
     )
-    fig.update_yaxes(
-        title=dict(text="PCI", font=dict(color=chrome["text_secondary"], size=12)),
-        type="category", categoryorder="array", categoryarray=labels,
-        autorange="reversed",  # first row at the top, time reads downward
-        gridcolor=chrome["grid"], linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=10),
+    # x title only under the bottom track
+    fig.update_xaxes(
+        title=dict(text=x_title, font=dict(color=chrome["text_secondary"], size=12)),
+        row=n, col=1,
     )
     return fig
 
