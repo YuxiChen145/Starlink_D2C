@@ -657,15 +657,21 @@ def identity_tracks_figure(
             row=i + 1, col=1,
         )
         # a bigger dot at each transition, to draw the eye to the changes and let
-        # coincident changes across rows line up vertically
-        changed = vals.ne(vals.shift()) & vals.notna()
-        if len(changed):
-            changed.iloc[0] = False
+        # coincident changes across rows line up vertically. Built as a plain
+        # numpy bool mask so a missing value (nullable NA) can never leak in and
+        # break the boolean indexing.
+        sv = vals.fillna("\x00").to_numpy()          # NA -> sentinel, never equal
+        present = vals.notna().to_numpy()
+        changed = np.zeros(len(sv), dtype=bool)
+        if len(sv) > 1:
+            changed[1:] = sv[1:] != sv[:-1]
+        changed &= present                           # only mark a real value
+        changed[0] = False                           # the first sample is not a change
         if changed.any():
-            cx = np.asarray(x)[changed.to_numpy()]
+            values = vals.to_numpy(dtype=object)
             fig.add_trace(
                 go.Scatter(
-                    x=cx, y=vals[changed].to_numpy(), mode="markers",
+                    x=np.asarray(x)[changed], y=values[changed], mode="markers",
                     marker=dict(size=9, color=colour,
                                 line=dict(width=1.5, color=chrome["surface"])),
                     showlegend=False, hoverinfo="skip",

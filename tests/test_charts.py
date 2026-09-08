@@ -672,3 +672,20 @@ def test_identity_tracks_empty_is_blank():
     import pandas as pd
     fig = charts.identity_tracks_figure(pd.DataFrame(columns=["time", "pci"]))
     assert len(fig.data) == 0
+
+
+def test_identity_tracks_tolerate_missing_values_in_a_level():
+    # a real export can miss a sector on some samples; a nullable NA must not
+    # break the transition mask (regression: boolean indexing on <NA>)
+    import pandas as pd
+    times = pd.date_range("2026-07-22 14:00:00", periods=3, freq=pd.Timedelta(seconds=1))
+    frame = pd.DataFrame(
+        {
+            "time": times,
+            "pci": pd.array([7, 7, 9], dtype="Int32"),
+            "sector": pd.array([1, pd.NA, 1], dtype="Int32"),
+            "enb": pd.array([1, 1, 1], dtype="Int64"),
+        }
+    )
+    fig = charts.identity_tracks_figure(frame, levels=("pci", "sector", "enb"))
+    assert len([t for t in fig.data if t.mode == "lines"]) == 3
