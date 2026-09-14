@@ -188,44 +188,46 @@ def order_identities(
 
 
 # --------------------------------------------------------------------------- #
-# PCI reuse: is the same PCI served by more than one eNB, and does an eNB+PCI
-# come back?
+# Serving-cell change timeline: one segment per Cell Id, coloured by whether the
+# eNB changed too
 # --------------------------------------------------------------------------- #
 
-#: identity columns that describe *which* cell, in the order the reuse view keys
-#: on them. ``pci`` and ``enb`` carry the question; ``sector`` refines it.
-REUSE_KEYS = ("enb", "sector", "pci")
 
-
-def pci_reuse_runs(
+def serving_segments(
     frame: pd.DataFrame,
     gap_seconds: float = DEFAULT_GAP_SECONDS,
 ) -> pd.DataFrame:
-    """Contiguous serving stretches keyed on the whole ``eNB / sector / PCI``.
+    """One row per continuous stretch on a single **Cell Id** (beam/sector).
 
-    ``dwell_runs`` breaks a run whenever *one* level changes; here a run is a
-    stretch where the whole identity tuple stays put. So a PCI served first by
-    one eNB and later by another becomes two runs sharing a PCI - exactly the
-    reuse to look at. Columns: ``collection, enb, sector, pci[, cell_id], start,
-    end, duration_s, samples, elapsed_start, elapsed_end``.
+    A new segment begins whenever the Cell Id changes; the ``change`` column says
+    what kind of change it was, by comparing the eNB to the previous segment:
+
+    * ``start`` - the first segment of the collection,
+    * ``enb``   - the eNB changed too (a site / satellite change),
+    * ``cell``  - same eNB, new Cell Id (a beam / sector change).
+
+    Columns: ``collection, enb, cell_id, sector, pci, start, elapsed_start,
+    elapsed_end, duration_s, samples, change``. Elapsed values are *active*
+    seconds within the collection (paused time excluded), so every panel starts
+    at zero. When no Cell Id is decoded it falls back to segmenting on
+    ``eNB + sector``.
     """
-    carry = [c for c in ("enb", "sector", "pci", "cell_id") if c in frame.columns]
-    key_cols = [c for c in REUSE_KEYS if c in frame.columns]
-    empty = pd.DataFrame(
-        columns=["collection", *carry, "start", "end", "duration_s",
-                 "samples", "elapsed_start", "elapsed_end"]
-    )
-    if (
-        frame.empty
-        or "time" not in frame.columns
-        or "pci" not in frame.columns
-        or not key_cols
-    ):
+    carry = [c for c in ("enb", "cell_id", "sector", "pci") if c in frame.columns]
+    cols = ["collection", *carry, "start", "elapsed_start", "elapsed_end",
+            "duration_s", "samples", "change"]
+    empty = pd.DataFrame(columns=cols)
+    if frame.empty or "time" not in frame.columns or "enb" not in frame.columns:
+        return empty
+    if "cell_id" in frame.columns:
+        key_cols = ["cell_id"]
+    else:
+        key_cols = [c for c in ("enb", "sector") if c in frame.columns]
+    if not key_cols:
         return empty
 
     work = frame[["time", "collection", *carry]].copy()
     work["time"] = pd.to_datetime(work["time"], errors="coerce")
-    work = work.dropna(subset=["time", "pci"])
+    work = work.dropna(subset=["time", "enb"])
     if work.empty:
         return empty
 
@@ -235,10 +237,6 @@ def pci_reuse_runs(
         times = group["time"]
         dt = _effective_dt(times, gap_seconds)
         active = np.concatenate([[0.0], np.cumsum(dt)[:-1]]) if len(dt) else dt
-
-        # One string per sample from the identity tuple; NA folds to a sentinel
-        # so an unknown eNB does not raise on comparison and does not silently
-        # merge with a known one.
         key = (
             group[key_cols].astype("string").fillna("~").agg("|".join, axis=1).to_numpy()
         )
@@ -252,73 +250,75 @@ def pci_reuse_runs(
 
         detail = group.assign(_run=run_id, _dt=dt, _active=active)
         detail["_time"] = times.to_numpy()
+        seg_rows = []
         for _, run in detail.groupby("_run", sort=True):
             start = pd.Timestamp(run["_time"].iloc[0])
             duration = float(run["_dt"].sum())
             elapsed_start = float(run["_active"].iloc[0])
-            row = {
+            r = {
                 "collection": collection,
                 "start": start,
-                "end": start + pd.Timedelta(seconds=duration),
-                "duration_s": duration,
-                "samples": int(len(run)),
                 "elapsed_start": elapsed_start,
                 "elapsed_end": elapsed_start + duration,
+                "duration_s": duration,
+                "samples": int(len(run)),
             }
             for c in carry:
-                row[c] = run[c].iloc[0]
-            rows.append(row)
+                r[c] = run[c].iloc[0]
+            seg_rows.append(r)
 
-    runs = pd.DataFrame(rows)
-    if runs.empty:
+        # classify each boundary by whether the eNB moved as well
+        prev_enb = None
+        for r in seg_rows:
+            enb = r.get("enb")
+            if prev_enb is None:
+                r["change"] = "start"
+            elif pd.isna(enb) or pd.isna(prev_enb) or enb != prev_enb:
+                r["change"] = "enb"
+            else:
+                r["change"] = "cell"
+            prev_enb = enb
+        rows.extend(seg_rows)
+
+    segs = pd.DataFrame(rows, columns=cols)
+    if segs.empty:
         return empty
-    return runs.sort_values(["collection", "start"]).reset_index(drop=True)
+    return segs.sort_values(["collection", "elapsed_start"]).reset_index(drop=True)
 
 
-def pci_reuse_summary(runs: pd.DataFrame) -> pd.DataFrame:
-    """One row per PCI: how many eNBs used it, and whether an eNB+PCI recurs.
+def segment_summary(segments: pd.DataFrame) -> pd.DataFrame:
+    """Per-collection counts for the change timeline.
 
-    Columns: ``pci, n_enb, enbs, n_sectors, runs, return_runs, collides, recurs,
-    dwell_s, first_seen, last_seen``. ``collides`` is *the same PCI seen from
-    more than one eNB*; ``recurs`` is *the same eNB+PCI coming back in a later
-    run*; ``return_runs`` counts those extra returns. Sorted to put collisions,
-    then recurrences, then the longest-dwelling PCIs first.
+    Columns: ``collection, n_enb, n_cell, n_pci, segments, cell_changes,
+    enb_changes, span_min, median_dwell_s, cell_per_min, enb_per_min``. Every
+    segment after the first is a Cell-Id change; the eNB changes are the subset
+    marked ``enb``.
     """
-    cols = ["pci", "n_enb", "enbs", "n_sectors", "runs", "return_runs",
-            "collides", "recurs", "dwell_s", "first_seen", "last_seen"]
-    if runs.empty or "pci" not in runs.columns:
+    cols = ["collection", "n_enb", "n_cell", "n_pci", "segments", "cell_changes",
+            "enb_changes", "span_min", "median_dwell_s", "cell_per_min", "enb_per_min"]
+    if segments.empty:
         return pd.DataFrame(columns=cols)
-
-    has_enb = "enb" in runs.columns
-    out_rows = []
-    for pci, g in runs.groupby("pci", observed=True):
-        if has_enb:
-            enbs = list(pd.unique(g["enb"].dropna()))
-            per_enb = g.dropna(subset=["enb"]).groupby("enb", observed=True).size()
-            # a return is any run beyond the first on the same eNB+PCI
-            return_runs = int((per_enb[per_enb > 1] - 1).sum()) if not per_enb.empty else 0
-            recurs = bool((per_enb > 1).any())
-        else:
-            enbs, return_runs, recurs = [], 0, False
-        out_rows.append(
+    rows = []
+    for collection, g in segments.groupby("collection", observed=True, sort=True):
+        span_min = max(float(g["elapsed_end"].max()) / 60.0, 1e-9)
+        cell_changes = int(len(g) - 1)
+        enb_changes = int((g["change"] == "enb").sum())
+        rows.append(
             {
-                "pci": pci,
-                "n_enb": len(enbs),
-                "enbs": ", ".join(str(e) for e in enbs),
-                "n_sectors": int(g["sector"].nunique()) if "sector" in g.columns else 0,
-                "runs": int(len(g)),
-                "return_runs": return_runs,
-                "collides": len(enbs) > 1,
-                "recurs": recurs,
-                "dwell_s": float(g["duration_s"].sum()),
-                "first_seen": g["start"].min(),
-                "last_seen": g["end"].max(),
+                "collection": collection,
+                "n_enb": int(g["enb"].nunique()) if "enb" in g.columns else 0,
+                "n_cell": int(g["cell_id"].nunique()) if "cell_id" in g.columns else int(len(g)),
+                "n_pci": int(g["pci"].nunique()) if "pci" in g.columns else 0,
+                "segments": int(len(g)),
+                "cell_changes": cell_changes,
+                "enb_changes": enb_changes,
+                "span_min": span_min,
+                "median_dwell_s": float(g["duration_s"].median()),
+                "cell_per_min": cell_changes / span_min,
+                "enb_per_min": enb_changes / span_min,
             }
         )
-    out = pd.DataFrame(out_rows, columns=cols)
-    return out.sort_values(
-        ["collides", "recurs", "dwell_s"], ascending=[False, False, False]
-    ).reset_index(drop=True)
+    return pd.DataFrame(rows, columns=cols)
 
 
 # --------------------------------------------------------------------------- #

@@ -186,6 +186,38 @@ def test_cell_identity_survives_a_metric_with_no_identity_columns(
     ]
 
 
+def test_cell_identity_shows_prism_decoded_identity(prism_dir, monkeypatch, tmp_path):
+    # PRISM decodes eNB/sector/PCI on some scan rows; with no QP present the
+    # Cell identity tab must still open on those, offering the relationship views
+    # (Hierarchy / Structure) but not the serving-cell time views.
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    empty_qp = tmp_path / "no_qp"
+    empty_qp.mkdir()
+    app = _run(empty_qp, prism_dir=prism_dir)
+    _assert_clean(app)
+
+    assert any("Cell identity" in t.label for t in app.tabs)
+    view = app.radio(key="identity_view")
+    assert set(view.options) == {"Hierarchy", "Structure"}   # no serving-cell timelines
+    # PRISM's decoded eNB / sector / PCI drive the hierarchy
+    hierarchy = app.multiselect(key="identity_hierarchy")
+    assert hierarchy.value == ["enb", "sector", "pci"]
+    view.set_value("Structure").run()
+    _assert_clean(app)
+
+
+def test_cell_identity_pools_qp_serving_and_prism_scans(
+    fixture_dir, prism_dir, monkeypatch, tmp_path
+):
+    # with both sources, the serving-cell views come back (QP) and PRISM rows
+    # still join the relationship views
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir, prism_dir=prism_dir)
+    _assert_clean(app)
+    view = app.radio(key="identity_view")
+    assert {"Timeline", "Change timeline", "Hierarchy", "Structure"} <= set(view.options)
+
+
 def test_metric_picker_offers_only_the_metrics_in_metric_order(
     fixture_dir, monkeypatch, tmp_path
 ):

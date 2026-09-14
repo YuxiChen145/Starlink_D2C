@@ -124,12 +124,16 @@ def test_prism_only_pooling_changes_the_sample_count(
     assert 0 < prism_only < both
 
 
-def test_identity_tab_needs_qp(fixture_dir, prism_dir, tmp_path, monkeypatch):
+def test_identity_tab_opens_on_prism_decoded_cells(fixture_dir, prism_dir, tmp_path, monkeypatch):
     app = _run(fixture_dir, prism_dir, tmp_path, monkeypatch)
     _clean(app)
     app.multiselect(key="f_providers").select("PRISM").run()
     _clean(app)
-    assert any("connected-mode" in i.value for i in app.info)
+    # PRISM-only now opens the Cell identity tab on its decoded eNB/sector/PCI,
+    # offering the relationship views (no serving-cell timelines, no QP prompt)
+    view = app.radio(key="identity_view")
+    assert set(view.options) == {"Hierarchy", "Structure"}
+    assert not any("connected-mode" in i.value for i in app.info)
 
 
 def test_map_can_colour_by_enb(fixture_dir, prism_dir, tmp_path, monkeypatch):

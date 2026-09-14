@@ -627,65 +627,59 @@ def test_pdf_figure_overlays_normalised_histograms():
 
 
 # --------------------------------------------------------------------------- #
-# Identity tracks (PCI / sector / eNB, time-aligned)
+# Serving-cell change timeline (eNB Id on y, one segment per Cell Id)
 # --------------------------------------------------------------------------- #
 
 
-def _tracks_frame():
+def _segments(collections=("A",)):
     import pandas as pd
-    times = pd.date_range("2026-07-22 14:00:00", periods=4, freq=pd.Timedelta(seconds=1))
-    # PCI: 7,7,9,9 (one change) ; sector: 1,1,1,2 (one change) ; eNB: 1,1,1,1 (none)
-    return pd.DataFrame(
-        {
+    from qpviz import identity
+    frames = []
+    for i, c in enumerate(collections):
+        n = 5
+        times = pd.date_range("2026-08-14 14:00:00", periods=n,
+                              freq=pd.Timedelta(seconds=1)) + pd.Timedelta(hours=i)
+        frames.append(pd.DataFrame({
             "time": times,
-            "pci": pd.array([7, 7, 9, 9], dtype="Int32"),
-            "sector": pd.array([1, 1, 1, 2], dtype="Int32"),
-            "enb": pd.array([1, 1, 1, 1], dtype="Int64"),
-        }
-    )
+            "collection": c,
+            "enb": pd.array([1, 1, 1, 2, 2], dtype="Int64"),   # start, cell, enb
+            "cell_id": pd.array([10, 10, 11, 20, 20], dtype="Int64"),
+            "sector": pd.array([0, 0, 1, 0, 0], dtype="Int32"),
+            "pci": pd.array([100, 100, 101, 200, 200], dtype="Int32"),
+            "cell_type": "MCG PCell",
+        }))
+    return identity.serving_segments(pd.concat(frames, ignore_index=True))
 
 
-def test_identity_tracks_one_stacked_row_per_level():
-    fig = charts.identity_tracks_figure(_tracks_frame(), levels=("pci", "sector", "enb"))
-    step_lines = [t for t in fig.data if t.mode == "lines"]
-    assert len(step_lines) == 3                       # one step track per level
-    assert all(t.line.shape == "hv" for t in step_lines)
+def test_serving_timeline_one_panel_per_collection():
+    segs = _segments(("A", "B"))
+    fig = charts.serving_timeline_figure(segs, collections=["A", "B"])
     yaxes = [k for k in fig.layout if k.startswith("yaxis")]
-    assert len(yaxes) == 3                            # three vertically stacked axes
+    assert len(yaxes) == 2                          # two stacked panels
+    # the two legend entries name the orange/blue meaning
+    names = {t.name for t in fig.data}
+    assert any("new eNB" in (n or "") for n in names)
+    assert any("new Cell Id" in (n or "") for n in names)
 
 
-def test_identity_tracks_dot_marks_every_transition():
-    fig = charts.identity_tracks_figure(_tracks_frame(), levels=("pci", "sector", "enb"))
-    marker_traces = [t for t in fig.data if t.mode == "markers"]
-    # PCI changes once, sector once, eNB never -> two transition points total
-    assert sum(len(t.x) for t in marker_traces) == 2
+def test_serving_timeline_colours_segments_orange_and_blue():
+    fig = charts.serving_timeline_figure(_segments(("A",)), collections=["A"])
+    seg_colours = {
+        t.line.color for t in fig.data
+        if t.mode == "lines" and t.line.width == 7   # segments, not the width-6 swatches
+    }
+    # this data has both an eNB change (orange) and a cell-only change (blue)
+    assert seg_colours == {charts.CHANGE_ENB_COLOR, charts.CHANGE_CELL_COLOR}
 
 
-def test_identity_tracks_shares_one_x_axis():
-    fig = charts.identity_tracks_figure(_tracks_frame(), levels=("pci", "sector", "enb"))
-    # every track matches the bottom x-axis, so changes line up vertically
-    assert fig.layout.xaxis.matches == "x3"
-    assert fig.layout.xaxis2.matches == "x3"
+def test_serving_timeline_labels_pci_above_and_sector_below():
+    fig = charts.serving_timeline_figure(_segments(("A",)), collections=["A"])
+    texts = {a.text for a in fig.layout.annotations}
+    assert {"100", "101", "200"} <= texts     # PCI above each segment
+    assert {"s0", "s1"} <= texts              # sector id below each segment
 
 
-def test_identity_tracks_empty_is_blank():
+def test_serving_timeline_empty_is_blank():
     import pandas as pd
-    fig = charts.identity_tracks_figure(pd.DataFrame(columns=["time", "pci"]))
+    fig = charts.serving_timeline_figure(pd.DataFrame(columns=["collection", "enb"]), [])
     assert len(fig.data) == 0
-
-
-def test_identity_tracks_tolerate_missing_values_in_a_level():
-    # a real export can miss a sector on some samples; a nullable NA must not
-    # break the transition mask (regression: boolean indexing on <NA>)
-    import pandas as pd
-    times = pd.date_range("2026-07-22 14:00:00", periods=3, freq=pd.Timedelta(seconds=1))
-    frame = pd.DataFrame(
-        {
-            "time": times,
-            "pci": pd.array([7, 7, 9], dtype="Int32"),
-            "sector": pd.array([1, pd.NA, 1], dtype="Int32"),
-            "enb": pd.array([1, 1, 1], dtype="Int64"),
-        }
-    )
-    fig = charts.identity_tracks_figure(frame, levels=("pci", "sector", "enb"))
-    assert len([t for t in fig.data if t.mode == "lines"]) == 3

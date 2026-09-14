@@ -1103,38 +1103,45 @@ with tab_cdf:
 # --------------------------------------------------------------------------- #
 
 with tab_cells:
-    # Serving-cell identity is a property of the connection, not of the metric
-    # you happen to be plotting - and only the QP Radio exports carry a serving
-    # cell over time. PRISM is a scanner: it hears every cell at once, so there
-    # is no single serving cell to build a dwell timeline from.
-    if "QP" not in providers_active:
-        st.info(
-            "Cell identity (serving cell, dwell, hand-overs) comes from Qualipoc "
-            "connected-mode logs. Add **QP** as a measurement source to use this "
-            "tab — PRISM is a scanner with no single serving cell."
-        )
-        st.stop()
-
-    radio_keys = tuple(
+    # Cell identity from whichever active sources carry it. QP connected-mode
+    # Radio exports give a *serving* cell over time (dwell, hand-overs). PRISM is
+    # an SDR scanner: its decoded eNB / sector / PCI are identity observations
+    # (every audible cell), not a serving sequence — so they feed the relationship
+    # views (Hierarchy, Structure), not the serving-cell timelines.
+    qp_radio_keys = tuple(
         k
         for k in sorted(qp_present)
         if k in ("lte_radio", "nr_radio")
         and (tech_value is None or DATASETS_BY_KEY[k].tech == tech_value)
-    )
-    if not radio_keys:
-        st.info("No Radio [connected] export for this technology, so no cell identity.")
+    ) if "QP" in providers_active else ()
+    prism_id_keys = tuple(
+        k
+        for k in sorted(prism_present)
+        if tech_value is None or PRISM_DATASETS_BY_KEY[k].tech == tech_value
+    ) if "PRISM" in providers_active else ()
+
+    if not qp_radio_keys and not prism_id_keys:
+        st.info(
+            "Cell identity needs the QP Radio [connected] export or a PRISM scan "
+            "that decodes eNB / PCI — neither is available for this selection."
+        )
         st.stop()
 
-    radio = load_frame(qp_dir, radio_keys)
+    _id_parts = []
+    if qp_radio_keys:
+        _id_parts.append(load_frame(qp_dir, qp_radio_keys))
+    if prism_id_keys:
+        _id_parts.append(load_prism_frame(prism_dir, prism_id_keys))
+    radio = loader.concat_frames(_id_parts)
 
     def _intersecting(values, column):
-        """Only carry a filter across if it means anything in the radio frame."""
+        """Only carry a filter across if it means anything in the identity frame."""
         if not values:
             return []
         present_values = set(loader.options(radio, column))
         return [v for v in values if v in present_values]
 
-    cells = flt.apply_filters(
+    ident = flt.apply_filters(
         radio,
         flt.Filters(
             collections=collections,
@@ -1147,116 +1154,144 @@ with tab_cells:
             require=("pci",) if drop_unknown else (),
         ),
     )
-    cells = identity.serving_only(cells)
+    # QP rows: keep only the serving cell (PCell / PSCell). PRISM rows have no
+    # serving concept, so keep every decoded identity row.
+    if "provider" in ident.columns:
+        is_prism = (ident["provider"] == "PRISM").to_numpy()
+        cells = pd.concat(
+            [identity.serving_only(ident.loc[~is_prism]), ident.loc[is_prism]],
+            ignore_index=True,
+        )
+    else:
+        cells = identity.serving_only(ident)
+    # a cell needs at least a PCI to place it; drop identity-less rows
+    if "pci" in cells.columns:
+        cells = cells[cells["pci"].notna()]
+
+    # the QP serving-cell subset drives the time views; everything (QP + PRISM)
+    # drives the relationship views
+    if "provider" in cells.columns:
+        serving = cells[cells["provider"] == "QP"]
+    else:
+        serving = cells
     levels = identity.available_levels(cells)
+    serving_levels = identity.available_levels(serving)
 
     if cells.empty or not levels:
-        st.info("No serving-cell rows match the current filters.")
+        st.info("No cell-identity rows match the current filters.")
     else:
-        st.caption(
-            "Serving cell (PCell / PSCell) only, from "
-            + ", ".join(DATASETS_BY_KEY[k].label for k in radio_keys)
-            + f" — {len(cells):,} samples."
-        )
+        n_prism = int((cells["provider"] == "PRISM").sum()) if "provider" in cells.columns else 0
+        src_parts = []
+        if not serving.empty and qp_radio_keys:
+            src_parts.append(
+                f"QP serving cell ({len(serving):,} samples, "
+                + ", ".join(DATASETS_BY_KEY[k].label for k in qp_radio_keys) + ")"
+            )
+        if n_prism:
+            src_parts.append(
+                f"PRISM decoded scans ({n_prism:,} rows — every audible cell, "
+                "in the Hierarchy / Structure views)"
+            )
+        st.caption("Cell identity from " + " + ".join(src_parts) + ".")
+
+        # serving-cell time views need QP rows; the relationship views work for
+        # either source — that is where PRISM's decoded identity appears
+        view_options = (["Timeline", "Change timeline"] if not serving.empty else []) + [
+            "Hierarchy", "Structure",
+        ]
+        if st.session_state.get("identity_view") not in view_options:
+            st.session_state.pop("identity_view", None)
         view = st.radio(
-            "View",
-            ["Timeline", "PCI reuse", "Hierarchy", "Structure"],
-            horizontal=True,
-            key="identity_view",
+            "View", view_options, horizontal=True, key="identity_view",
         )
 
-        if view == "PCI reuse":
+        if view == "Change timeline":
             st.caption(
-                "**PCI, Sector and eNB as three time-aligned tracks** for one "
-                "collection. Read straight down: at a **PCI** change, did the "
-                "**sector** or **eNB** change too? At a **sector** change, did the "
-                "**eNB**? A dot marks every transition; hovering a time reads all "
-                "three at once."
+                "**Serving-cell timeline** with **eNB Id on the y-axis** and one "
+                "segment per Cell Id. A segment is **orange** when the **eNB** "
+                "changed (a site/satellite change) and **blue** when only the "
+                "**Cell Id** changed under the same eNB (a beam/sector change). Each "
+                "segment is labelled with its **PCI above** and **sector below** "
+                "(`s#`), and dotted lines connect consecutive cells so an eNB jump "
+                "is visible. One panel per collection."
             )
-            track_levels = [l for l in ("pci", "sector", "enb") if l in levels]
-            if "pci" not in track_levels or "enb" not in track_levels:
+            if "enb" not in serving_levels:
                 st.info(
-                    "This needs the connected radio to carry both an eNB/gNB-Id and "
-                    "a PCI. They are not both decoded in the current selection."
+                    "This needs the connected radio to carry an eNB/gNB-Id. It is "
+                    "not decoded in the current selection."
                 )
             else:
-                reuse_runs = identity.pci_reuse_runs(cells)
-                reuse = identity.pci_reuse_summary(reuse_runs)
-                kpi = st.columns(4)
-                kpi[0].metric("Distinct PCIs", f"{reuse['pci'].nunique():,}")
-                kpi[1].metric(
-                    "Reused across eNBs", f"{int(reuse['collides'].sum()):,}",
-                    help="PCIs served by more than one eNB.",
-                )
-                kpi[2].metric(
-                    "Recurring eNB+PCI", f"{int(reuse['recurs'].sum()):,}",
-                    help="PCIs where the same eNB+PCI comes back in a later run.",
-                )
-                kpi[3].metric("Distinct eNBs", f"{reuse_runs['enb'].nunique():,}")
-
-                # The tracks read change-by-change, so they belong to one
-                # collection at a time — otherwise a collection boundary looks
-                # like a hand-over. Default to the collection with the most rows.
-                by_size = cells.groupby("collection", observed=True).size()
-                colls = by_size.sort_values(ascending=False).index.tolist()
-                ctl = st.columns([3, 2])
-                if len(colls) > 1:
-                    chosen_coll = ctl[0].selectbox(
-                        "Collection", colls, key="tracks_coll",
-                        help="One collection at a time, so a change reads as a "
-                             "hand-over rather than a log boundary.",
-                    )
+                segments = identity.serving_segments(serving)
+                summary = identity.segment_summary(segments)
+                if segments.empty:
+                    st.info("Not enough serving-cell samples to build segments.")
                 else:
-                    chosen_coll = colls[0]
-                    ctl[0].caption(f"Collection: **{chosen_coll}**")
-                x_axis = ctl[1].selectbox(
-                    "X axis", ["absolute", "elapsed"], key="tracks_x",
-                    help="Absolute wall-clock, or active minutes from the first "
-                         "sample of this collection.",
-                )
+                    by_size = serving.groupby("collection", observed=True).size()
+                    all_colls = by_size.sort_values(ascending=False).index.tolist()
+                    default = all_colls[:4]
+                    chosen = st.multiselect(
+                        "Collections (one panel each)",
+                        options=all_colls, default=default, key="chg_collections",
+                        help="Each collection is a separate session, drawn as its "
+                             "own panel from elapsed time 0.",
+                    )
+                    if not chosen:
+                        st.info("Pick at least one collection.")
+                    else:
+                        srow = {r["collection"]: r for _, r in summary.iterrows()}
 
-                one = cells[cells["collection"] == chosen_coll]
-                st.plotly_chart(
-                    charts.identity_tracks_figure(
-                        one, levels=track_levels,
-                        labels=[identity.label_for(l) for l in track_levels],
-                        mode=MODE, x_axis=x_axis,
-                    ),
-                    width="stretch",
-                )
-                st.caption(
-                    f"{len(one):,} serving samples in **{chosen_coll}**. "
-                    "The table below quantifies reuse across *all* selected "
-                    "collections."
-                )
-                with st.expander("PCI reuse table (all selected collections)"):
-                    table = reuse.rename(
-                        columns={
-                            "pci": "PCI",
-                            "n_enb": "eNBs",
-                            "enbs": "eNB ids",
-                            "n_sectors": "Sectors",
-                            "runs": "Runs",
-                            "return_runs": "Returns",
-                            "collides": "Reused across eNBs",
-                            "recurs": "Recurs",
-                            "dwell_s": "Dwell (s)",
-                            "first_seen": "First seen",
-                            "last_seen": "Last seen",
-                        }
-                    )
-                    st.dataframe(table, width="stretch", hide_index=True, height=340)
-                    st.download_button(
-                        "Download PCI reuse (CSV)",
-                        table.to_csv(index=False).encode(),
-                        file_name="pci_reuse.csv",
-                        mime="text/csv",
-                    )
+                        def _subtitle(coll):
+                            r = srow.get(coll)
+                            if r is None:
+                                return str(coll)
+                            return (
+                                f"{coll}<br>{r['n_enb']} eNB Ids · {r['n_cell']} "
+                                f"Cell Ids · {r['n_pci']} PCIs in {r['span_min']:.0f} min"
+                                f"   |   {r['cell_changes']} cell changes "
+                                f"({r['cell_per_min']:.1f}/min), {r['enb_changes']} "
+                                f"eNB changes ({r['enb_per_min']:.1f}/min), median "
+                                f"dwell {r['median_dwell_s']:.0f} s"
+                            )
+
+                        st.plotly_chart(
+                            charts.serving_timeline_figure(
+                                segments[segments["collection"].isin(chosen)],
+                                collections=chosen,
+                                labels=[str(c) for c in chosen],
+                                subtitles=[_subtitle(c) for c in chosen],
+                                mode=MODE,
+                            ),
+                            width="stretch",
+                        )
+                        with st.expander("Segments as a table"):
+                            cols = [c for c in ("collection", "enb", "cell_id", "sector",
+                                                "pci", "change", "elapsed_start",
+                                                "duration_s", "samples")
+                                    if c in segments.columns]
+                            table = segments.loc[
+                                segments["collection"].isin(chosen), cols
+                            ].rename(
+                                columns={
+                                    "collection": "Collection", "enb": "eNB",
+                                    "cell_id": "Cell Id", "sector": "Sector",
+                                    "pci": "PCI", "change": "Change",
+                                    "elapsed_start": "Elapsed start (s)",
+                                    "duration_s": "Held (s)", "samples": "Samples",
+                                }
+                            )
+                            st.dataframe(table, width="stretch", hide_index=True, height=320)
+                            st.download_button(
+                                "Download segments (CSV)",
+                                table.to_csv(index=False).encode(),
+                                file_name="serving_segments.csv",
+                                mime="text/csv",
+                            )
 
         elif view == "Timeline":
             row = st.columns([2, 2, 2, 2])
             level = row[0].selectbox(
-                "Identity", levels, format_func=identity.label_for, key="identity_level"
+                "Identity", serving_levels, format_func=identity.label_for,
+                key="identity_level",
             )
             order_by = row[1].selectbox(
                 "Row order", ["first seen", "dwell", "value"], key="identity_order",
@@ -1274,7 +1309,7 @@ with tab_cells:
                      "share one axis.",
             )
 
-            runs = identity.dwell_runs(cells, level)
+            runs = identity.dwell_runs(serving, level)
             if runs.empty:
                 st.info("Not enough samples to build dwell runs.")
             else:

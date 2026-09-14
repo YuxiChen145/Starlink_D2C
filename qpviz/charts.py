@@ -595,115 +595,181 @@ def timeline_figure(
     return fig
 
 
-def identity_tracks_figure(
-    frame: pd.DataFrame,
-    levels: Sequence[str] = ("pci", "sector", "enb"),
+#: the change timeline's two states — a new eNB (a site/satellite change) versus
+#: only a new Cell Id under the same eNB (a beam/sector change)
+CHANGE_ENB_COLOR = "#e8722c"   # orange
+CHANGE_CELL_COLOR = "#2f7ed8"  # blue
+
+
+def serving_timeline_figure(
+    segments: pd.DataFrame,
+    collections: Sequence,
     labels: Optional[Sequence[str]] = None,
+    subtitles: Optional[Sequence[str]] = None,
     mode: str = "light",
-    x_axis: str = "absolute",
     height: Optional[int] = None,
 ) -> go.Figure:
-    """Stacked, time-aligned step tracks of several identity levels.
+    """Serving-cell change timeline: eNB Id on y, one segment per Cell Id.
 
-    One row per level, all sharing the time axis, so a change in one line can be
-    read straight down against the others: at a PCI change, did the sector or eNB
-    change too? At a sector change, did the eNB? Each track is a step line with a
-    larger dot at every transition, and hovering a time reads all three values at
-    once. ``x_axis`` is wall-clock ``absolute`` or ``elapsed`` minutes from the
-    first sample (intended for one collection at a time).
+    Each dwell is a horizontal segment at its eNB Id, drawn over elapsed minutes.
+    Its colour says what kind of change *started* it - orange for a new eNB (a
+    site / satellite change), blue for the same eNB with a new Cell Id (a beam /
+    sector change) - the PCI is labelled above it, and dotted lines connect
+    consecutive segments so an eNB jump is visible. One panel per collection.
     """
     from plotly.subplots import make_subplots
 
     chrome = CHROME.get(mode, CHROME["light"])
-    levels = [l for l in levels if l in frame.columns]
-    n = len(levels)
-    if frame.empty or n == 0:
+    collections = list(collections)
+    n = len(collections)
+    if segments.empty or n == 0:
         return go.Figure()
-    label_map = {
-        l: (labels[i] if labels is not None and i < len(labels) else l)
-        for i, l in enumerate(levels)
-    }
+    label_map = {c: (labels[i] if labels else str(c)) for i, c in enumerate(collections)}
+    sub_map = {c: (subtitles[i] if subtitles else "") for i, c in enumerate(collections)}
 
-    work = frame[["time", *levels]].copy()
-    work["time"] = pd.to_datetime(work["time"], errors="coerce")
-    work = work.dropna(subset=["time"]).sort_values("time")
-    if work.empty:
-        return go.Figure()
+    orange, blue = CHANGE_ENB_COLOR, CHANGE_CELL_COLOR
+    fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.16)
 
-    if x_axis == "elapsed":
-        x = ((work["time"] - work["time"].iloc[0]).dt.total_seconds() / 60.0).to_numpy()
-        x_title = "Elapsed (minutes)"
-    else:
-        x = work["time"].to_numpy()
-        x_title = "Time"
+    # legend: two dummy traces so the colour meaning is spelled out once
+    fig.add_trace(
+        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=orange, width=6),
+                   name="new eNB/gNB Id (site or satellite change)"),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=blue, width=6),
+                   name="same eNB/gNB Id, new Cell Id (beam or sector change)"),
+        row=1, col=1,
+    )
 
-    palette = generate_palette(n, mode)
-    fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.06)
+    def _minutes(series):
+        return (series.to_numpy(dtype="float64") / 60.0)
 
-    for i, level in enumerate(levels):
-        colour = palette[i]
-        vals = work[level].astype("string")
-        order = list(dict.fromkeys(vals.dropna().tolist()))
-        yv = vals.where(vals.notna(), None).to_numpy()
-        # step line: the value held until it jumps, so a change is a visible step
+    for r, coll in enumerate(collections, start=1):
+        g = segments[segments["collection"] == coll].sort_values("elapsed_start")
+        if g.empty:
+            continue
+        # segments, batched by colour into one trace each (None separators)
+        for change_set, colour in ((("start", "enb"), orange), (("cell",), blue)):
+            sub = g[g["change"].isin(change_set)]
+            if sub.empty:
+                continue
+            xs, ys = [], []
+            x0 = _minutes(sub["elapsed_start"]); x1 = _minutes(sub["elapsed_end"])
+            enb = sub["enb"].to_numpy()
+            for a, b, e in zip(x0, x1, enb):
+                xs += [a, b, None]
+                ys += [e, e, None]
+            fig.add_trace(
+                go.Scatter(x=xs, y=ys, mode="lines",
+                           line=dict(color=colour, width=7),
+                           showlegend=False, hoverinfo="skip"),
+                row=r, col=1,
+            )
+        # dotted connectors between consecutive segments
+        em = _minutes(g["elapsed_end"]); sm = _minutes(g["elapsed_start"])
+        enb = g["enb"].to_numpy()
+        cx, cy = [], []
+        for i in range(1, len(g)):
+            cx += [em[i - 1], sm[i], None]
+            cy += [enb[i - 1], enb[i], None]
+        if cx:
+            fig.add_trace(
+                go.Scatter(x=cx, y=cy, mode="lines",
+                           line=dict(color=chrome["muted"], width=1, dash="dot"),
+                           showlegend=False, hoverinfo="skip"),
+                row=r, col=1,
+            )
+        # invisible mid-segment markers carry the hover detail
+        mid = (_minutes(g["elapsed_start"]) + _minutes(g["elapsed_end"])) / 2.0
+        cell = g["cell_id"].astype(str) if "cell_id" in g.columns else g["enb"].astype(str)
+        sector = g["sector"].astype(str) if "sector" in g.columns else pd.Series(["—"] * len(g))
         fig.add_trace(
             go.Scatter(
-                x=x, y=yv, mode="lines",
-                line=dict(shape="hv", color=colour, width=2),
-                connectgaps=False, name=label_map[level],
+                x=mid, y=g["enb"].to_numpy(), mode="markers",
+                marker=dict(size=2, color="rgba(0,0,0,0)"),
+                customdata=np.stack(
+                    [g["pci"].astype(str).to_numpy(), cell.to_numpy(),
+                     sector.to_numpy(), g["duration_s"].to_numpy()], axis=-1),
+                hovertemplate=(
+                    "eNB %{y} · PCI %{customdata[0]}"
+                    "<br>Cell %{customdata[1]} · sector %{customdata[2]}"
+                    "<br>held %{customdata[3]:.1f}s<extra></extra>"),
                 showlegend=False,
-                hovertemplate=f"<b>{label_map[level]}</b> %{{y}}<extra></extra>",
             ),
-            row=i + 1, col=1,
+            row=r, col=1,
         )
-        # a bigger dot at each transition, to draw the eye to the changes and let
-        # coincident changes across rows line up vertically. Built as a plain
-        # numpy bool mask so a missing value (nullable NA) can never leak in and
-        # break the boolean indexing.
-        sv = vals.fillna("\x00").to_numpy()          # NA -> sentinel, never equal
-        present = vals.notna().to_numpy()
-        changed = np.zeros(len(sv), dtype=bool)
-        if len(sv) > 1:
-            changed[1:] = sv[1:] != sv[:-1]
-        changed &= present                           # only mark a real value
-        changed[0] = False                           # the first sample is not a change
-        if changed.any():
-            values = vals.to_numpy(dtype=object)
-            fig.add_trace(
-                go.Scatter(
-                    x=np.asarray(x)[changed], y=values[changed], mode="markers",
-                    marker=dict(size=9, color=colour,
-                                line=dict(width=1.5, color=chrome["surface"])),
-                    showlegend=False, hoverinfo="skip",
-                ),
-                row=i + 1, col=1,
-            )
+        # PCI labelled above each segment, sector id below it
+        def _num(v):
+            try:
+                return str(int(v)) if float(v).is_integer() else str(v)
+            except (TypeError, ValueError):
+                return str(v)
+
+        sec_vals = (g["sector"].to_numpy() if "sector" in g.columns
+                    else np.full(len(g), np.nan))
+        for a, b, e, pci, sec in zip(
+            _minutes(g["elapsed_start"]), _minutes(g["elapsed_end"]),
+            g["enb"].to_numpy(), g["pci"].to_numpy(), sec_vals,
+        ):
+            xmid = (a + b) / 2.0
+            if not pd.isna(pci):
+                fig.add_annotation(
+                    x=xmid, y=e, text=_num(pci), showarrow=False, yshift=11,
+                    font=dict(size=9, color=chrome["text_secondary"]),
+                    row=r, col=1,
+                )
+            if not pd.isna(sec):
+                fig.add_annotation(
+                    x=xmid, y=e, text=f"s{_num(sec)}", showarrow=False, yshift=-11,
+                    font=dict(size=8, color=chrome["muted"]),
+                    row=r, col=1,
+                )
         fig.update_yaxes(
-            type="category", categoryorder="array", categoryarray=order,
-            title=dict(text=label_map[level],
-                       font=dict(color=chrome["text_secondary"], size=12)),
+            title=dict(text="eNB Id", font=dict(color=chrome["text_secondary"], size=12)),
             gridcolor=chrome["grid"], linecolor=chrome["axis"],
-            tickfont=dict(color=chrome["muted"], size=10),
-            row=i + 1, col=1,
+            tickfont=dict(color=chrome["muted"], size=10), row=r, col=1,
         )
+        # left-aligned per-panel subtitle
+        if sub_map.get(coll):
+            xref = "x domain" if r == 1 else f"x{r} domain"
+            yref = "y domain" if r == 1 else f"y{r} domain"
+            fig.add_annotation(
+                xref=xref, yref=yref, x=0, y=1.0, yshift=24, xanchor="left",
+                align="left", showarrow=False, text=sub_map[coll],
+                font=dict(size=12, color=chrome["text_primary"]),
+            )
 
     if height is None:
-        height = int(min(1200, 150 * n + 120))
+        height = int(min(1800, max(360, 300 * n + 90)))
     fig.update_layout(
         height=height,
         paper_bgcolor=chrome["surface"], plot_bgcolor=chrome["surface"],
         font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=8, r=16, t=10, b=48),
-        hovermode="x unified",
-        hoverlabel=dict(font_family=FONT_FAMILY),
+        margin=dict(l=8, r=16, t=96, b=48),
+        hovermode="closest", hoverlabel=dict(font_family=FONT_FAMILY),
+        # anchor the legend to the whole figure so it sits above every panel,
+        # clear of the first panel's subtitle, no matter how many panels there are
+        legend=dict(orientation="h",
+                    xref="container", x=0.005, xanchor="left",
+                    yref="container", y=0.995, yanchor="top",
+                    font=dict(size=11, color=chrome["text_secondary"]),
+                    bgcolor="rgba(0,0,0,0)"),
+    )
+    # spell out the label convention, up in the top margin by the legend
+    fig.add_annotation(
+        xref="paper", x=1.0, xanchor="right",
+        yref="paper", y=1.0, yanchor="bottom", yshift=42, showarrow=False,
+        text="above segment = <b>PCI</b> · below = <b>sector</b> (s#)",
+        font=dict(size=10, color=chrome["muted"]),
     )
     fig.update_xaxes(
         gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
         tickfont=dict(color=chrome["muted"], size=11),
     )
-    # x title only under the bottom track
     fig.update_xaxes(
-        title=dict(text=x_title, font=dict(color=chrome["text_secondary"], size=12)),
+        title=dict(text="elapsed time (minutes)",
+                   font=dict(color=chrome["text_secondary"], size=12)),
         row=n, col=1,
     )
     return fig
