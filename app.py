@@ -1963,12 +1963,13 @@ if tab_timeline is not None:
                          "Set a time window in the sidebar to zoom to one session.",
                 )
 
-                # QP PHY overlay, binned to the same grid. QP throughput and RBs
-                # are split DL (PDSCH) vs UL (PUSCH) by the row's link, so they
-                # line up with the two throughput panels; RBs are the sanity
-                # check — a shared cell should hand each phone fewer RBs.
-                overlay = None
-                qp_rb = None          # per-phone QP RBs (long: time, slot, rb_dl, rb_ul)
+                # QP PHY overlay, binned to the same grid and split PER PHONE.
+                # QP recorded both phones (one collection each), so every QP
+                # series - PHY throughput, RSRP and RBs - is keyed by the phone
+                # slot in the collection name and coloured to match that phone,
+                # exactly like the SigCap traces. Falls back to a single pooled
+                # "QP" series (slot 0) when a collection carries no phoneN token.
+                qp_overlay = None     # long: time, slot, phy_tput_dl/ul, rsrp, rb_dl/ul
                 sig_slots = timeline.device_slots(tframe)   # SigCap device -> phone slot
                 slot_labels = {}      # phone slot -> a SigCap device label (legend)
                 for _dev, _sl in sig_slots.items():
@@ -1986,13 +1987,8 @@ if tab_timeline is not None:
                     if ov_keys:
                         qf = load_frame(qp_dir, tuple(sorted(ov_keys)))
                         qf = qf[(qf["time"] >= span[0]) & (qf["time"] <= span[1])]
-                        # Scope QP to the SAME sessions as the SigCap timeline.
-                        # QP has its own collection per condition whose name
-                        # matches the SigCap one ("twoPhone1 iperfDL" <->
-                        # "..._twoPhone1_iperfDL"): keep a selected collection
-                        # that is itself a QP collection, plus any QP collection
-                        # whose name contains all tokens of a selected SigCap
-                        # collection. With nothing selected, all QP in the window.
+                        # Scope QP to the SAME sessions as the SigCap timeline via
+                        # the shared collection tokens (see below).
                         _sel = [c for c in (collections or []) if c]
                         if _sel and "collection" in qf.columns:
                             _qp_colls = set(qf["collection"].dropna().astype(str).unique())
@@ -2015,69 +2011,42 @@ if tab_timeline is not None:
                             st.session_state["_tl_qp_scope"] = []
                         if not qf.empty:
                             qf = qf.assign(_b=qf["time"].dt.floor(bin_choice))
-                            link = qf["link"].astype("string") if "link" in qf.columns else None
+                            qf["slot"] = qf["collection"].map(timeline.phone_slot)
+                            if qf["slot"].isna().all():
+                                qf["slot"] = 0   # no phoneN token -> one pooled series
+                            qf = qf.dropna(subset=["slot"])
+                            if not qf.empty:
+                                qf["slot"] = qf["slot"].astype(int)
+                                _link = qf["link"].astype("string")
 
-                            def _binned(mask, col, scale=1.0):
-                                sub = qf[mask] if mask is not None else qf
-                                if col not in sub.columns or sub.empty:
-                                    return None
-                                g = sub.groupby("_b")[col].mean()
-                                return (g * scale).rename_axis("time")
+                                def _qcol(name):
+                                    return (pd.to_numeric(qf[name], errors="coerce")
+                                            if name in qf.columns
+                                            else pd.Series(float("nan"), index=qf.index))
 
-                            parts = {}
-                            dl = link.eq("DL") if link is not None else None
-                            ul = link.eq("UL") if link is not None else None
-                            for name, series in (
-                                ("phy_tput_dl", _binned(dl, "throughput", 1 / 1000.0)),
-                                ("phy_tput_ul", _binned(ul, "throughput", 1 / 1000.0)),
-                                ("rsrp", _binned(None, "rsrp")),
-                            ):
-                                if series is not None:
-                                    parts[name] = series
-                            if parts:
-                                overlay = (
-                                    pd.concat(parts, axis=1).reset_index()
-                                    .sort_values("time")
-                                )
+                                _tp, _rs, _rb = _qcol("throughput"), _qcol("rsrp"), _qcol("rb")
+                                recs = []
+                                for (b, slot), g in qf.groupby(["_b", "slot"]):
+                                    idx = g.index
+                                    gl = _link.loc[idx]
 
-                            # Per-phone RBs: QP recorded both phones (one
-                            # collection each), so split RBs by the phone slot
-                            # in the collection name, not by direction. Falls
-                            # back to a pooled rb_dl/rb_ul on `overlay` when no
-                            # phoneN token is present.
-                            if "rb" in qf.columns and qf["rb"].notna().any():
-                                qs = qf.copy()
-                                qs["slot"] = qs["collection"].map(timeline.phone_slot)
-                                qs = qs.dropna(subset=["slot"])
-                                if not qs.empty:
-                                    qs["slot"] = qs["slot"].astype(int)
-                                    ql = qs["link"].astype("string")
-                                    qs["_rb"] = pd.to_numeric(qs["rb"], errors="coerce")
-                                    recs = []
-                                    for (b, slot), g in qs.groupby(["_b", "slot"]):
-                                        gl = ql.loc[g.index]
-                                        rb = g["_rb"]
-                                        recs.append({
-                                            "time": b, "slot": int(slot),
-                                            "rb_dl": rb[gl.eq("DL")].mean() if gl.eq("DL").any() else float("nan"),
-                                            "rb_ul": rb[gl.eq("UL")].mean() if gl.eq("UL").any() else float("nan"),
-                                        })
-                                    qp_rb = pd.DataFrame(recs).sort_values("time")
-                                else:
-                                    # no phoneN token -> pooled RBs onto overlay
-                                    pooled = {}
-                                    for nm, sr in (("rb_dl", _binned(dl, "rb")),
-                                                   ("rb_ul", _binned(ul, "rb"))):
-                                        if sr is not None:
-                                            pooled[nm] = sr
-                                    if pooled:
-                                        rbf = pd.concat(pooled, axis=1).reset_index()
-                                        overlay = (rbf if overlay is None
-                                                   else overlay.merge(rbf, on="time", how="outer")
-                                                   ).sort_values("time")
-                if overlay_on and (overlay is None or overlay.empty) and (
-                    qp_rb is None or qp_rb.empty
-                ):
+                                    def _m(series, mask=None, scale=1.0):
+                                        x = series.loc[idx]
+                                        if mask is not None:
+                                            x = x[mask]
+                                        return float(x.mean() * scale) if x.notna().any() else float("nan")
+
+                                    recs.append({
+                                        "time": b, "slot": int(slot),
+                                        "phy_tput_dl": _m(_tp, gl.eq("DL"), 1 / 1000.0),
+                                        "phy_tput_ul": _m(_tp, gl.eq("UL"), 1 / 1000.0),
+                                        "rsrp": _m(_rs),
+                                        "rb_dl": _m(_rb, gl.eq("DL")),
+                                        "rb_ul": _m(_rb, gl.eq("UL")),
+                                    })
+                                if recs:
+                                    qp_overlay = pd.DataFrame(recs).sort_values("time")
+                if overlay_on and (qp_overlay is None or qp_overlay.empty):
                     st.caption(
                         "No QP PHY samples overlap this window — the overlay is "
                         "empty (QP wasn't recording during these sessions)."
@@ -2086,7 +2055,7 @@ if tab_timeline is not None:
                 st.plotly_chart(
                     charts.timeline_multi_figure(
                         res.binned, res.devices, res.concurrency,
-                        res.shared_pci, qp_overlay=overlay, qp_rb=qp_rb,
+                        res.shared_pci, qp_overlay=qp_overlay,
                         device_slots=sig_slots, slot_labels=slot_labels, mode=MODE,
                     ),
                     width="stretch",
@@ -2168,11 +2137,9 @@ if tab_timeline is not None:
                     )
 
                 # ---- QP RB sanity check (per phone) ----------------------- #
-                _rb_present = (qp_rb is not None and not qp_rb.empty) or (
-                    overlay is not None and any(
-                        c in overlay.columns and overlay[c].notna().any()
-                        for c in ("rb_dl", "rb_ul")
-                    )
+                _rb_present = qp_overlay is not None and any(
+                    c in qp_overlay.columns and qp_overlay[c].notna().any()
+                    for c in ("rb_dl", "rb_ul")
                 )
                 if _rb_present:
                     st.markdown("#### QP RBs / subframe — sanity check")
@@ -2200,16 +2167,12 @@ if tab_timeline is not None:
                         return out
 
                     rb_rows = []
-                    if qp_rb is not None and not qp_rb.empty:
-                        for slot, g in qp_rb.groupby("slot"):
-                            phone = slot_labels.get(int(slot), f"phone{int(slot)}")
-                            for col, lbl in (("rb_dl", "DL"), ("rb_ul", "UL")):
-                                if col in g.columns and g[col].notna().any():
-                                    rb_rows += _cond_rows(phone, g[["time", col]], col, lbl)
-                    else:
+                    for slot, g in qp_overlay.groupby("slot"):
+                        phone = (slot_labels.get(int(slot), f"phone{int(slot)}")
+                                 if int(slot) >= 1 else "QP (pooled)")
                         for col, lbl in (("rb_dl", "DL"), ("rb_ul", "UL")):
-                            if col in overlay.columns and overlay[col].notna().any():
-                                rb_rows += _cond_rows("all", overlay[["time", col]], col, lbl)
+                            if col in g.columns and g[col].notna().any():
+                                rb_rows += _cond_rows(phone, g[["time", col]], col, lbl)
 
                     if rb_rows:
                         st.dataframe(

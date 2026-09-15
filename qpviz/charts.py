@@ -1421,7 +1421,6 @@ def timeline_multi_figure(
     concurrency: Sequence[dict] = (),
     shared_pci: Sequence[dict] = (),
     qp_overlay: Optional[pd.DataFrame] = None,
-    qp_rb: Optional[pd.DataFrame] = None,
     device_slots: Optional[dict] = None,
     slot_labels: Optional[dict] = None,
     mode: str = "light",
@@ -1436,11 +1435,12 @@ def timeline_multi_figure(
     serving PCI are shaded in an accent colour on top.
 
     Phones are coloured by **phone slot** (``device_slots`` maps each SigCap
-    device to its slot) so a phone keeps one colour across SigCap *and* QP. The
-    QP overlay (dotted) adds DL/UL PHY throughput and RSRP; ``qp_rb`` (long:
-    ``time`` / ``slot`` / ``rb_dl`` / ``rb_ul``) draws the **RBs / subframe**
-    panel with one line per phone - the sanity check that a shared cell hands
-    each phone fewer resource blocks.
+    device to its slot). ``qp_overlay`` is a long frame keyed by ``time`` and
+    ``slot`` (columns ``phy_tput_dl`` / ``phy_tput_ul`` / ``rsrp`` / ``rb_dl`` /
+    ``rb_ul``): QP recorded both phones, so every QP series is drawn per phone as
+    a dotted line in that phone's colour - PHY throughput on the throughput
+    panels, RSRP on the RSRP panel, and RBs on the dedicated RBs / subframe
+    panel (the sanity check that a shared cell hands each phone fewer RBs).
     """
     from plotly.subplots import make_subplots
 
@@ -1448,12 +1448,10 @@ def timeline_multi_figure(
     device_slots = device_slots or {}
     slot_labels = slot_labels or {}
     ov = qp_overlay if (qp_overlay is not None and not qp_overlay.empty) else None
-    rb_pf = qp_rb if (qp_rb is not None and not qp_rb.empty) else None
-    has_rb_pooled = ov is not None and (
+    has_rb = ov is not None and (
         ("rb_dl" in ov.columns and ov["rb_dl"].notna().any())
         or ("rb_ul" in ov.columns and ov["rb_ul"].notna().any())
     )
-    has_rb = rb_pf is not None or has_rb_pooled
 
     def _slot_color(slot):
         return series_style(int(slot) - 1, mode)[0]
@@ -1462,7 +1460,6 @@ def timeline_multi_figure(
         slot = device_slots.get(str(dev))
         return _slot_color(slot) if slot else series_style(i, mode)[0]
 
-    # Build the row layout dynamically so the RB panel only appears with data.
     plan = [("dl", "Downlink throughput (Mbps)"), ("ul", "Uplink throughput (Mbps)")]
     if has_rb:
         plan.append(("rb", "RBs / subframe (QP PHY, per phone)"))
@@ -1481,7 +1478,6 @@ def timeline_multi_figure(
     )
     devices = list(devices)
 
-    # --- shaded bands (drawn first, behind the traces) ---------------------- #
     def _band(x0, x1, color, opacity):
         fig.add_shape(type="rect", xref="x", yref="paper",
                       x0=x0, x1=x1, y0=0, y1=1, fillcolor=color,
@@ -1497,7 +1493,7 @@ def timeline_multi_figure(
     for seg in shared_pci:
         _band(seg["start"], seg["end"], accent, 0.18)
 
-    # --- per-device SigCap traces ------------------------------------------ #
+    # --- per-device SigCap traces (solid) ---------------------------------- #
     panels = [
         (row_of["dl"], "app_tput_dl", "Mbps"),
         (row_of["ul"], "app_tput_ul", "Mbps"),
@@ -1524,49 +1520,33 @@ def timeline_multi_figure(
             hovertemplate=f"<b>{dev}</b> PCI %{{y:.0f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
         ), row=row_of["pci"], col=1)
 
-    # --- QP PHY throughput / RSRP overlay (dotted grey context) ------------ #
+    # --- per-phone QP overlay (dotted, same colour as the phone) ----------- #
     if ov is not None:
-        q = ov.sort_values("time")
-        qcolor = chrome["text_secondary"]
-
-        def _ov(col, row, name, color, unit, show=True):
-            if col in q.columns and q[col].notna().any():
-                fig.add_trace(go.Scatter(
-                    x=q["time"], y=q[col], name=name, mode="lines",
-                    line=dict(color=color, width=1.5, dash="dot"), showlegend=show,
-                    hovertemplate=f"{name}: %{{y:.2f}} {unit}<br>%{{x|%H:%M:%S}}<extra></extra>",
-                ), row=row, col=1)
-
-        _ov("phy_tput_dl", row_of["dl"], "QP PHY DL", qcolor, "Mbps")
-        _ov("phy_tput_ul", row_of["ul"], "QP PHY UL", qcolor, "Mbps")
-        _ov("rsrp", row_of["rsrp"], "QP RSRP", qcolor, "dBm", show=False)
-
-    # --- RBs / subframe panel, one line per phone -------------------------- #
-    if has_rb:
-        rb_row = row_of["rb"]
-        if rb_pf is not None:
-            for slot, g in rb_pf.sort_values("time").groupby("slot"):
+        for slot, g in ov.sort_values("time").groupby("slot"):
+            slot = int(slot)
+            if slot >= 1:
                 color = _slot_color(slot)
-                phone = slot_labels.get(int(slot), f"phone{int(slot)}")
-                for col, dash, dlabel in (("rb_dl", "dot", "DL"),
-                                          ("rb_ul", "longdash", "UL")):
-                    if col in g.columns and g[col].notna().any():
-                        fig.add_trace(go.Scatter(
-                            x=g["time"], y=g[col], name=f"QP RB · {phone} · {dlabel}",
-                            mode="lines", line=dict(color=color, width=1.7, dash=dash),
-                            hovertemplate=f"<b>{phone}</b> {dlabel} RB %{{y:.1f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
-                        ), row=rb_row, col=1)
-        elif ov is not None:
-            c_dl, _ = series_style(0, mode)
-            c_ul, _ = series_style(1, mode)
-            for col, color, name in (("rb_dl", c_dl, "QP RBs DL"),
-                                     ("rb_ul", c_ul, "QP RBs UL")):
-                if col in ov.columns and ov[col].notna().any():
+                phone = slot_labels.get(slot, f"phone{slot}")
+                grp = str(phone)
+            else:
+                color = chrome["text_secondary"]
+                phone, grp = "QP", "QP"
+
+            def _add(col, row, name, unit, dash="dot", show=False):
+                if col in g.columns and g[col].notna().any():
                     fig.add_trace(go.Scatter(
-                        x=ov["time"], y=ov[col], name=name, mode="lines",
-                        line=dict(color=color, width=1.6, dash="dot"),
-                        hovertemplate=f"{name}: %{{y:.1f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
-                    ), row=rb_row, col=1)
+                        x=g["time"], y=g[col], name=name, legendgroup=grp,
+                        showlegend=show, mode="lines",
+                        line=dict(color=color, width=1.6, dash=dash),
+                        hovertemplate=f"{name}: %{{y:.2f}} {unit}<br>%{{x|%H:%M:%S}}<extra></extra>",
+                    ), row=row, col=1)
+
+            _add("phy_tput_dl", row_of["dl"], f"QP PHY · {phone} · DL", "Mbps", show=True)
+            _add("phy_tput_ul", row_of["ul"], f"QP PHY · {phone} · UL", "Mbps")
+            _add("rsrp", row_of["rsrp"], f"QP RSRP · {phone}", "dBm")
+            if has_rb:
+                _add("rb_dl", row_of["rb"], f"QP RB · {phone} · DL", "RB", show=True)
+                _add("rb_ul", row_of["rb"], f"QP RB · {phone} · UL", "RB", dash="longdash")
 
     fig.update_layout(
         height=height, template=None,
