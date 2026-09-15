@@ -20,6 +20,7 @@ from .schema import (
     PRISM_DATASETS,
     PRISM_DATASETS_BY_KEY,
     SIGCAP_APP_TPUT_COL,
+    SIGCAP_DEVICE_COL,
     SIGCAP_DATASETS,
     SIGCAP_DATASETS_BY_KEY,
     Dataset,
@@ -69,7 +70,7 @@ _CATEGORICAL = (
 )
 
 #: free-text dimensions, always stored as pandas ``string``
-_TEXT_DIMS = ("database", "operator", "model", "serial", "ran_config", "cell_type")
+_TEXT_DIMS = ("database", "operator", "model", "serial", "device", "ran_config", "cell_type")
 
 #: nullable-integer dimensions and the dtype each is stored as
 _INT_DIMS = {
@@ -677,7 +678,43 @@ def _prep_sigcap(raw: pd.DataFrame) -> pd.DataFrame:
         else pd.Series(np.nan, index=raw.index)
     )
     raw[SIGCAP_APP_TPUT_COL] = iperf.where(iperf.notna(), http)
+    raw[SIGCAP_DEVICE_COL] = _sigcap_device(raw)
     return raw
+
+
+def _sigcap_device(raw: pd.DataFrame) -> pd.Series:
+    """A stable, readable per-phone label: ``device_name (short-uuid)``.
+
+    ``uuid`` is unique per phone and never blank in practice; ``device_name``
+    (e.g. ``pa2q``) is the friendly Samsung codename.  We key on the uuid so two
+    phones never collapse together even when a file's scenario label is wrong,
+    but show the codename first because that is what a human recognises.
+    """
+    idx = raw.index
+    uuid = (
+        raw["uuid"].astype("string").str.strip()
+        if "uuid" in raw.columns
+        else pd.Series(pd.NA, index=idx, dtype="string")
+    )
+    name = (
+        raw["device_name"].astype("string").str.strip()
+        if "device_name" in raw.columns
+        else pd.Series(pd.NA, index=idx, dtype="string")
+    )
+    short = uuid.str.slice(0, 8)
+    out = []
+    for nm, sh in zip(name, short):
+        nm = None if (nm is pd.NA or nm in (None, "", "nan", "NaN")) else nm
+        sh = None if (sh is pd.NA or sh in (None, "", "nan", "NaN")) else sh
+        if nm and sh:
+            out.append(f"{nm} ({sh})")
+        elif sh:
+            out.append(sh)
+        elif nm:
+            out.append(nm)
+        else:
+            out.append("unknown")
+    return pd.Series(out, index=idx, dtype="object")
 
 
 def _sigcap_stem(path: Path) -> str:
@@ -714,7 +751,10 @@ def _sigcap_meta(path: Path) -> tuple[str, str]:
         tokens = [t for t in re.split(r"[_\s]+", stem) if t]
         loc = ""
         for i, tok in enumerate(tokens):
-            if tok.lower() in ("iperf", "http"):
+            # match "iperf", "http" and their direction variants ("iperfDL",
+            # "iperfUL", "iperfdl", ...) so the location token before the
+            # workload is picked out either way
+            if re.match(r"^(iperf|http)", tok, re.IGNORECASE):
                 if i > 0:
                     loc = tokens[i - 1]
                 break

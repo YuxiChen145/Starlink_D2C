@@ -215,6 +215,7 @@ def prism_dir(tmp_path_factory) -> Path:
 # a dataset maps, so a subset header round-trips exactly like the full export.
 _SIGCAP_COLUMNS = [
     "timestamp", "latitude", "longitude", "operator", "network_type*",
+    "uuid", "device_name",
     "iperf_tput_mean_mbps", "iperf_direction", "iperf_protocol",
     "http_tput_mean_mbps", "ping_rtt_mean_ms",
     "lte_primary_pci", "lte_primary_ci", "lte_primary_earfcn",
@@ -228,7 +229,8 @@ _SIGCAP_INT_SENTINEL = 2147483647
 
 
 def _write_sigcap(directory, filename, workload, rows=60, seed=11, tech="LTE",
-                  start="2026-09-12T16:11:00"):
+                  start="2026-09-12T16:11:00", uuid="dev0uuid-aaaa",
+                  device_name="pa2q", pci_seq=None):
     """Write one synthetic SigCap session file.
 
     ``workload`` is ``"iperf"`` or ``"http"``. iperf rows alternate download /
@@ -251,10 +253,14 @@ def _write_sigcap(directory, filename, workload, rows=60, seed=11, tech="LTE",
             row["longitude"] = f"{-86.2400 + (i % 20) * 0.0002:.7f}"
             row["operator"] = "T-Mobile SpaceX"
             row["network_type*"] = tech
+            row["uuid"] = uuid
+            row["device_name"] = device_name
             app_only = i in (3, 4)  # throughput logged but no serving-cell fix
             if not app_only:
                 if tech == "LTE":
-                    row["lte_primary_pci"] = 100 + (i % 7)
+                    row["lte_primary_pci"] = (
+                        pci_seq[i % len(pci_seq)] if pci_seq else 100 + (i % 7)
+                    )
                     row["lte_primary_ci"] = 200000 + i
                     row["lte_primary_earfcn"] = 8665
                     row["lte_primary_band*"] = "25"
@@ -319,5 +325,39 @@ def sigcap_nr_dir(tmp_path_factory) -> Path:
         directory,
         "2026_09_S20_1000_E20_1010Z-0400_outdoor_T-Mobile_dev_D2C_Sta_YC_lab_iperf.debug_general.csv",
         "iperf", rows=40, seed=5, tech="NR", start="2026-09-20T10:00:00",
+    )
+    return directory
+
+
+@pytest.fixture(scope="session")
+def sigcap_multi_dir(tmp_path_factory) -> Path:
+    """Two phones on the same spot: a solo stretch for phone A, then a window
+    where A and B record concurrently. PCI sequences are chosen so the first
+    concurrent bins share a PCI and later ones differ - deterministic input for
+    the shared-PCI logic."""
+    directory = tmp_path_factory.mktemp("sigcap_multi")
+    # phone A alone, 19:00:00-19:02:25 (30 rows @5s)
+    _write_sigcap(
+        directory,
+        "2026_09_S14_1900_E14_1902Z-0400_outdoor_T-Mobile_aaaa1111_D2C_OpenField_Static_onephoneA_iperf.debug_general.csv",
+        "iperf", rows=30, seed=1, start="2026-09-14T19:00:00",
+        uuid="aaaa1111-eeee", device_name="pa2q",
+        pci_seq=[100],
+    )
+    # phone A concurrent, 19:05:00.., PCI 100 then 200
+    _write_sigcap(
+        directory,
+        "2026_09_S14_1905_E14_1908Z-0400_outdoor_T-Mobile_aaaa1111_D2C_OpenField_Static_twoPhoneA_iperf.debug_general.csv",
+        "iperf", rows=40, seed=2, start="2026-09-14T19:05:00",
+        uuid="aaaa1111-eeee", device_name="pa2q",
+        pci_seq=[100, 100, 100, 100, 100, 100, 200, 200, 200, 200],
+    )
+    # phone B concurrent, same 19:05:00 start, PCI 100 then 300
+    _write_sigcap(
+        directory,
+        "2026_09_S14_1905_E14_1908Z-0400_outdoor_T-Mobile_bbbb2222_D2C_OpenField_Static_twoPhoneB_iperf.debug_general.csv",
+        "iperf", rows=40, seed=3, start="2026-09-14T19:05:00",
+        uuid="bbbb2222-ffff", device_name="e2q",
+        pci_seq=[100, 100, 100, 100, 100, 100, 300, 300, 300, 300],
     )
     return directory

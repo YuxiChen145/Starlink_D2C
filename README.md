@@ -7,8 +7,10 @@ captures the serving cell together with the *application-layer* result of an
 iperf / HTTP run and ping RTT). Pick a technology and metric, filter down to the
 cells, region, and minutes you care about, and compare them on a map, as CDF/PDF
 curves, by which cells were serving and for how long, against how many D2C
-satellites were overhead — and **correlate the QP PHY layer against what the
-application actually got** when both were recorded on the same phone.
+satellites were overhead, **correlate the QP PHY layer against what the
+application actually got** when both were recorded on the same phone, and — when
+several phones logged the same spot at once — **compare throughput as one phone
+vs two contend for D2C** on a shared timeline.
 
 ![The CDF tab](docs/screenshot-cdf.png)
 
@@ -221,7 +223,9 @@ from GitHub → **Community Cloud (B)**; a stable, controlled internal site →
 
 **Three measurement sources, one canvas.** A *Measurement source* filter (QP /
 PRISM / SigCap) pools or isolates them; every other filter is a multi-select
-where empty means *all*.
+where empty means *all*. SigCap rows also carry a **device identity** (the phone
+UUID + codename), so sessions logged by different phones at the same time stay
+distinct — the basis for the timeline analysis below.
 
 **Filters** — Measurement source, Direction (DL/UL), Data source, Collection,
 Band, EARFCN/NR-ARFCN, PCI (union or intersection across collections), a
@@ -242,6 +246,7 @@ HTTP pooled) and **Ping RTT (ms)**, wherever the selected exports carry them.
 | 📊 Statistics | Per-group n / mean / std / percentiles, downloadable. |
 | 🧾 Data | The filtered rows, downloadable as CSV. |
 | 🔗 Correlation | PHY vs. application on the same phone: pick a QP PHY metric and a SigCap app metric (App throughput / RTT), a time bin and an aggregate; both are resampled onto common bins over the window where the two recordings overlap and shown as a dual-axis timeline and a scatter, with Pearson r, Spearman ρ, and the paired-bin count. Appears only when both QP and SigCap are loaded. |
+| ⏱️ Timeline analysis | Several phones on one wall clock: per-phone throughput (DL/UL), RSRP and serving PCI, with the stretches where two phones are active shaded grey and the stretches where they share a PCI shaded orange. Concurrency is **inferred from overlapping sample timestamps** across device UUIDs, not from file names. Quantifies throughput **1 phone vs 2 phones active**, **same PCI vs different PCI**, and each phone's throughput-vs-RSRP correlation and best-throughput PCI. Optional QP PHY overlay. Appears when SigCap is loaded. |
 
 Deeper notes on cell identity, the QP↔PRISM differences, satellite visibility,
 and how the exports are normalised live in the `qpviz/` module docstrings
@@ -259,6 +264,7 @@ qpviz/
   stats.py           ECDF + grouped summary statistics
   charts.py          plotly figures: CDF/PDF, timeline, tree, fan-out, satellites, correlation
   correlate.py       time-bin alignment of QP PHY vs SigCap app metrics; Pearson/Spearman
+  timeline.py        multi-phone concurrency + shared-PCI analysis (SigCap device timelines)
   mapview.py         folium map, draw control, categorical colouring
   satellites.py      TLE ingest, SGP4 propagation, D2C visibility
   theme.py           colour tokens

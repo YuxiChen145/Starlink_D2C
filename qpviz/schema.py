@@ -105,6 +105,7 @@ DIMENSION_COLUMNS: List[str] = [
     "operator",
     "model",
     "serial",
+    "device",
     "ran_config",
     "cell_type",
     "lat",
@@ -590,6 +591,10 @@ _SIGCAP_COMMON = {
 
 #: synthesised in the loader before normalisation (see loader._prep_sigcap)
 SIGCAP_APP_TPUT_COL = "__app_tput_mbps__"
+#: synthesised per-phone identity: device_name + short uuid (see _prep_sigcap).
+#: SigCap sessions from several phones can run concurrently, so the physical
+#: phone - not the file - is the unit the timeline analysis groups by.
+SIGCAP_DEVICE_COL = "__device__"
 #: raw columns the loader needs for routing / synthesis beyond the mapped ones
 _SIGCAP_EXTRA = [
     "network_type*",
@@ -598,6 +603,8 @@ _SIGCAP_EXTRA = [
     "iperf_direction",
     "lte_primary_rsrp_dbm",
     "nr_first_ss_rsrp_dbm",
+    "uuid",
+    "device_name",
 ]
 
 SIGCAP_DATASETS: List[Dataset] = [
@@ -611,6 +618,7 @@ SIGCAP_DATASETS: List[Dataset] = [
         is_glob=True,
         dims={
             **_SIGCAP_COMMON,
+            "device": SIGCAP_DEVICE_COL,
             "pci": "lte_primary_pci",
             "cell_id": "lte_primary_ci",
             "freq": "lte_primary_earfcn",
@@ -640,6 +648,7 @@ SIGCAP_DATASETS: List[Dataset] = [
         is_glob=True,
         dims={
             **_SIGCAP_COMMON,
+            "device": SIGCAP_DEVICE_COL,
             "pci": "nr_first_pci",
             "cell_id": "nr_first_nci",
             "freq": "nr_first_arfcn",

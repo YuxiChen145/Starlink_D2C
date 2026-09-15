@@ -1408,3 +1408,137 @@ def correlation_scatter_figure(
         tickfont=dict(color=chrome["muted"], size=11),
     )
     return fig
+
+
+# --------------------------------------------------------------------------- #
+# Multi-device timeline (contention + shared-PCI analysis)
+# --------------------------------------------------------------------------- #
+
+
+def timeline_multi_figure(
+    binned: pd.DataFrame,
+    devices: Sequence[str],
+    concurrency: Sequence[dict] = (),
+    shared_pci: Sequence[dict] = (),
+    qp_overlay: Optional[pd.DataFrame] = None,
+    mode: str = "light",
+    height: int = 760,
+) -> "go.Figure":
+    """Shared wall-clock timeline: throughput, RSRP and serving PCI per phone.
+
+    ``binned`` is :func:`qpviz.timeline.bin_devices` output. One colour per
+    device; downlink throughput is a solid line, uplink dashed. Bins where two
+    phones are active are shaded grey, and bins where they share a serving PCI
+    are shaded in an accent colour on top - so the contention and shared-cell
+    stretches are readable straight off the plot. ``qp_overlay`` (optional) adds
+    QP PHY-layer throughput and RSRP as dotted traces where a QP log overlaps.
+    """
+    from plotly.subplots import make_subplots
+
+    chrome = CHROME.get(mode, CHROME["light"])
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+        row_heights=[0.42, 0.30, 0.28],
+        subplot_titles=("App throughput (Mbps) — solid DL, dashed UL",
+                        "RSRP (dBm)", "Serving PCI"),
+    )
+    devices = list(devices)
+
+    def _dev_color(i):
+        return series_style(i, mode)[0]
+
+    # --- shaded bands (drawn first, behind the traces) ---------------------- #
+    # add_vrect misbehaves with datetime x on subplots in plotly 7, so draw the
+    # bands as full-height rects (yref=paper) tied to the shared x-axis instead.
+    def _band(x0, x1, color, opacity):
+        fig.add_shape(type="rect", xref="x", yref="paper",
+                      x0=x0, x1=x1, y0=0, y1=1, fillcolor=color,
+                      opacity=opacity, line_width=0, layer="below")
+
+    for seg in concurrency:
+        if seg.get("value", 0) and seg["value"] >= 2:
+            _band(seg["start"], seg["end"], chrome["muted"], 0.14)
+    try:
+        accent = DIVERGING_RED_BLUE[-1]
+    except Exception:
+        accent = "#eb6834"
+    for seg in shared_pci:
+        _band(seg["start"], seg["end"], accent, 0.18)
+
+    # --- per-device traces -------------------------------------------------- #
+    for i, dev in enumerate(devices):
+        g = binned[binned["device"] == dev].sort_values("time")
+        if g.empty:
+            continue
+        color = _dev_color(i)
+        # throughput: DL solid, UL dashed
+        fig.add_trace(go.Scatter(
+            x=g["time"], y=g["app_tput_dl"], name=f"{dev} · DL",
+            legendgroup=dev, mode="lines+markers",
+            line=dict(color=color, width=2), marker=dict(size=3, color=color),
+            connectgaps=False,
+            hovertemplate=f"<b>{dev}</b> DL %{{y:.2f}} Mbps<br>%{{x|%H:%M:%S}}<extra></extra>",
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=g["time"], y=g["app_tput_ul"], name=f"{dev} · UL",
+            legendgroup=dev, mode="lines+markers",
+            line=dict(color=color, width=2, dash="dash"),
+            marker=dict(size=3, color=color, symbol="triangle-up"),
+            connectgaps=False,
+            hovertemplate=f"<b>{dev}</b> UL %{{y:.2f}} Mbps<br>%{{x|%H:%M:%S}}<extra></extra>",
+        ), row=1, col=1)
+        # RSRP
+        fig.add_trace(go.Scatter(
+            x=g["time"], y=g["rsrp"], name=f"{dev} · RSRP",
+            legendgroup=dev, showlegend=False, mode="lines",
+            line=dict(color=color, width=1.6), connectgaps=False,
+            hovertemplate=f"<b>{dev}</b> RSRP %{{y:.0f}} dBm<br>%{{x|%H:%M:%S}}<extra></extra>",
+        ), row=2, col=1)
+        # PCI (step)
+        fig.add_trace(go.Scatter(
+            x=g["time"], y=g["pci"].astype("Float64"), name=f"{dev} · PCI",
+            legendgroup=dev, showlegend=False, mode="lines+markers",
+            line=dict(color=color, width=1.4, shape="hv"),
+            marker=dict(size=4, color=color),
+            hovertemplate=f"<b>{dev}</b> PCI %{{y:.0f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
+        ), row=3, col=1)
+
+    # --- optional QP PHY overlay ------------------------------------------- #
+    if qp_overlay is not None and not qp_overlay.empty:
+        q = qp_overlay.sort_values("time")
+        qcolor = chrome["text_secondary"]
+        if "phy_tput" in q.columns and q["phy_tput"].notna().any():
+            fig.add_trace(go.Scatter(
+                x=q["time"], y=q["phy_tput"], name="QP PHY tput",
+                mode="lines", line=dict(color=qcolor, width=1.4, dash="dot"),
+                hovertemplate="QP PHY %{y:.2f}<br>%{x|%H:%M:%S}<extra></extra>",
+            ), row=1, col=1)
+        if "rsrp" in q.columns and q["rsrp"].notna().any():
+            fig.add_trace(go.Scatter(
+                x=q["time"], y=q["rsrp"], name="QP RSRP",
+                mode="lines", line=dict(color=qcolor, width=1.2, dash="dot"),
+                showlegend=False,
+                hovertemplate="QP RSRP %{y:.0f} dBm<br>%{x|%H:%M:%S}<extra></extra>",
+            ), row=2, col=1)
+
+    fig.update_layout(
+        height=height, template=None,
+        paper_bgcolor=chrome["surface"], plot_bgcolor=chrome["surface"],
+        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
+        margin=dict(l=64, r=20, t=48, b=40),
+        hovermode="x unified", hoverlabel=dict(font_family=FONT_FAMILY),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0,
+                    font=dict(size=11, color=chrome["text_secondary"]),
+                    bgcolor="rgba(0,0,0,0)"),
+    )
+    for r in (1, 2, 3):
+        fig.update_xaxes(gridcolor=chrome["grid"], zeroline=False,
+                         linecolor=chrome["axis"],
+                         tickfont=dict(color=chrome["muted"], size=11), row=r, col=1)
+        fig.update_yaxes(gridcolor=chrome["grid"], zeroline=False,
+                         linecolor=chrome["axis"],
+                         tickfont=dict(color=chrome["muted"], size=11), row=r, col=1)
+    # colour the subplot titles like the rest of the chrome
+    for ann in fig.layout.annotations:
+        ann.font = dict(family=FONT_FAMILY, size=12, color=chrome["text_secondary"])
+    return fig
