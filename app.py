@@ -6,6 +6,7 @@ Run with:  streamlit run app.py
 from __future__ import annotations
 
 import os
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import List, Sequence, Tuple
@@ -1980,6 +1981,33 @@ if tab_timeline is not None:
                     if ov_keys:
                         qf = load_frame(qp_dir, tuple(sorted(ov_keys)))
                         qf = qf[(qf["time"] >= span[0]) & (qf["time"] <= span[1])]
+                        # Scope QP to the SAME sessions as the SigCap timeline.
+                        # QP has its own collection per condition whose name
+                        # matches the SigCap one ("twoPhone1 iperfDL" <->
+                        # "..._twoPhone1_iperfDL"): keep a selected collection
+                        # that is itself a QP collection, plus any QP collection
+                        # whose name contains all tokens of a selected SigCap
+                        # collection. With nothing selected, all QP in the window.
+                        _sel = [c for c in (collections or []) if c]
+                        if _sel and "collection" in qf.columns:
+                            _qp_colls = set(qf["collection"].dropna().astype(str).unique())
+                            _scope = {c for c in _sel if c in _qp_colls}
+                            for _sc in _sel:
+                                if _sc in _qp_colls:
+                                    continue
+                                _toks = [t for t in re.split(r"[\s_]+", _sc.lower()) if t]
+                                if not _toks:
+                                    continue
+                                for _qc in _qp_colls:
+                                    if all(t in _qc.lower() for t in _toks):
+                                        _scope.add(_qc)
+                            if _scope:
+                                qf = qf[qf["collection"].astype(str).isin(_scope)]
+                                st.session_state["_tl_qp_scope"] = sorted(_scope)
+                            else:
+                                st.session_state["_tl_qp_scope"] = []
+                        else:
+                            st.session_state["_tl_qp_scope"] = []
                         if not qf.empty:
                             qf = qf.assign(_b=qf["time"].dt.floor(bin_choice))
                             link = qf["link"].astype("string") if "link" in qf.columns else None
@@ -2027,6 +2055,12 @@ if tab_timeline is not None:
                     "phones active at once; orange bands = the concurrent phones "
                     "shared one serving PCI."
                 )
+                _qp_scope = st.session_state.get("_tl_qp_scope") or []
+                if overlay_on and _qp_scope:
+                    st.caption(
+                        "QP overlay scoped to the matching QP collection(s): "
+                        + ", ".join(f"`{c}`" for c in _qp_scope) + "."
+                    )
 
                 # ---- quantification --------------------------------------- #
                 def _fmt(df, rename, tputcols):

@@ -227,3 +227,20 @@ def test_overlay_by_condition_is_empty_without_data(multi):
     assert timeline.overlay_by_condition(res.binned, pd.DataFrame(), "rb_dl").empty
     assert timeline.overlay_by_condition(pd.DataFrame(), pd.DataFrame(
         {"time": [], "rb_dl": []}), "rb_dl").empty
+
+
+def test_qp_overlay_scopes_to_matching_collection(fixture_dir, sigcap_multi_dir,
+                                                   monkeypatch, tmp_path):
+    """Selecting a SigCap session scopes the QP overlay to the QP collection
+    whose name contains the same tokens (token match, since QP and SigCap spell
+    the collection differently)."""
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    os.environ["QP_DATA_DIR"] = str(fixture_dir)
+    os.environ["PRISM_DATA_DIR"] = "/no-prism-dir"
+    os.environ["SIGCAP_DATA_DIR"] = str(sigcap_multi_dir)
+    app = AppTest.from_file(APP, default_timeout=200).run()
+    # the synthetic QP fixture uses collections Collection_A/B/C, and the SigCap
+    # multi fixture uses onephoneA/twoPhoneA/twoPhoneB - no token overlap, so the
+    # scope is empty and the overlay falls back to time-only without error
+    assert not app.exception, [str(e.value) for e in app.exception]
+    assert "_tl_qp_scope" in app.session_state
