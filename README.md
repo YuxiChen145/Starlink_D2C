@@ -233,7 +233,8 @@ Band, EARFCN/NR-ARFCN, PCI (union or intersection across collections), a
 you can isolate a few minutes at a spot).
 
 **Metrics** — RSRP, RSRQ, RSSI, SINR, MCS, Throughput, **Spectral efficiency
-(bps/Hz)**, **Throughput per RB (bits/RB)**, BLER, the **RSRQ N-factor**
+(bps/Hz)**, **Throughput per RB (bits/RB)**, **RBs per subframe** (the PHY
+resource-block allocation), BLER, the **RSRQ N-factor**
 (`N = RSRQ·RSSI/RSRP`), and — from SigCap — **App throughput (Mbps)** (iperf and
 HTTP pooled) and **Ping RTT (ms)**, wherever the selected exports carry them.
 
@@ -246,7 +247,7 @@ HTTP pooled) and **Ping RTT (ms)**, wherever the selected exports carry them.
 | 📊 Statistics | Per-group n / mean / std / percentiles, downloadable. |
 | 🧾 Data | The filtered rows, downloadable as CSV. |
 | 🔗 Correlation | PHY vs. application on the same phone: pick a QP PHY metric and a SigCap app metric (App throughput / RTT), a time bin and an aggregate; both are resampled onto common bins over the window where the two recordings overlap and shown as a dual-axis timeline and a scatter, with Pearson r, Spearman ρ, and the paired-bin count. Appears only when both QP and SigCap are loaded. |
-| ⏱️ Timeline analysis | Several phones on one wall clock: per-phone throughput (DL/UL), RSRP and serving PCI, with the stretches where two phones are active shaded grey and the stretches where they share a PCI shaded orange. Concurrency is **inferred from overlapping sample timestamps** across device UUIDs, not from file names. Quantifies throughput **1 phone vs 2 phones active**, **same PCI vs different PCI**, and each phone's throughput-vs-RSRP correlation and best-throughput PCI. Optional QP PHY overlay. Appears when SigCap is loaded. |
+| ⏱️ Timeline analysis | Several phones on one wall clock: per-phone throughput (DL/UL, separate panels), RSRP and serving PCI, with the stretches where two phones are active shaded grey and the stretches where they share a PCI shaded orange. Concurrency is **inferred from overlapping sample timestamps** across device UUIDs, not from file names. Quantifies throughput **1 phone vs 2 phones active**, **same PCI vs different PCI**, and each phone's throughput-vs-RSRP correlation and best-throughput PCI. The optional **QP PHY overlay** adds DL/UL PHY throughput, RSRP and an **RBs / subframe** panel with a sanity-check table — a shared cell that splits its resource blocks should hand each phone fewer RBs under contention / a shared PCI. Appears when SigCap is loaded. |
 
 Deeper notes on cell identity, the QP↔PRISM differences, satellite visibility,
 and how the exports are normalised live in the `qpviz/` module docstrings

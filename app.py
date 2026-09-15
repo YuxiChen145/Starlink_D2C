@@ -1962,7 +1962,10 @@ if tab_timeline is not None:
                          "Set a time window in the sidebar to zoom to one session.",
                 )
 
-                # QP PHY overlay (binned to the same grid, kbps -> Mbps)
+                # QP PHY overlay, binned to the same grid. QP throughput and RBs
+                # are split DL (PDSCH) vs UL (PUSCH) by the row's link, so they
+                # line up with the two throughput panels; RBs are the sanity
+                # check — a shared cell should hand each phone fewer RBs.
                 overlay = None
                 if overlay_on and qp_present:
                     qp_keys_tech = [
@@ -1970,7 +1973,7 @@ if tab_timeline is not None:
                         if tech_value is None or DATASETS_BY_KEY[k].tech == tech_value
                     ]
                     ov_keys = set()
-                    for m in ("throughput", "rsrp"):
+                    for m in ("throughput", "rsrp", "rb"):
                         ov_keys |= {
                             d.key for d in datasets_for(m, tech_value, available=qp_keys_tech)
                         }
@@ -1979,18 +1982,32 @@ if tab_timeline is not None:
                         qf = qf[(qf["time"] >= span[0]) & (qf["time"] <= span[1])]
                         if not qf.empty:
                             qf = qf.assign(_b=qf["time"].dt.floor(bin_choice))
-                            agg_map = {}
-                            if "throughput" in qf.columns:
-                                agg_map["phy_tput"] = ("throughput", "mean")
-                            if "rsrp" in qf.columns:
-                                agg_map["rsrp"] = ("rsrp", "mean")
-                            if agg_map:
+                            link = qf["link"].astype("string") if "link" in qf.columns else None
+
+                            def _binned(mask, col, scale=1.0):
+                                sub = qf[mask] if mask is not None else qf
+                                if col not in sub.columns or sub.empty:
+                                    return None
+                                g = sub.groupby("_b")[col].mean()
+                                return (g * scale).rename_axis("time")
+
+                            parts = {}
+                            dl = link.eq("DL") if link is not None else None
+                            ul = link.eq("UL") if link is not None else None
+                            for name, series in (
+                                ("phy_tput_dl", _binned(dl, "throughput", 1 / 1000.0)),
+                                ("phy_tput_ul", _binned(ul, "throughput", 1 / 1000.0)),
+                                ("rsrp", _binned(None, "rsrp")),
+                                ("rb_dl", _binned(dl, "rb")),
+                                ("rb_ul", _binned(ul, "rb")),
+                            ):
+                                if series is not None:
+                                    parts[name] = series
+                            if parts:
                                 overlay = (
-                                    qf.groupby("_b").agg(**agg_map).reset_index()
-                                    .rename(columns={"_b": "time"})
+                                    pd.concat(parts, axis=1).reset_index()
+                                    .sort_values("time")
                                 )
-                                if "phy_tput" in overlay.columns:
-                                    overlay["phy_tput"] = overlay["phy_tput"] / 1000.0
                 if overlay_on and (overlay is None or overlay.empty):
                     st.caption(
                         "No QP PHY samples overlap this window — the overlay is "
@@ -2005,9 +2022,10 @@ if tab_timeline is not None:
                     width="stretch",
                 )
                 st.caption(
-                    "Grey bands = two phones active at once; orange bands = the "
-                    "concurrent phones shared one serving PCI. Solid = downlink, "
-                    "dashed = uplink."
+                    "Downlink and uplink throughput are in separate panels; each "
+                    "phone keeps its colour down every panel. Grey bands = two "
+                    "phones active at once; orange bands = the concurrent phones "
+                    "shared one serving PCI."
                 )
 
                 # ---- quantification --------------------------------------- #
@@ -2072,6 +2090,43 @@ if tab_timeline is not None:
                         ),
                         hide_index=True, width="stretch",
                     )
+
+                # ---- QP RB sanity check ----------------------------------- #
+                if overlay is not None and any(
+                    c in overlay.columns and overlay[c].notna().any()
+                    for c in ("rb_dl", "rb_ul")
+                ):
+                    st.markdown("#### QP RBs / subframe — sanity check")
+                    st.caption(
+                        "QP PHY resource blocks under each condition. If a shared "
+                        "cell splits its RBs between two UEs, the QP phone should "
+                        "get **fewer** RBs when two phones are active and when they "
+                        "share a PCI (a negative Δ)."
+                    )
+                    def _cell(mean, n):
+                        return f"{mean:.1f} RB (n={int(n)})" if pd.notna(mean) else "—"
+
+                    rb_rows = []
+                    for col, lbl in (("rb_dl", "DL"), ("rb_ul", "UL")):
+                        if col not in overlay.columns or not overlay[col].notna().any():
+                            continue
+                        cond = timeline.overlay_by_condition(res.binned, overlay, col)
+                        for _, r in cond.iterrows():
+                            rb_rows.append({
+                                "RBs": lbl,
+                                "Comparison": f"{r['a_label']} vs {r['b_label']}",
+                                "Higher load": _cell(r["a_mean"], r["a_n"]),
+                                "Baseline": _cell(r["b_mean"], r["b_n"]),
+                                "Δ": f"{r['delta_pct']:+.0f}%" if pd.notna(r["delta_pct"]) else "—",
+                            })
+                    if rb_rows:
+                        st.dataframe(
+                            pd.DataFrame(rb_rows, columns=[
+                                "RBs", "Comparison", "Higher load", "Baseline", "Δ"]),
+                            hide_index=True, width="stretch",
+                        )
+                    else:
+                        st.caption("No overlapping QP RB samples for these bins.")
 
                 st.markdown("#### Throughput vs RSRP & serving PCI")
                 st.caption(

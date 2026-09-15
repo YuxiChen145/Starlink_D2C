@@ -1422,25 +1422,48 @@ def timeline_multi_figure(
     shared_pci: Sequence[dict] = (),
     qp_overlay: Optional[pd.DataFrame] = None,
     mode: str = "light",
-    height: int = 760,
+    height: Optional[int] = None,
 ) -> "go.Figure":
     """Shared wall-clock timeline: throughput, RSRP and serving PCI per phone.
 
-    ``binned`` is :func:`qpviz.timeline.bin_devices` output. One colour per
-    device; downlink throughput is a solid line, uplink dashed. Bins where two
-    phones are active are shaded grey, and bins where they share a serving PCI
-    are shaded in an accent colour on top - so the contention and shared-cell
-    stretches are readable straight off the plot. ``qp_overlay`` (optional) adds
-    QP PHY-layer throughput and RSRP as dotted traces where a QP log overlaps.
+    ``binned`` is :func:`qpviz.timeline.bin_devices` output. Downlink and uplink
+    throughput get their own panel each - one solid line per phone, colour kept
+    consistent down every panel - so direction never rides on a dashed line.
+    Bins where two phones are active are shaded grey, and bins where they share a
+    serving PCI are shaded in an accent colour on top.
+
+    ``qp_overlay`` (optional) adds QP PHY-layer traces as dotted lines: downlink
+    / uplink throughput on the throughput panels, RSRP on the RSRP panel, and -
+    when the QP log carries RB counts (``rb_dl`` / ``rb_ul``) - a dedicated
+    **RBs / subframe** panel. That RB panel is the sanity check: under the grey
+    (two-phone) and orange (shared-PCI) bands, a cell splitting its resource
+    blocks between two UEs should hand each phone fewer RBs.
     """
     from plotly.subplots import make_subplots
 
     chrome = CHROME.get(mode, CHROME["light"])
+    ov = qp_overlay if (qp_overlay is not None and not qp_overlay.empty) else None
+    has_rb = ov is not None and (
+        ("rb_dl" in ov.columns and ov["rb_dl"].notna().any())
+        or ("rb_ul" in ov.columns and ov["rb_ul"].notna().any())
+    )
+
+    # Build the row layout dynamically so the RB panel only appears with data.
+    plan = [("dl", "Downlink throughput (Mbps)"), ("ul", "Uplink throughput (Mbps)")]
+    if has_rb:
+        plan.append(("rb", "RBs / subframe (QP PHY)"))
+    plan += [("rsrp", "RSRP (dBm)"), ("pci", "Serving PCI")]
+    row_of = {name: i + 1 for i, (name, _) in enumerate(plan)}
+    n = len(plan)
+    weights = {"dl": 0.24, "ul": 0.24, "rb": 0.20, "rsrp": 0.17, "pci": 0.15}
+    heights = [weights[name] for name, _ in plan]
+    heights = [h / sum(heights) for h in heights]
+    if height is None:
+        height = 220 * n
+
     fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06,
-        row_heights=[0.42, 0.30, 0.28],
-        subplot_titles=("App throughput (Mbps) — solid DL, dashed UL",
-                        "RSRP (dBm)", "Serving PCI"),
+        rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+        row_heights=heights, subplot_titles=[t for _, t in plan],
     )
     devices = list(devices)
 
@@ -1466,60 +1489,54 @@ def timeline_multi_figure(
         _band(seg["start"], seg["end"], accent, 0.18)
 
     # --- per-device traces -------------------------------------------------- #
+    panels = [
+        (row_of["dl"], "app_tput_dl", "Mbps"),
+        (row_of["ul"], "app_tput_ul", "Mbps"),
+        (row_of["rsrp"], "rsrp", "dBm"),
+    ]
     for i, dev in enumerate(devices):
         g = binned[binned["device"] == dev].sort_values("time")
         if g.empty:
             continue
         color = _dev_color(i)
-        # throughput: DL solid, UL dashed
+        for row, col, unit in panels:
+            fig.add_trace(go.Scatter(
+                x=g["time"], y=g[col], name=str(dev),
+                legendgroup=str(dev), showlegend=(col == "app_tput_dl"),
+                mode="lines+markers", connectgaps=False,
+                line=dict(color=color, width=2), marker=dict(size=3, color=color),
+                hovertemplate=f"<b>{dev}</b> %{{y:.2f}} {unit}<br>%{{x|%H:%M:%S}}<extra></extra>",
+            ), row=row, col=1)
         fig.add_trace(go.Scatter(
-            x=g["time"], y=g["app_tput_dl"], name=f"{dev} · DL",
-            legendgroup=dev, mode="lines+markers",
-            line=dict(color=color, width=2), marker=dict(size=3, color=color),
-            connectgaps=False,
-            hovertemplate=f"<b>{dev}</b> DL %{{y:.2f}} Mbps<br>%{{x|%H:%M:%S}}<extra></extra>",
-        ), row=1, col=1)
-        fig.add_trace(go.Scatter(
-            x=g["time"], y=g["app_tput_ul"], name=f"{dev} · UL",
-            legendgroup=dev, mode="lines+markers",
-            line=dict(color=color, width=2, dash="dash"),
-            marker=dict(size=3, color=color, symbol="triangle-up"),
-            connectgaps=False,
-            hovertemplate=f"<b>{dev}</b> UL %{{y:.2f}} Mbps<br>%{{x|%H:%M:%S}}<extra></extra>",
-        ), row=1, col=1)
-        # RSRP
-        fig.add_trace(go.Scatter(
-            x=g["time"], y=g["rsrp"], name=f"{dev} · RSRP",
-            legendgroup=dev, showlegend=False, mode="lines",
-            line=dict(color=color, width=1.6), connectgaps=False,
-            hovertemplate=f"<b>{dev}</b> RSRP %{{y:.0f}} dBm<br>%{{x|%H:%M:%S}}<extra></extra>",
-        ), row=2, col=1)
-        # PCI (step)
-        fig.add_trace(go.Scatter(
-            x=g["time"], y=g["pci"].astype("Float64"), name=f"{dev} · PCI",
-            legendgroup=dev, showlegend=False, mode="lines+markers",
+            x=g["time"], y=g["pci"].astype("Float64"), name=str(dev),
+            legendgroup=str(dev), showlegend=False, mode="lines+markers",
             line=dict(color=color, width=1.4, shape="hv"),
             marker=dict(size=4, color=color),
             hovertemplate=f"<b>{dev}</b> PCI %{{y:.0f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
-        ), row=3, col=1)
+        ), row=row_of["pci"], col=1)
 
-    # --- optional QP PHY overlay ------------------------------------------- #
-    if qp_overlay is not None and not qp_overlay.empty:
-        q = qp_overlay.sort_values("time")
+    # --- optional QP PHY overlay (dotted) ---------------------------------- #
+    if ov is not None:
+        q = ov.sort_values("time")
         qcolor = chrome["text_secondary"]
-        if "phy_tput" in q.columns and q["phy_tput"].notna().any():
-            fig.add_trace(go.Scatter(
-                x=q["time"], y=q["phy_tput"], name="QP PHY tput",
-                mode="lines", line=dict(color=qcolor, width=1.4, dash="dot"),
-                hovertemplate="QP PHY %{y:.2f}<br>%{x|%H:%M:%S}<extra></extra>",
-            ), row=1, col=1)
-        if "rsrp" in q.columns and q["rsrp"].notna().any():
-            fig.add_trace(go.Scatter(
-                x=q["time"], y=q["rsrp"], name="QP RSRP",
-                mode="lines", line=dict(color=qcolor, width=1.2, dash="dot"),
-                showlegend=False,
-                hovertemplate="QP RSRP %{y:.0f} dBm<br>%{x|%H:%M:%S}<extra></extra>",
-            ), row=2, col=1)
+        c_dl, _ = series_style(0, mode)
+        c_ul, _ = series_style(1, mode)
+
+        def _ov(col, row, name, color, unit, show=True):
+            if col in q.columns and q[col].notna().any():
+                fig.add_trace(go.Scatter(
+                    x=q["time"], y=q[col], name=name, mode="lines",
+                    line=dict(color=color, width=1.6, dash="dot"),
+                    showlegend=show,
+                    hovertemplate=f"{name}: %{{y:.2f}} {unit}<br>%{{x|%H:%M:%S}}<extra></extra>",
+                ), row=row, col=1)
+
+        _ov("phy_tput_dl", row_of["dl"], "QP PHY DL", qcolor, "Mbps")
+        _ov("phy_tput_ul", row_of["ul"], "QP PHY UL", qcolor, "Mbps")
+        _ov("rsrp", row_of["rsrp"], "QP RSRP", qcolor, "dBm", show=False)
+        if has_rb:
+            _ov("rb_dl", row_of["rb"], "QP RBs DL", c_dl, "RB")
+            _ov("rb_ul", row_of["rb"], "QP RBs UL", c_ul, "RB")
 
     fig.update_layout(
         height=height, template=None,
@@ -1527,18 +1544,23 @@ def timeline_multi_figure(
         font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
         margin=dict(l=64, r=20, t=48, b=40),
         hovermode="x unified", hoverlabel=dict(font_family=FONT_FAMILY),
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0,
+        legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0,
                     font=dict(size=11, color=chrome["text_secondary"]),
                     bgcolor="rgba(0,0,0,0)"),
     )
-    for r in (1, 2, 3):
+    for r in range(1, n + 1):
         fig.update_xaxes(gridcolor=chrome["grid"], zeroline=False,
                          linecolor=chrome["axis"],
                          tickfont=dict(color=chrome["muted"], size=11), row=r, col=1)
         fig.update_yaxes(gridcolor=chrome["grid"], zeroline=False,
                          linecolor=chrome["axis"],
                          tickfont=dict(color=chrome["muted"], size=11), row=r, col=1)
-    # colour the subplot titles like the rest of the chrome
+    # keep the two throughput panels on one y-scale so DL and UL compare by eye
+    tput_vals = pd.concat([binned["app_tput_dl"], binned["app_tput_ul"]])
+    tmax = pd.to_numeric(tput_vals, errors="coerce").max()
+    if pd.notna(tmax) and tmax > 0:
+        fig.update_yaxes(range=[0, tmax * 1.08], row=row_of["dl"], col=1)
+        fig.update_yaxes(range=[0, tmax * 1.08], row=row_of["ul"], col=1)
     for ann in fig.layout.annotations:
         ann.font = dict(family=FONT_FAMILY, size=12, color=chrome["text_secondary"])
     return fig

@@ -39,6 +39,7 @@ __all__ = [
     "compare_by_concurrency",
     "compare_by_shared_pci",
     "throughput_drivers",
+    "overlay_by_condition",
     "TimelineResult",
     "build",
 ]
@@ -317,6 +318,62 @@ def throughput_drivers(
             "n_pci": int(g["pci"].dropna().nunique()),
         })
     return pd.DataFrame(out)
+
+
+def overlay_by_condition(
+    binned: pd.DataFrame, overlay: pd.DataFrame, col: str
+) -> pd.DataFrame:
+    """A per-bin overlay signal (e.g. QP ``rb_dl``) averaged under each timeline
+    condition: one phone vs two active, and - among concurrent bins - same PCI
+    vs different PCI.
+
+    The overlay is QP PHY data binned to the same grid as the SigCap phones, so
+    it merges to the concurrency / shared-PCI flags on the bin timestamp. This is
+    the RB sanity check: if a shared cell splits its resource blocks, the QP
+    phone's RB count should be lower under the two-phone and same-PCI conditions.
+    Returns a one-row-per-condition-pair frame with n / mean for each side.
+    """
+    empty = pd.DataFrame(
+        columns=["comparison", "a_label", "a_n", "a_mean",
+                 "b_label", "b_n", "b_mean", "delta_pct"]
+    )
+    if (
+        binned is None or binned.empty or overlay is None or overlay.empty
+        or col not in overlay.columns or "time" not in overlay.columns
+    ):
+        return empty
+    o = overlay[["time", col]].dropna()
+    if o.empty:
+        return empty
+    act = _active_by_bin(binned)[["time", "n_active"]]
+    sp = _shared_pci_by_bin(binned)[["time", "shared", "n_active"]]
+
+    rows = []
+
+    def _pair(comparison, a_label, a_vals, b_label, b_vals):
+        a, b = _describe(a_vals), _describe(b_vals)
+        delta = (
+            100.0 * (a["mean"] - b["mean"]) / b["mean"]
+            if np.isfinite(b["mean"]) and b["mean"] != 0 else np.nan
+        )
+        rows.append({
+            "comparison": comparison,
+            "a_label": a_label, "a_n": a["n"], "a_mean": a["mean"],
+            "b_label": b_label, "b_n": b["n"], "b_mean": b["mean"],
+            "delta_pct": delta,
+        })
+
+    ma = o.merge(act, on="time", how="inner")
+    _pair(
+        "phones", "2 phones", ma.loc[ma["n_active"] >= 2, col].to_numpy(),
+        "1 phone", ma.loc[ma["n_active"] <= 1, col].to_numpy(),
+    )
+    mc = o.merge(sp[sp["n_active"] >= 2], on="time", how="inner")
+    _pair(
+        "pci", "same PCI", mc.loc[mc["shared"], col].to_numpy(),
+        "diff PCI", mc.loc[~mc["shared"], col].to_numpy(),
+    )
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------- #

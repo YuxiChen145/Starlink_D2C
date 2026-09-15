@@ -32,7 +32,7 @@ DEFAULT_SIGCAP_DIR = os.environ.get("SIGCAP_DATA_DIR", "Sigcap CSV")
 DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 9
+CACHE_VERSION = 10
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12

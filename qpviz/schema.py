@@ -52,6 +52,10 @@ METRICS: Dict[str, Metric] = {
         # Derived (computed in the loader from throughput + allocated RBs + SCS):
         Metric("spec_eff", "Spectral efficiency", "bps/Hz"),
         Metric("tput_per_rb", "Throughput per RB", "bits/RB"),
+        # PHY resource allocation: RBs averaged over all sub-frames/slots (the
+        # rb_all_col each per-carrier export reports). A shared cell splitting
+        # its RBs between two UEs should show fewer RBs per phone.
+        Metric("rb", "RBs per subframe", "RB"),
         # Derived from the RSRQ = N·RSRP/RSSI identity: N should be the RSSI
         # measurement bandwidth in RBs (25/50/100), but empirically it drifts.
         Metric("n_factor", "RSRQ N-factor", "RB"),
@@ -72,6 +76,7 @@ METRIC_ORDER: List[str] = [
     "throughput",
     "spec_eff",
     "tput_per_rb",
+    "rb",
     "app_tput",
     "rtt",
     "bler",
@@ -171,6 +176,13 @@ class Dataset:
     @property
     def has_geo(self) -> bool:
         return "lat" in self.dims and "lon" in self.dims
+
+    def __post_init__(self):
+        # A dataset that reports an all-subframe RB count exposes it as the
+        # canonical ``rb`` metric (frozen dataclass: mutate the dict in place,
+        # which is allowed - we are not rebinding the attribute).
+        if self.rb_all_col and "rb" not in self.metrics:
+            self.metrics["rb"] = self.rb_all_col
 
     def raw_columns(self) -> List[str]:
         cols = list(self.dims.values()) + [

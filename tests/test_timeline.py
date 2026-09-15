@@ -170,3 +170,60 @@ def test_timeline_tab_present_and_computes(sigcap_multi_dir, monkeypatch, tmp_pa
     # the concurrency metric reflects the two overlapping phones
     conc = [m for m in app.metric if m.label == "Max concurrent"]
     assert conc and conc[0].value == "2"
+
+
+# --------------------------------------------------------------------------- #
+# QP RB overlay: metric exposure + condition breakdown
+# --------------------------------------------------------------------------- #
+
+
+def test_rb_metric_is_exposed_and_loads_from_qp(fixture_dir, cache_dir):
+    from qpviz.schema import METRICS, DATASETS_BY_KEY
+    assert "rb" in METRICS and METRICS["rb"].unit == "RB"
+    # per-carrier datasets carry it (PDSCH = DL, PUSCH = UL)
+    assert "rb" in DATASETS_BY_KEY["lte_pdsch_pc"].metrics
+    frame = loader.load(fixture_dir, ["lte_pdsch_pc", "lte_pusch_pc"], cache_dir)
+    assert "rb" in frame.columns and frame["rb"].notna().any()
+    # DL RBs come from PDSCH, UL RBs from PUSCH
+    assert frame.loc[frame["link"] == "DL", "rb"].notna().any()
+    assert frame.loc[frame["link"] == "UL", "rb"].notna().any()
+
+
+def test_overlay_by_condition_partitions_solo_concurrent_and_pci(multi):
+    res = timeline.build(multi, bin="5s")
+    # a synthetic QP overlay: RB count keyed to each bin, lower where the two
+    # phones are active AND share a PCI (what the sanity check expects)
+    binned = res.binned
+    import numpy as np
+    times = sorted(binned["time"].unique())
+    sp = timeline._shared_pci_by_bin(binned).set_index("time")
+    act = timeline._active_by_bin(binned).set_index("time")
+    rows = []
+    for t in times:
+        n_active = int(act.loc[t, "n_active"]) if t in act.index else 1
+        shared = bool(sp.loc[t, "shared"]) if t in sp.index else False
+        rb = 20.0
+        if n_active >= 2:
+            rb -= 6.0
+        if shared:
+            rb -= 6.0
+        rows.append({"time": t, "rb_dl": rb})
+    overlay = pd.DataFrame(rows)
+
+    out = timeline.overlay_by_condition(binned, overlay, "rb_dl")
+    assert set(out["comparison"]) == {"phones", "pci"}
+    phones = out[out["comparison"] == "phones"].iloc[0]
+    # a_label is "2 phones", b_label "1 phone" -> two phones should be lower
+    assert phones["a_mean"] < phones["b_mean"]
+    assert phones["delta_pct"] < 0
+    pci = out[out["comparison"] == "pci"].iloc[0]
+    # same-PCI lower than different-PCI
+    assert pci["a_mean"] < pci["b_mean"]
+    assert pci["delta_pct"] < 0
+
+
+def test_overlay_by_condition_is_empty_without_data(multi):
+    res = timeline.build(multi, bin="5s")
+    assert timeline.overlay_by_condition(res.binned, pd.DataFrame(), "rb_dl").empty
+    assert timeline.overlay_by_condition(pd.DataFrame(), pd.DataFrame(
+        {"time": [], "rb_dl": []}), "rb_dl").empty
