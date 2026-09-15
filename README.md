@@ -1,11 +1,14 @@
 # Starlink D2C — Measurement Explorer
 
 An interactive Streamlit app for exploring Starlink Direct-to-Cell measurement
-data from two instruments side by side — **Qualipoc (QP)** connected-mode
-drive/walk logs and **PRISM** SDR sweeps. Pick a technology and metric, filter
-down to the cells, region, and minutes you care about, and compare them on a
-map, as CDF/PDF curves, by which cells were serving and for how long, and
-against how many D2C satellites were overhead.
+data from three instruments side by side — **Qualipoc (QP)** connected-mode
+drive/walk logs, **PRISM** SDR sweeps, and **SigCap** (an Android logger that
+captures the serving cell together with the *application-layer* result of an
+iperf / HTTP run and ping RTT). Pick a technology and metric, filter down to the
+cells, region, and minutes you care about, and compare them on a map, as CDF/PDF
+curves, by which cells were serving and for how long, against how many D2C
+satellites were overhead — and **correlate the QP PHY layer against what the
+application actually got** when both were recorded on the same phone.
 
 ![The CDF tab](docs/screenshot-cdf.png)
 
@@ -64,6 +67,7 @@ so a fresh `git clone` already has them and the loader reads `.csv` or
 Starlink_D2C/
 ├── QP CSV/       ← Qualipoc exports (the "… - Limited.csv[.gz]" files)
 ├── PRISM CSV/    ← PRISM SDR scan CSVs (one file per location/carrier)
+├── Sigcap CSV/   ← SigCap sessions (one CSV per iperf / HTTP capture)
 └── TLE/          ← (optional) Starlink TLEs for satellite visibility
 ```
 
@@ -73,6 +77,13 @@ Starlink_D2C/
 - **PRISM CSV/** — the SDR scan files (the collection name comes from the file
   name). PRISM carries signal metrics only and has no GPS in the current
   captures, so it is excluded from the map and satellite tabs.
+- **Sigcap CSV/** — SigCap sessions, one CSV per capture (the collection name
+  comes from the file name; both the `…_910_iperf` and the
+  `[D2C_Static_OpenField…]` naming conventions are recognised, and macOS
+  "copy 2" duplicates are ignored). SigCap adds the serving cell (PCI / Cell Id)
+  plus **application-layer** metrics — iperf / HTTP throughput and ping RTT —
+  and has GPS, so it appears on the map. Its app metrics are what feed the
+  **Correlation** tab against the QP PHY layer.
 - **TLE/** — optional; only needed for the **D2C visibility** tab. TLEs are
   *not* committed; fetch them locally — see
   [`docs/FETCHING_TLE.md`](docs/FETCHING_TLE.md).
@@ -127,6 +138,7 @@ Point the app at data elsewhere with environment variables (all optional):
 |---|---|---|
 | `QP_DATA_DIR` | `QP CSV` | Folder of Qualipoc exports |
 | `PRISM_DATA_DIR` | `PRISM CSV` | Folder of PRISM scans |
+| `SIGCAP_DATA_DIR` | `Sigcap CSV` | Folder of SigCap session CSVs |
 | `TLE_DATA_DIR` | `TLE` | Folder of Starlink TLE files |
 | `QP_CACHE_DIR` | `.cache/qpviz` | Parquet cache location |
 
@@ -190,7 +202,7 @@ image.
 # build once
 docker build -t starlink-d2c .
 
-# run — mount a folder that contains "QP CSV", "PRISM CSV" and "TLE"
+# run — mount a folder that contains "QP CSV", "PRISM CSV", "Sigcap CSV" and "TLE"
 docker run -p 8501:8501 -v "/absolute/path/to/data:/data" starlink-d2c
 ```
 
@@ -207,9 +219,9 @@ from GitHub → **Community Cloud (B)**; a stable, controlled internal site →
 
 ## Features
 
-**Two measurement sources, one canvas.** A *Measurement source* filter (QP /
-PRISM) pools or isolates them; every other filter is a multi-select where empty
-means *all*.
+**Three measurement sources, one canvas.** A *Measurement source* filter (QP /
+PRISM / SigCap) pools or isolates them; every other filter is a multi-select
+where empty means *all*.
 
 **Filters** — Measurement source, Direction (DL/UL), Data source, Collection,
 Band, EARFCN/NR-ARFCN, PCI (union or intersection across collections), a
@@ -217,8 +229,9 @@ Band, EARFCN/NR-ARFCN, PCI (union or intersection across collections), a
 you can isolate a few minutes at a spot).
 
 **Metrics** — RSRP, RSRQ, RSSI, SINR, MCS, Throughput, **Spectral efficiency
-(bps/Hz)**, **Throughput per RB (bits/RB)**, BLER, and the **RSRQ N-factor**
-(`N = RSRQ·RSSI/RSRP`), wherever the selected exports carry them.
+(bps/Hz)**, **Throughput per RB (bits/RB)**, BLER, the **RSRQ N-factor**
+(`N = RSRQ·RSSI/RSRP`), and — from SigCap — **App throughput (Mbps)** (iperf and
+HTTP pooled) and **Ping RTT (ms)**, wherever the selected exports carry them.
 
 | Tab | What it shows |
 |---|---|
@@ -228,6 +241,7 @@ you can isolate a few minutes at a spot).
 | 🛰️ Cell identity | Who is serving you and for how long: dwell timeline, eNB→sector→PCI tree, fan-out statistics. |
 | 📊 Statistics | Per-group n / mean / std / percentiles, downloadable. |
 | 🧾 Data | The filtered rows, downloadable as CSV. |
+| 🔗 Correlation | PHY vs. application on the same phone: pick a QP PHY metric and a SigCap app metric (App throughput / RTT), a time bin and an aggregate; both are resampled onto common bins over the window where the two recordings overlap and shown as a dual-axis timeline and a scatter, with Pearson r, Spearman ρ, and the paired-bin count. Appears only when both QP and SigCap are loaded. |
 
 Deeper notes on cell identity, the QP↔PRISM differences, satellite visibility,
 and how the exports are normalised live in the `qpviz/` module docstrings
@@ -239,11 +253,12 @@ and how the exports are normalised live in the `qpviz/` module docstrings
 app.py               Streamlit UI: filters, tabs, wiring
 qpviz/
   schema.py          the exports and their column maps; metric registry
-  loader.py          CSV -> canonical frame (QP + PRISM), derived metrics, cache
+  loader.py          CSV -> canonical frame (QP + PRISM + SigCap), derived metrics, cache
   filters.py         filter set, point-in-polygon region test, data windows
   identity.py        serving-cell scope, dwell runs, hierarchy, fan-out
   stats.py           ECDF + grouped summary statistics
-  charts.py          plotly figures: CDF/PDF, timeline, tree, fan-out, satellites
+  charts.py          plotly figures: CDF/PDF, timeline, tree, fan-out, satellites, correlation
+  correlate.py       time-bin alignment of QP PHY vs SigCap app metrics; Pearson/Spearman
   mapview.py         folium map, draw control, categorical colouring
   satellites.py      TLE ingest, SGP4 propagation, D2C visibility
   theme.py           colour tokens

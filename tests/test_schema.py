@@ -44,7 +44,9 @@ def test_offered_and_hidden_metrics_partition_the_registry():
 
 
 def test_hidden_metrics_are_never_offered():
-    every_dataset = [d.key for d in schema.DATASETS]
+    # the union of every source (QP + PRISM + SigCap) supplies exactly the
+    # offered metric set, in display order - app_tput/rtt come from SigCap only
+    every_dataset = list(schema.ALL_DATASETS_BY_KEY)
     offered = schema.metrics_available(every_dataset)
     assert offered == schema.METRIC_ORDER
     for metric in schema.HIDDEN_METRICS:

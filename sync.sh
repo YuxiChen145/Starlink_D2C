@@ -21,7 +21,7 @@ fi
 
 # 2. Re-gzip any raw CSV whose .gz is missing or older than the raw file.
 gzipped=0
-for dir in "QP CSV" "PRISM CSV"; do
+for dir in "QP CSV" "PRISM CSV" "Sigcap CSV"; do
   [ -d "$dir" ] || continue
   while IFS= read -r -d '' raw; do
     gz="$raw.gz"

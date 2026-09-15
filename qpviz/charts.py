@@ -1273,3 +1273,138 @@ def sat_histogram_figure(
     )
     fig.update_xaxes(dtick=1)
     return _sat_layout(fig, chrome, f"D2C satellites visible (≥{mask}°)", "Samples", height)
+
+
+# --------------------------------------------------------------------------- #
+# Correlation (QP PHY  x  SigCap application layer)
+# --------------------------------------------------------------------------- #
+
+
+def correlation_timeline_figure(
+    merged: pd.DataFrame,
+    x_label: str,
+    y_label: str,
+    mode: str = "light",
+    height: int = 440,
+) -> go.Figure:
+    """Two time series on one shared timeline with independent y-axes.
+
+    ``merged`` has columns ``time`` (bin start), ``x`` (the QP PHY metric) and
+    ``y`` (the SigCap app metric).  The PHY series reads on the left axis, the
+    app series on the right, so their co-movement is visible despite different
+    units and scales.
+    """
+    chrome = CHROME.get(mode, CHROME["light"])
+    c_phy, _ = series_style(0, mode)
+    c_app, _ = series_style(1, mode)
+    fig = go.Figure()
+    if not merged.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=merged["time"], y=merged["x"], name=x_label,
+                mode="lines+markers", yaxis="y1",
+                line=dict(color=c_phy, width=2), marker=dict(size=4, color=c_phy),
+                hovertemplate=f"{x_label}: %{{y:.3g}}<br>%{{x|%H:%M:%S}}<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=merged["time"], y=merged["y"], name=y_label,
+                mode="lines+markers", yaxis="y2",
+                line=dict(color=c_app, width=2), marker=dict(size=4, color=c_app),
+                hovertemplate=f"{y_label}: %{{y:.3g}}<br>%{{x|%H:%M:%S}}<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        height=height,
+        template=None,
+        paper_bgcolor=chrome["surface"],
+        plot_bgcolor=chrome["surface"],
+        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
+        margin=dict(l=64, r=64, t=16, b=48),
+        hovermode="x unified",
+        hoverlabel=dict(font_family=FONT_FAMILY),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+            font=dict(size=11, color=chrome["text_secondary"]),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+    )
+    fig.update_xaxes(
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11),
+    )
+    fig.update_layout(
+        yaxis=dict(
+            title=dict(text=x_label, font=dict(color=c_phy, size=12)),
+            gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+            tickfont=dict(color=c_phy, size=11),
+        ),
+        yaxis2=dict(
+            title=dict(text=y_label, font=dict(color=c_app, size=12)),
+            overlaying="y", side="right", showgrid=False, zeroline=False,
+            linecolor=chrome["axis"], tickfont=dict(color=c_app, size=11),
+        ),
+    )
+    return fig
+
+
+def correlation_scatter_figure(
+    merged: pd.DataFrame,
+    x_label: str,
+    y_label: str,
+    mode: str = "light",
+    height: int = 440,
+    fit_line: bool = True,
+) -> go.Figure:
+    """QP PHY metric (x) against the SigCap app metric (y), one point per bin.
+
+    An ordinary least-squares fit line is drawn when there are at least two
+    points that vary, as a visual read on the strength and sign of the relation.
+    """
+    chrome = CHROME.get(mode, CHROME["light"])
+    color, _ = series_style(0, mode)
+    fig = go.Figure()
+    if not merged.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=merged["x"], y=merged["y"], mode="markers",
+                marker=dict(size=7, color=color, opacity=0.72,
+                            line=dict(width=0.5, color=chrome["surface"])),
+                name="bins",
+                hovertemplate=f"{x_label}: %{{x:.3g}}<br>{y_label}: %{{y:.3g}}<extra></extra>",
+            )
+        )
+        x = pd.to_numeric(merged["x"], errors="coerce").to_numpy(dtype="float64")
+        y = pd.to_numeric(merged["y"], errors="coerce").to_numpy(dtype="float64")
+        ok = np.isfinite(x) & np.isfinite(y)
+        if fit_line and ok.sum() >= 2 and np.nanstd(x[ok]) > 0:
+            slope, intercept = np.polyfit(x[ok], y[ok], 1)
+            xs = np.array([np.nanmin(x[ok]), np.nanmax(x[ok])])
+            fig.add_trace(
+                go.Scatter(
+                    x=xs, y=slope * xs + intercept, mode="lines",
+                    line=dict(color=chrome["text_secondary"], width=1.5, dash="dash"),
+                    name="OLS fit", hoverinfo="skip",
+                )
+            )
+    fig.update_layout(
+        height=height,
+        template=None,
+        paper_bgcolor=chrome["surface"],
+        plot_bgcolor=chrome["surface"],
+        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
+        margin=dict(l=64, r=24, t=16, b=56),
+        showlegend=False,
+    )
+    fig.update_xaxes(
+        title=dict(text=x_label, font=dict(color=chrome["text_secondary"], size=12)),
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11),
+    )
+    fig.update_yaxes(
+        title=dict(text=y_label, font=dict(color=chrome["text_secondary"], size=12)),
+        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
+        tickfont=dict(color=chrome["muted"], size=11),
+    )
+    return fig

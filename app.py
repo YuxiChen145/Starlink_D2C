@@ -13,17 +13,28 @@ from typing import List, Sequence, Tuple
 import pandas as pd
 import streamlit as st
 
-from qpviz import charts, filters as flt, identity, loader, mapview, satellites, stats
+from qpviz import (
+    charts,
+    correlate,
+    filters as flt,
+    identity,
+    loader,
+    mapview,
+    satellites,
+    stats,
+)
 from qpviz.schema import (
     ALL_DATASETS_BY_KEY,
     DATASETS_BY_KEY,
     METRICS,
     PRISM_DATASETS_BY_KEY,
+    SIGCAP_DATASETS_BY_KEY,
     TECHNOLOGIES,
     Dataset,
     datasets_for,
     metrics_available,
     prism_datasets_for,
+    sigcap_datasets_for,
 )
 
 APP_TITLE = "Starlink D2C — Measurement Explorer"
@@ -109,6 +120,11 @@ def load_prism_frame(prism_dir: str, dataset_keys: Tuple[str, ...]) -> pd.DataFr
     return loader.load_prism(prism_dir, list(dataset_keys))
 
 
+@st.cache_data(show_spinner="Loading SigCap data…")
+def load_sigcap_frame(sigcap_dir: str, dataset_keys: Tuple[str, ...]) -> pd.DataFrame:
+    return loader.load_sigcap(sigcap_dir, list(dataset_keys))
+
+
 @st.cache_data(show_spinner=False)
 def available(data_dir: str) -> List[str]:
     return [d.key for d in loader.available_datasets(data_dir)]
@@ -117,6 +133,11 @@ def available(data_dir: str) -> List[str]:
 @st.cache_data(show_spinner=False)
 def prism_present_keys(prism_dir: str) -> List[str]:
     return loader.prism_available(prism_dir)
+
+
+@st.cache_data(show_spinner=False)
+def sigcap_present_keys(sigcap_dir: str) -> List[str]:
+    return loader.sigcap_available(sigcap_dir)
 
 
 @st.cache_data(show_spinner=False)
@@ -201,6 +222,9 @@ with st.sidebar:
     default_prism = os.environ.get(
         "PRISM_DATA_DIR", str(Path(__file__).parent / "PRISM CSV")
     )
+    default_sigcap = os.environ.get(
+        "SIGCAP_DATA_DIR", str(Path(__file__).parent / "Sigcap CSV")
+    )
     qp_dir = st.text_input("QP data folder", value=default_qp)
     prism_dir = st.text_input(
         "PRISM data folder",
@@ -208,18 +232,28 @@ with st.sidebar:
         help="PRISM SDR scan exports. Leave as-is if you have none — the app "
              "simply reads whichever sources are present.",
     )
+    sigcap_dir = st.text_input(
+        "SigCap data folder",
+        value=default_sigcap,
+        help="SigCap session logs (one file per iperf/HTTP run). Leave as-is if "
+             "you have none — the app reads whichever sources are present.",
+    )
     if st.button("Reload data", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 
     qp_present = available(qp_dir)
     prism_present = prism_present_keys(prism_dir)
-    providers_present = (["QP"] if qp_present else []) + (
-        ["PRISM"] if prism_present else []
+    sigcap_present = sigcap_present_keys(sigcap_dir)
+    providers_present = (
+        (["QP"] if qp_present else [])
+        + (["PRISM"] if prism_present else [])
+        + (["SIGCAP"] if sigcap_present else [])
     )
     if not providers_present:
         st.error(
-            f"No QP CSV files in `{qp_dir}` and no PRISM CSV files in `{prism_dir}`."
+            f"No QP CSV files in `{qp_dir}`, no PRISM CSV files in `{prism_dir}`, "
+            f"and no SigCap CSV files in `{sigcap_dir}`."
         )
         st.stop()
 
@@ -237,8 +271,9 @@ with st.sidebar:
             key="f_providers",
             help="QP is the Qualipoc phone (connected-mode logs, one serving "
                  "cell); PRISM is the SDR scanner (every audible cell, signal "
-                 "only). Leave empty to pool both; split CDF/Statistics by "
-                 "“Measurement source” to compare them.",
+                 "only); SigCap runs on the same phone and adds app-layer "
+                 "iperf/HTTP throughput and ping RTT. Leave empty to pool all; "
+                 "split CDF/Statistics by “Measurement source” to compare them.",
             placeholder=f"All ({len(providers_present)})",
         )
     else:
@@ -270,11 +305,20 @@ with st.sidebar:
         if "PRISM" in providers_active
         else []
     )
-    if not qp_in_tech and not prism_in_tech:
+    sigcap_in_tech = (
+        [
+            k
+            for k in sigcap_present
+            if tech_value is None or SIGCAP_DATASETS_BY_KEY[k].tech == tech_value
+        ]
+        if "SIGCAP" in providers_active
+        else []
+    )
+    if not qp_in_tech and not prism_in_tech and not sigcap_in_tech:
         st.warning(f"No {tech} exports for the selected measurement source(s).")
         st.stop()
 
-    metric_keys = metrics_available(qp_in_tech + prism_in_tech)
+    metric_keys = metrics_available(qp_in_tech + prism_in_tech + sigcap_in_tech)
     if not metric_keys:
         st.warning("No offered metric is available for this selection.")
         st.stop()
@@ -290,7 +334,10 @@ with st.sidebar:
     prism_source_keys = [
         d.key for d in prism_datasets_for(metric, tech_value, available=prism_in_tech)
     ]
-    reading = qp_source_keys + prism_source_keys
+    sigcap_source_keys = [
+        d.key for d in sigcap_datasets_for(metric, tech_value, available=sigcap_in_tech)
+    ]
+    reading = qp_source_keys + prism_source_keys + sigcap_source_keys
     st.caption(
         "Reading "
         + ", ".join(f"**{ALL_DATASETS_BY_KEY[k].label}**" for k in reading)
@@ -302,6 +349,8 @@ if qp_source_keys:
     _parts.append(load_frame(qp_dir, tuple(sorted(qp_source_keys))))
 if prism_source_keys:
     _parts.append(load_prism_frame(prism_dir, tuple(sorted(prism_source_keys))))
+if sigcap_source_keys:
+    _parts.append(load_sigcap_frame(sigcap_dir, tuple(sorted(sigcap_source_keys))))
 frame = loader.concat_frames(_parts)
 frame = frame[frame[metric].notna()] if metric in frame.columns else frame.iloc[0:0]
 freq_label = loader.freq_label_for(frame)
@@ -711,15 +760,25 @@ if active.empty:
     st.info("No samples match the current filters.")
     st.stop()
 
+# Correlation needs both a QP source (PHY layer) and a SigCap source (app layer)
+corr_enable = bool(qp_present and sigcap_present)
+
 tab_labels = ["🗺️ Map", "📈 CDF curves", "🛰️ Cell identity", "📊 Statistics", "🧾 Data"]
 if sat_enable:
     tab_labels.insert(1, "🛰️ D2C visibility")
+if corr_enable:
+    tab_labels.append("🔗 Correlation")
 _tabs = st.tabs(tab_labels)
-if sat_enable:
-    tab_map, tab_sat, tab_cdf, tab_cells, tab_stats, tab_data = _tabs
-else:
-    tab_map, tab_cdf, tab_cells, tab_stats, tab_data = _tabs
-    tab_sat = None
+# map tabs by label so the optional D2C-visibility and Correlation tabs never
+# throw the positional unpacking off
+_tab = dict(zip(tab_labels, _tabs))
+tab_map = _tab["🗺️ Map"]
+tab_cdf = _tab["📈 CDF curves"]
+tab_cells = _tab["🛰️ Cell identity"]
+tab_stats = _tab["📊 Statistics"]
+tab_data = _tab["🧾 Data"]
+tab_sat = _tab.get("🛰️ D2C visibility")
+tab_corr = _tab.get("🔗 Correlation")
 
 
 # --------------------------------------------------------------------------- #
@@ -1119,11 +1178,20 @@ with tab_cells:
         for k in sorted(prism_present)
         if tech_value is None or PRISM_DATASETS_BY_KEY[k].tech == tech_value
     ) if "PRISM" in providers_active else ()
+    # SigCap logs the serving cell too (its "primary" cell), so it feeds the
+    # serving-cell timelines alongside QP — it just carries PCI/Cell Id, not the
+    # eNB/sector split, so it adds to the PCI view rather than the eNB hierarchy.
+    sigcap_id_keys = tuple(
+        k
+        for k in sorted(sigcap_present)
+        if tech_value is None or SIGCAP_DATASETS_BY_KEY[k].tech == tech_value
+    ) if "SIGCAP" in providers_active else ()
 
-    if not qp_radio_keys and not prism_id_keys:
+    if not qp_radio_keys and not prism_id_keys and not sigcap_id_keys:
         st.info(
-            "Cell identity needs the QP Radio [connected] export or a PRISM scan "
-            "that decodes eNB / PCI — neither is available for this selection."
+            "Cell identity needs the QP Radio [connected] export, a PRISM scan "
+            "that decodes eNB / PCI, or a SigCap session — none is available for "
+            "this selection."
         )
         st.stop()
 
@@ -1132,6 +1200,8 @@ with tab_cells:
         _id_parts.append(load_frame(qp_dir, qp_radio_keys))
     if prism_id_keys:
         _id_parts.append(load_prism_frame(prism_dir, prism_id_keys))
+    if sigcap_id_keys:
+        _id_parts.append(load_sigcap_frame(sigcap_dir, sigcap_id_keys))
     radio = loader.concat_frames(_id_parts)
 
     def _intersecting(values, column):
@@ -1157,9 +1227,18 @@ with tab_cells:
     # QP rows: keep only the serving cell (PCell / PSCell). PRISM rows have no
     # serving concept, so keep every decoded identity row.
     if "provider" in ident.columns:
-        is_prism = (ident["provider"] == "PRISM").to_numpy()
+        prov = ident["provider"].astype("string")
+        is_prism = (prov == "PRISM").to_numpy()
+        is_sigcap = (prov == "SIGCAP").to_numpy()
+        # QP marks the serving cell with a cell_type; keep only those. SigCap's
+        # primary cell is already the serving one (no cell_type to filter on), so
+        # keep it as-is. PRISM scans have no serving concept — keep every row.
         cells = pd.concat(
-            [identity.serving_only(ident.loc[~is_prism]), ident.loc[is_prism]],
+            [
+                identity.serving_only(ident.loc[~is_prism & ~is_sigcap]),
+                ident.loc[is_sigcap],
+                ident.loc[is_prism],
+            ],
             ignore_index=True,
         )
     else:
@@ -1171,7 +1250,7 @@ with tab_cells:
     # the QP serving-cell subset drives the time views; everything (QP + PRISM)
     # drives the relationship views
     if "provider" in cells.columns:
-        serving = cells[cells["provider"] == "QP"]
+        serving = cells[cells["provider"].isin(["QP", "SIGCAP"])]
     else:
         serving = cells
     levels = identity.available_levels(cells)
@@ -1180,12 +1259,19 @@ with tab_cells:
     if cells.empty or not levels:
         st.info("No cell-identity rows match the current filters.")
     else:
-        n_prism = int((cells["provider"] == "PRISM").sum()) if "provider" in cells.columns else 0
+        has_prov = "provider" in cells.columns
+        n_prism = int((cells["provider"] == "PRISM").sum()) if has_prov else 0
+        n_qp = int((serving["provider"] == "QP").sum()) if has_prov else len(serving)
+        n_sigcap = int((serving["provider"] == "SIGCAP").sum()) if has_prov else 0
         src_parts = []
-        if not serving.empty and qp_radio_keys:
+        if n_qp and qp_radio_keys:
             src_parts.append(
-                f"QP serving cell ({len(serving):,} samples, "
+                f"QP serving cell ({n_qp:,} samples, "
                 + ", ".join(DATASETS_BY_KEY[k].label for k in qp_radio_keys) + ")"
+            )
+        if n_sigcap:
+            src_parts.append(
+                f"SigCap serving cell ({n_sigcap:,} samples — PCI / Cell Id only)"
             )
         if n_prism:
             src_parts.append(
@@ -1589,3 +1675,187 @@ with tab_data:
         file_name=f"{metric}_filtered.csv",
         mime="text/csv",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Correlation  (QP PHY layer  x  SigCap application layer, same phone)
+# --------------------------------------------------------------------------- #
+
+if tab_corr is not None:
+    with tab_corr:
+        st.markdown(
+            "**PHY vs. application, on the same phone.** Qualipoc logs the PHY "
+            "layer; SigCap, recording at the same time, logs what the application "
+            "actually got — iperf / HTTP throughput and ping RTT. Both are "
+            "averaged into a common time bin and paired bin-to-bin over the window "
+            "where the two recordings overlap, so you can see how the radio "
+            "conditions translated into delivered performance."
+        )
+
+        qp_keys_tech = [
+            k for k in qp_present
+            if tech_value is None or DATASETS_BY_KEY[k].tech == tech_value
+        ]
+        sig_keys_tech = [
+            k for k in sigcap_present
+            if tech_value is None or SIGCAP_DATASETS_BY_KEY[k].tech == tech_value
+        ]
+        # QP contributes the PHY metric; app_tput never comes from QP
+        phy_options = [m for m in metrics_available(qp_keys_tech) if m != "app_tput"]
+        app_present = metrics_available(sig_keys_tech)
+        app_options = [m for m in ("app_tput", "rtt") if m in app_present]
+
+        if not phy_options or not app_options:
+            st.info(
+                "Correlation needs a QP PHY metric and a SigCap app-layer metric "
+                f"for {tech}. QP PHY metrics available: "
+                f"{len(phy_options)}; SigCap app metrics available: "
+                f"{len(app_options)}."
+            )
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            phy_metric = c1.selectbox(
+                "QP PHY metric", phy_options,
+                index=phy_options.index("throughput") if "throughput" in phy_options else 0,
+                format_func=lambda m: METRICS[m].axis_label, key="corr_phy",
+                help="From the Qualipoc PHY-layer exports (MCS, PDSCH throughput, "
+                     "spectral efficiency, BLER, RSRP, …).",
+            )
+            app_metric = c2.selectbox(
+                "SigCap app metric", app_options,
+                format_func=lambda m: METRICS[m].axis_label, key="corr_app",
+                help="Application-layer performance SigCap measured (iperf / HTTP "
+                     "throughput, ping RTT).",
+            )
+            bin_choice = c3.selectbox(
+                "Time bin", ["1s", "2s", "5s", "10s", "15s", "30s", "60s"],
+                index=2, key="corr_bin",
+                help="Both sources are averaged into buckets this wide, then paired "
+                     "bucket-to-bucket. SigCap samples about every 5 s.",
+            )
+            agg_choice = c4.selectbox(
+                "Aggregate", ["mean", "median", "max", "min"], index=0, key="corr_agg",
+                help="How samples within a bucket are combined before pairing.",
+            )
+
+            qp_corr_keys = [
+                d.key for d in datasets_for(phy_metric, tech_value, available=qp_keys_tech)
+            ]
+            sig_corr_keys = [
+                d.key for d in sigcap_datasets_for(app_metric, tech_value, available=sig_keys_tech)
+            ]
+            qp_cf = (
+                load_frame(qp_dir, tuple(sorted(qp_corr_keys)))
+                if qp_corr_keys else loader.empty_frame()
+            )
+            sig_cf = (
+                load_sigcap_frame(sigcap_dir, tuple(sorted(sig_corr_keys)))
+                if sig_corr_keys else loader.empty_frame()
+            )
+            # honour the sidebar time window and any region drawn on the map, so a
+            # session can be isolated the same way as everywhere else
+            _cf_filters = flt.Filters(
+                time_range=time_range,
+                regions=st.session_state["regions"],
+                keep_ungeolocated=keep_ungeo,
+            )
+            qp_cf = flt.apply_filters(qp_cf, _cf_filters)
+            sig_cf = flt.apply_filters(sig_cf, _cf_filters)
+
+            # tab-local narrowing of the SigCap side: workload, direction, session
+            fc1, fc2, fc3 = st.columns(3)
+            work_opts = loader.options(sig_cf, "test_type")
+            workloads = fc1.multiselect(
+                "SigCap workload", work_opts, default=[], key="corr_work",
+                placeholder=f"All ({len(work_opts)})",
+                help="iperf vs. HTTP. Leave empty to include all.",
+            )
+            dir_opts = loader.options(sig_cf, "link")
+            dirs = fc2.multiselect(
+                "Direction", dir_opts, default=[], key="corr_dir",
+                placeholder=f"All ({len(dir_opts)})",
+                help="Applied to both sources (DL/UL). Leave empty to include all.",
+            )
+            sess_opts = loader.options(sig_cf, "collection")
+            sessions = fc3.multiselect(
+                "SigCap session", sess_opts, default=[], key="corr_sess",
+                placeholder=f"All ({len(sess_opts)})",
+                help="Restrict to one or more SigCap capture sessions.",
+            )
+            if workloads:
+                sig_cf = sig_cf[sig_cf["test_type"].astype("string").isin(workloads)]
+            if sessions:
+                sig_cf = sig_cf[sig_cf["collection"].astype("string").isin(sessions)]
+            if dirs:
+                sig_cf = sig_cf[sig_cf["link"].astype("string").isin(dirs)]
+                if "link" in qp_cf.columns:
+                    qp_cf = qp_cf[qp_cf["link"].astype("string").isin(dirs)]
+
+            result = correlate.correlate(
+                qp_cf, phy_metric, sig_cf, app_metric,
+                bin=bin_choice, qp_agg=agg_choice, sig_agg=agg_choice,
+            )
+
+            def _span(fr):
+                if fr is None or fr.empty or "time" not in fr.columns:
+                    return None
+                t = pd.to_datetime(fr["time"], errors="coerce").dropna()
+                return (t.min(), t.max()) if not t.empty else None
+
+            qp_span, sig_span = _span(qp_cf), _span(sig_cf)
+            phy_label = METRICS[phy_metric].axis_label
+            app_label = METRICS[app_metric].axis_label
+
+            if sig_span is None:
+                st.info("No SigCap samples for this metric and the current filters.")
+            elif qp_span is None:
+                st.info(
+                    "No QP PHY samples yet for this selection. Upload the QP logs "
+                    "captured alongside these SigCap sessions, then pick a PHY "
+                    "metric here to correlate. SigCap currently covers "
+                    f"**{sig_span[0]:%Y-%m-%d %H:%M}** – **{sig_span[1]:%Y-%m-%d %H:%M}**."
+                )
+            elif not result.has_overlap:
+                st.warning(
+                    "QP and SigCap don't overlap in time, so there is nothing to "
+                    f"pair. QP covers **{qp_span[0]:%Y-%m-%d %H:%M}** – "
+                    f"**{qp_span[1]:%Y-%m-%d %H:%M}**; SigCap covers "
+                    f"**{sig_span[0]:%Y-%m-%d %H:%M}** – **{sig_span[1]:%Y-%m-%d %H:%M}**. "
+                    "Correlation needs QP and SigCap recorded at the same time on "
+                    "the same phone."
+                )
+            elif not result.has_pairs:
+                st.warning(
+                    f"Only {result.n} paired {bin_choice} bin(s) in the overlap — "
+                    "not enough to correlate. Try a coarser time bin or widen the "
+                    "time window."
+                )
+            else:
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Pearson r", f"{result.pearson:+.2f}")
+                m2.metric("Spearman ρ", f"{result.spearman:+.2f}")
+                m3.metric("Paired bins", f"{result.n:,}")
+                m4.metric(
+                    "Overlap",
+                    f"{(result.overlap[1] - result.overlap[0]).total_seconds() / 60:.0f} min",
+                    help=f"{result.overlap[0]:%Y-%m-%d %H:%M:%S} – "
+                         f"{result.overlap[1]:%H:%M:%S}",
+                )
+                st.plotly_chart(
+                    charts.correlation_timeline_figure(
+                        result.merged, phy_label, app_label, mode=MODE
+                    ),
+                    width="stretch",
+                )
+                st.plotly_chart(
+                    charts.correlation_scatter_figure(
+                        result.merged, phy_label, app_label, mode=MODE
+                    ),
+                    width="stretch",
+                )
+                st.caption(
+                    f"Each point is one {bin_choice} bin ({agg_choice}) present in "
+                    "both recordings. Pearson measures a linear relationship; "
+                    "Spearman a monotonic one. Correlation is not causation — "
+                    "confounders (distance, load, beam changes) move both."
+                )

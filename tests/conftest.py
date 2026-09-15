@@ -205,3 +205,119 @@ def prism_dir(tmp_path_factory) -> Path:
         _PRISM_LTE_COLUMNS, "lte", 8665, rows=180, seed=3,
     )
     return directory
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic SigCap (Android logger) fixtures
+# --------------------------------------------------------------------------- #
+
+# A realistic subset of the ~983 SigCap columns - the loader only reads the ones
+# a dataset maps, so a subset header round-trips exactly like the full export.
+_SIGCAP_COLUMNS = [
+    "timestamp", "latitude", "longitude", "operator", "network_type*",
+    "iperf_tput_mean_mbps", "iperf_direction", "iperf_protocol",
+    "http_tput_mean_mbps", "ping_rtt_mean_ms",
+    "lte_primary_pci", "lte_primary_ci", "lte_primary_earfcn",
+    "lte_primary_band*", "lte_primary_rsrp_dbm", "lte_primary_rsrq_db",
+    "lte_primary_rssi_dbm", "lte_primary_rssnr_db", "lte_primary_cqi",
+    "nr_first_pci", "nr_first_nci", "nr_first_arfcn", "nr_first_band*",
+    "nr_first_ss_rsrp_dbm", "nr_first_ss_rsrq_db", "nr_first_ss_sinr_db",
+]
+
+_SIGCAP_INT_SENTINEL = 2147483647
+
+
+def _write_sigcap(directory, filename, workload, rows=60, seed=11, tech="LTE",
+                  start="2026-09-12T16:11:00"):
+    """Write one synthetic SigCap session file.
+
+    ``workload`` is ``"iperf"`` or ``"http"``. iperf rows alternate download /
+    upload; every fifth radio row carries the CQI "unknown" sentinel and a couple
+    of rows are app-only (throughput but no serving-cell fix) to exercise routing.
+    """
+    rng = random.Random(seed)
+    path = directory / filename
+    base = pd.Timestamp(start)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_SIGCAP_COLUMNS)
+        writer.writeheader()
+        for i in range(rows):
+            row = {c: "NaN" for c in _SIGCAP_COLUMNS}
+            # ISO-8601 with a -0400 offset, exactly as SigCap stamps it
+            row["timestamp"] = (base + pd.Timedelta(seconds=5 * i)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3] + "-0400"
+            row["latitude"] = f"{41.6990 + (i % 20) * 0.0002:.7f}"
+            row["longitude"] = f"{-86.2400 + (i % 20) * 0.0002:.7f}"
+            row["operator"] = "T-Mobile SpaceX"
+            row["network_type*"] = tech
+            app_only = i in (3, 4)  # throughput logged but no serving-cell fix
+            if not app_only:
+                if tech == "LTE":
+                    row["lte_primary_pci"] = 100 + (i % 7)
+                    row["lte_primary_ci"] = 200000 + i
+                    row["lte_primary_earfcn"] = 8665
+                    row["lte_primary_band*"] = "25"
+                    row["lte_primary_rsrp_dbm"] = f"{rng.uniform(-125, -95):.0f}"
+                    row["lte_primary_rsrq_db"] = f"{rng.uniform(-18, -5):.0f}"
+                    row["lte_primary_rssi_dbm"] = f"{rng.uniform(-95, -70):.0f}"
+                    row["lte_primary_rssnr_db"] = f"{rng.uniform(-8, 15):.0f}"
+                    # Android reports Integer.MAX_VALUE when CQI is unavailable
+                    row["lte_primary_cqi"] = _SIGCAP_INT_SENTINEL if i % 5 else 9
+                else:
+                    row["nr_first_pci"] = 300 + (i % 5)
+                    row["nr_first_nci"] = 500000 + i
+                    row["nr_first_arfcn"] = 397970
+                    row["nr_first_band*"] = "25"
+                    row["nr_first_ss_rsrp_dbm"] = f"{rng.uniform(-120, -90):.0f}"
+                    row["nr_first_ss_rsrq_db"] = f"{rng.uniform(-16, -5):.0f}"
+                    row["nr_first_ss_sinr_db"] = f"{rng.uniform(-6, 18):.0f}"
+            # application-layer workload
+            if workload == "iperf":
+                row["iperf_tput_mean_mbps"] = f"{rng.uniform(0, 12):.3f}"
+                row["iperf_direction"] = "download" if i % 2 == 0 else "upload"
+                row["iperf_protocol"] = "TCP"
+            else:
+                row["http_tput_mean_mbps"] = f"{rng.uniform(0, 3):.3f}"
+            if i % 6 == 0:
+                row["ping_rtt_mean_ms"] = f"{rng.uniform(50, 400):.1f}"
+            writer.writerow(row)
+    return path
+
+
+@pytest.fixture(scope="session")
+def sigcap_dir(tmp_path_factory) -> Path:
+    directory = tmp_path_factory.mktemp("sigcap_csv")
+    _write_sigcap(
+        directory,
+        "2026_09_S12_1611_E12_1620Z-0400_outdoor_T-Mobile_dev_D2C_Sta_YC_910_iperf.debug_general.csv",
+        "iperf", rows=60, seed=1, start="2026-09-12T16:11:00",
+    )
+    _write_sigcap(
+        directory,
+        "2026_09_S12_1633_E12_1640Z-0400_outdoor_T-Mobile_dev_D2C_Sta_YC_1011_http .debug_general.csv",
+        "http", rows=50, seed=2, start="2026-09-12T16:33:00",
+    )
+    # August bracket-style name, plus a macOS "keep both" duplicate to de-dup
+    _write_sigcap(
+        directory,
+        "2026-08-14-14-23-06[D2C_Static_OpenField_SigcapiperfDL].csv",
+        "iperf", rows=40, seed=3, start="2026-08-14T14:23:00",
+    )
+    _write_sigcap(
+        directory,
+        "2026-08-14-14-23-06[D2C_Static_OpenField_SigcapiperfDL] 2.csv",
+        "iperf", rows=40, seed=3, start="2026-08-14T14:23:00",
+    )
+    return directory
+
+
+@pytest.fixture(scope="session")
+def sigcap_nr_dir(tmp_path_factory) -> Path:
+    directory = tmp_path_factory.mktemp("sigcap_nr_csv")
+    _write_sigcap(
+        directory,
+        "2026_09_S20_1000_E20_1010Z-0400_outdoor_T-Mobile_dev_D2C_Sta_YC_lab_iperf.debug_general.csv",
+        "iperf", rows=40, seed=5, tech="NR", start="2026-09-20T10:00:00",
+    )
+    return directory

@@ -46,6 +46,9 @@ METRICS: Dict[str, Metric] = {
         Metric("sinr", "SINR", "dB"),
         Metric("mcs", "MCS", "index"),
         Metric("throughput", "Throughput", "kbps"),
+        # Application-layer performance (SigCap iperf/http + ping):
+        Metric("app_tput", "App throughput", "Mbps"),
+        Metric("rtt", "Ping RTT", "ms", higher_is_better=False),
         # Derived (computed in the loader from throughput + allocated RBs + SCS):
         Metric("spec_eff", "Spectral efficiency", "bps/Hz"),
         Metric("tput_per_rb", "Throughput per RB", "bits/RB"),
@@ -69,6 +72,8 @@ METRIC_ORDER: List[str] = [
     "throughput",
     "spec_eff",
     "tput_per_rb",
+    "app_tput",
+    "rtt",
     "bler",
     "n_factor",
 ]
@@ -116,12 +121,15 @@ DIMENSION_COLUMNS: List[str] = [
     "source",
     "source_label",
     "provider",
+    "test_type",
 ]
 
 #: measurement sources the platform can pool.  "QP" is the Qualipoc phone
 #: (connected-mode drive/walk logs); "PRISM" is the PRISM SDR scanner, which
-#: sweeps every cell it can hear rather than logging one serving cell.
-PROVIDERS: List[str] = ["QP", "PRISM"]
+#: sweeps every cell it can hear rather than logging one serving cell; "SIGCAP"
+#: is the SigCap logger on the same phone, adding application-layer iperf/HTTP
+#: throughput and ping RTT alongside its serving-cell radio snapshot.
+PROVIDERS: List[str] = ["QP", "PRISM", "SIGCAP"]
 
 
 @dataclass(frozen=True)
@@ -150,6 +158,10 @@ class Dataset:
     rb_all_col: Optional[str] = None
     #: raw column giving the subcarrier spacing in kHz (NR); ``None`` -> 15 (LTE)
     scs_col: Optional[str] = None
+    #: extra raw CSV columns to read beyond dims/metrics - used to synthesise
+    #: values before normalisation (e.g. SigCap coalesces iperf/http into one
+    #: app-throughput column and reads the serving tech to route each row)
+    extra_cols: List[str] = field(default_factory=list)
 
     @property
     def freq_label(self) -> str:
@@ -167,6 +179,7 @@ class Dataset:
             cols.append(self.rb_all_col)
         if self.scs_col:
             cols.append(self.scs_col)
+        cols.extend(self.extra_cols)
         return list(dict.fromkeys(cols))
 
 
@@ -532,6 +545,134 @@ def prism_datasets_for(
 ) -> List[Dataset]:
     """PRISM exports that can supply ``metric`` for ``tech`` (and are present)."""
     out = [d for d in PRISM_DATASETS if metric in d.metrics]
+    if tech in ("LTE", "NR"):
+        out = [d for d in out if d.tech == tech]
+    if available is not None:
+        keep = set(available)
+        out = [d for d in out if d.key in keep]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# SigCap (Android logger) datasets
+# --------------------------------------------------------------------------- #
+#
+# SigCap runs on the *same phone* as the Qualipoc (QP) logs.  Each file is one
+# test session (one location + one workload) sampled every ~5 s, and it carries
+# two very different kinds of data at once:
+#
+#   * the phone's serving-cell radio snapshot - primary LTE cell (RSRP / RSRQ /
+#     RSSI / RSSNR / CQI, PCI, EARFCN, band) or the first NR cell - directly
+#     comparable to QP and PRISM; and
+#   * application-layer performance the other sources never measure - iperf and
+#     HTTP throughput (Mbps) and ping round-trip time (ms).
+#
+# So SigCap is a third measurement source.  Like PRISM it is read by globbing a
+# folder, but structurally it differs again: one wide file per session (not one
+# per metric family or per carrier), the collection/location/workload encoded
+# in the file name, and both LTE and NR columns side by side in every row.  The
+# loader routes each row to the LTE or NR dataset by its serving technology, so
+# a row's app-layer throughput rides with whichever radio was actually serving
+# and is never double-counted across the two.
+#
+# The two app columns (iperf / HTTP) are coalesced into one canonical
+# ``app_tput`` before normalisation - only one is populated per session - and
+# the per-row uplink/downlink direction comes from ``iperf_direction``.  CQI is
+# logged as Android's 2147483647 "unknown" sentinel and scrubbed to NaN.
+
+#: columns every SigCap export shares
+_SIGCAP_COMMON = {
+    "time": "timestamp",
+    "lat": "latitude",
+    "lon": "longitude",
+    "operator": "operator",
+}
+
+#: synthesised in the loader before normalisation (see loader._prep_sigcap)
+SIGCAP_APP_TPUT_COL = "__app_tput_mbps__"
+#: raw columns the loader needs for routing / synthesis beyond the mapped ones
+_SIGCAP_EXTRA = [
+    "network_type*",
+    "iperf_tput_mean_mbps",
+    "http_tput_mean_mbps",
+    "iperf_direction",
+    "lte_primary_rsrp_dbm",
+    "nr_first_ss_rsrp_dbm",
+]
+
+SIGCAP_DATASETS: List[Dataset] = [
+    Dataset(
+        key="sigcap_lte",
+        filename="SigCap session (*.csv)",
+        label="SigCap LTE",
+        tech="LTE",
+        link="DL",  # per-row link (DL/UL) is filled from iperf_direction
+        provider="SIGCAP",
+        is_glob=True,
+        dims={
+            **_SIGCAP_COMMON,
+            "pci": "lte_primary_pci",
+            "cell_id": "lte_primary_ci",
+            "freq": "lte_primary_earfcn",
+            "band": "lte_primary_band*",
+        },
+        metrics={
+            "rsrp": "lte_primary_rsrp_dbm",
+            "rsrq": "lte_primary_rsrq_db",
+            "rssi": "lte_primary_rssi_dbm",
+            "sinr": "lte_primary_rssnr_db",  # RSSNR, the LTE SNR measure
+            "cqi": "lte_primary_cqi",
+            "app_tput": SIGCAP_APP_TPUT_COL,
+            "rtt": "ping_rtt_mean_ms",
+            "n_factor": DERIVED_METRIC,
+        },
+        extra_cols=_SIGCAP_EXTRA,
+        note="SigCap on the phone - serving LTE cell plus app-layer iperf/HTTP "
+             "throughput and ping. 'SINR' here is the reported RSSNR.",
+    ),
+    Dataset(
+        key="sigcap_nr",
+        filename="SigCap session (*.csv)",
+        label="SigCap NR",
+        tech="NR",
+        link="DL",
+        provider="SIGCAP",
+        is_glob=True,
+        dims={
+            **_SIGCAP_COMMON,
+            "pci": "nr_first_pci",
+            "cell_id": "nr_first_nci",
+            "freq": "nr_first_arfcn",
+            "band": "nr_first_band*",
+        },
+        metrics={
+            "rsrp": "nr_first_ss_rsrp_dbm",
+            "rsrq": "nr_first_ss_rsrq_db",
+            "sinr": "nr_first_ss_sinr_db",
+            "app_tput": SIGCAP_APP_TPUT_COL,
+            "rtt": "ping_rtt_mean_ms",
+        },
+        extra_cols=_SIGCAP_EXTRA,
+        note="SigCap on the phone - serving NR cell plus app-layer iperf/HTTP "
+             "throughput and ping.",
+    ),
+]
+
+SIGCAP_DATASETS_BY_KEY: Dict[str, Dataset] = {d.key: d for d in SIGCAP_DATASETS}
+
+#: rebuilt to include SigCap - use this for label / metadata look-ups by key
+ALL_DATASETS_BY_KEY: Dict[str, Dataset] = {
+    **DATASETS_BY_KEY,
+    **PRISM_DATASETS_BY_KEY,
+    **SIGCAP_DATASETS_BY_KEY,
+}
+
+
+def sigcap_datasets_for(
+    metric: str, tech: Optional[str] = None, available: Optional[List[str]] = None
+) -> List[Dataset]:
+    """SigCap datasets that can supply ``metric`` for ``tech`` (and are present)."""
+    out = [d for d in SIGCAP_DATASETS if metric in d.metrics]
     if tech in ("LTE", "NR"):
         out = [d for d in out if d.tech == tech]
     if available is not None:

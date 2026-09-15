@@ -13,11 +13,13 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
-def _run(data_dir, timeout=120, prism_dir=None):
+def _run(data_dir, timeout=120, prism_dir=None, sigcap_dir=None):
     os.environ["QP_DATA_DIR"] = str(data_dir)
-    # Isolate from any real PRISM folder next to app.py: unless a test opts in,
-    # point PRISM at a directory with no CSVs so these QP assertions stay QP-only.
+    # Isolate from any real PRISM / SigCap folder next to app.py: unless a test
+    # opts in, point them at directories with no CSVs so these QP assertions stay
+    # QP-only.
     os.environ["PRISM_DATA_DIR"] = str(prism_dir) if prism_dir else "/no-prism-dir"
+    os.environ["SIGCAP_DATA_DIR"] = str(sigcap_dir) if sigcap_dir else "/no-sigcap-dir"
     app = AppTest.from_file(APP, default_timeout=timeout)
     app.run()
     return app
