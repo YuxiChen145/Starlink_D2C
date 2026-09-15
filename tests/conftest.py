@@ -26,7 +26,8 @@ METRIC_RANGES = {
     "cqi": (0.0, 15.0),
     "tx_power": (-10.0, 23.0),
     "pathloss": (80.0, 150.0),
-    "rb": (1.0, 100.0),  # RBs per subframe (maps to rb_all_col)
+    "rb": (1.0, 25.0),      # RBs per subframe, scheduled (rb_sched_col)
+    "rb_occ": (0.0, 14.0),  # RBs per subframe, all SF (rb_all_col)
 }
 
 COLLECTIONS = ["Collection_A", "Collection_B", "Collection_C"]

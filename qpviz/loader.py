@@ -32,7 +32,7 @@ DEFAULT_SIGCAP_DIR = os.environ.get("SIGCAP_DATA_DIR", "Sigcap CSV")
 DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 10
+CACHE_VERSION = 12
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
@@ -254,6 +254,12 @@ def normalise(
 
     _add_efficiency(out, raw, ds)
     _add_n_factor(out, ds)
+
+    # QP logs net throughput in kbps; store it in Mbps to match the SigCap
+    # app-layer throughput and to keep axes readable (kbps renders as "5k").
+    # Done AFTER _add_efficiency, which needs the kbps value for its bps maths.
+    if "throughput" in out.columns:
+        out["throughput"] = pd.to_numeric(out["throughput"], errors="coerce") / 1000.0
 
     # NR gives the gNB-Id and the full cell identity but no explicit sector;
     # the cell-local id is what corresponds to LTE's sector.

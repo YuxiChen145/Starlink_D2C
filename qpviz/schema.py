@@ -45,17 +45,22 @@ METRICS: Dict[str, Metric] = {
         Metric("rssi", "RSSI", "dBm"),
         Metric("sinr", "SINR", "dB"),
         Metric("mcs", "MCS", "index"),
-        Metric("throughput", "Throughput", "kbps"),
+        Metric("throughput", "Throughput", "Mbps"),
         # Application-layer performance (SigCap iperf/http + ping):
         Metric("app_tput", "App throughput", "Mbps"),
         Metric("rtt", "Ping RTT", "ms", higher_is_better=False),
         # Derived (computed in the loader from throughput + allocated RBs + SCS):
         Metric("spec_eff", "Spectral efficiency", "bps/Hz"),
         Metric("tput_per_rb", "Throughput per RB", "bits/RB"),
-        # PHY resource allocation: RBs averaged over all sub-frames/slots (the
-        # rb_all_col each per-carrier export reports). A shared cell splitting
-        # its RBs between two UEs should show fewer RBs per phone.
-        Metric("rb", "RBs per subframe", "RB"),
+        # PHY resource allocation. Two readings from the per-carrier exports:
+        #   rb      = Avg RBs *per SF* - the grant size averaged over SCHEDULED
+        #             sub-frames/slots only (reaches the carrier's RB ceiling;
+        #             this is the value shown in the CSV as "Avg RBs per SF").
+        #   rb_occ  = Avg RBs *all SF* - averaged over ALL sub-frames incl. idle,
+        #             i.e. time-averaged occupancy (much lower).
+        # A shared cell splitting its RBs between two UEs should show fewer RBs.
+        Metric("rb", "RBs per subframe (scheduled)", "RB"),
+        Metric("rb_occ", "RBs per subframe (all SF)", "RB"),
         # Derived from the RSRQ = N·RSRP/RSSI identity: N should be the RSSI
         # measurement bandwidth in RBs (25/50/100), but empirically it drifts.
         Metric("n_factor", "RSRQ N-factor", "RB"),
@@ -77,6 +82,7 @@ METRIC_ORDER: List[str] = [
     "spec_eff",
     "tput_per_rb",
     "rb",
+    "rb_occ",
     "app_tput",
     "rtt",
     "bler",
@@ -160,8 +166,12 @@ class Dataset:
     is_glob: bool = False
     #: raw column giving the RBs allocated averaged over *all* slots/subframes
     #: (incl. idle) - the denominator for the derived spectral-efficiency and
-    #: throughput-per-RB metrics. ``None`` when the export can't supply them.
+    #: throughput-per-RB metrics, and the ``rb_occ`` metric. ``None`` when the
+    #: export can't supply them.
     rb_all_col: Optional[str] = None
+    #: raw column giving the RBs averaged over *scheduled* slots/subframes only
+    #: (the grant size) - the ``rb`` metric. ``None`` when unavailable.
+    rb_sched_col: Optional[str] = None
     #: raw column giving the subcarrier spacing in kHz (NR); ``None`` -> 15 (LTE)
     scs_col: Optional[str] = None
     #: extra raw CSV columns to read beyond dims/metrics - used to synthesise
@@ -178,11 +188,14 @@ class Dataset:
         return "lat" in self.dims and "lon" in self.dims
 
     def __post_init__(self):
-        # A dataset that reports an all-subframe RB count exposes it as the
-        # canonical ``rb`` metric (frozen dataclass: mutate the dict in place,
-        # which is allowed - we are not rebinding the attribute).
-        if self.rb_all_col and "rb" not in self.metrics:
-            self.metrics["rb"] = self.rb_all_col
+        # Expose the RB counts a dataset reports as canonical metrics (frozen
+        # dataclass: mutating the dict is allowed - we are not rebinding it).
+        # ``rb`` is the scheduled-subframe grant (matches the CSV "per SF"),
+        # ``rb_occ`` the all-subframe occupancy.
+        if self.rb_sched_col and "rb" not in self.metrics:
+            self.metrics["rb"] = self.rb_sched_col
+        if self.rb_all_col and "rb_occ" not in self.metrics:
+            self.metrics["rb_occ"] = self.rb_all_col
 
     def raw_columns(self) -> List[str]:
         cols = list(self.dims.values()) + [
@@ -190,6 +203,8 @@ class Dataset:
         ]
         if self.rb_all_col:
             cols.append(self.rb_all_col)
+        if self.rb_sched_col:
+            cols.append(self.rb_sched_col)
         if self.scs_col:
             cols.append(self.scs_col)
         cols.extend(self.extra_cols)
@@ -294,6 +309,7 @@ DATASETS: List[Dataset] = [
             "bler": "BLER",
         },
         rb_all_col="PDSCH Avg RBs all SF",  # LTE SCS is 15 kHz -> scs_col=None
+        rb_sched_col="PDSCH Avg RBs per SF",
     ),
     Dataset(
         key="lte_pdsch_agg",
@@ -338,6 +354,7 @@ DATASETS: List[Dataset] = [
             "pathloss": "DL Pathloss",
         },
         rb_all_col="PUSCH Avg RBs all SF",
+        rb_sched_col="PUSCH Avg RBs per SF",
     ),
     Dataset(
         key="lte_pucch",
@@ -380,6 +397,7 @@ DATASETS: List[Dataset] = [
             "bler": "PDSCH BLER",
         },
         rb_all_col="PDSCH Avg RBs all Slots",
+        rb_sched_col="PDSCH Avg RBs per Slot",
         scs_col="DL Subcarrier Spacing",
     ),
     Dataset(
@@ -426,6 +444,7 @@ DATASETS: List[Dataset] = [
             "pathloss": "DL Pathloss",
         },
         rb_all_col="PUSCH Avg RBs all Slots",
+        rb_sched_col="PUSCH Avg RBs per Slot",
         scs_col="UL Subcarrier Spacing",
     ),
 ]

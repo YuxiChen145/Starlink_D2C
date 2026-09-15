@@ -233,8 +233,10 @@ Band, EARFCN/NR-ARFCN, PCI (union or intersection across collections), a
 you can isolate a few minutes at a spot).
 
 **Metrics** — RSRP, RSRQ, RSSI, SINR, MCS, Throughput, **Spectral efficiency
-(bps/Hz)**, **Throughput per RB (bits/RB)**, **RBs per subframe** (the PHY
-resource-block allocation), BLER, the **RSRQ N-factor**
+(bps/Hz)**, **Throughput per RB (bits/RB)**, **RBs per subframe** (two readings:
+*scheduled* — the grant size, `Avg RBs per SF`, reaching the carrier's RB ceiling;
+and *all SF* — time-averaged occupancy including idle sub-frames), BLER, the
+**RSRQ N-factor**
 (`N = RSRQ·RSSI/RSRP`), and — from SigCap — **App throughput (Mbps)** (iperf and
 HTTP pooled) and **Ping RTT (ms)**, wherever the selected exports carry them.
 

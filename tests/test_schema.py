@@ -92,3 +92,24 @@ def test_datasets_for_honours_what_is_on_disk():
     resolved = schema.datasets_for("rsrp", available=["nr_radio", "lte_pdsch_pc"])
     assert [d.key for d in resolved] == ["nr_radio"]
     assert schema.datasets_for("rsrp", available=[]) == []
+
+
+def test_rb_metrics_map_scheduled_vs_all_sf():
+    """`rb` is the scheduled-subframe grant (Avg RBs per SF), `rb_occ` the
+    all-subframe occupancy (Avg RBs all SF) - both exposed on the per-carrier
+    exports, and never crossed."""
+    from qpviz.schema import METRICS, DATASETS_BY_KEY
+
+    assert METRICS["rb"].label == "RBs per subframe (scheduled)"
+    assert METRICS["rb_occ"].label == "RBs per subframe (all SF)"
+
+    checks = {
+        "lte_pdsch_pc": ("PDSCH Avg RBs per SF", "PDSCH Avg RBs all SF"),
+        "lte_pusch_pc": ("PUSCH Avg RBs per SF", "PUSCH Avg RBs all SF"),
+        "nr_pdsch_pc": ("PDSCH Avg RBs per Slot", "PDSCH Avg RBs all Slots"),
+        "nr_pusch_pc": ("PUSCH Avg RBs per Slot", "PUSCH Avg RBs all Slots"),
+    }
+    for key, (sched, allsf) in checks.items():
+        d = DATASETS_BY_KEY[key]
+        assert d.metrics["rb"] == sched
+        assert d.metrics["rb_occ"] == allsf

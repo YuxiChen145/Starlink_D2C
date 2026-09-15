@@ -100,6 +100,44 @@ def _mode(series: pd.Series):
     return m.iloc[0] if not m.empty else pd.NA
 
 
+def _bin_seconds(bin: str) -> float:
+    try:
+        return float(pd.Timedelta(bin).total_seconds())
+    except Exception:
+        return 5.0
+
+
+def estimate_cadence(frame: pd.DataFrame) -> float:
+    """Median inter-sample gap (seconds) of the *coarsest* device.
+
+    Concurrency and shared-PCI have to be decided on a grid at least this wide,
+    or two phones that log ~every 5 s (offset from each other) would fall in
+    different fine bins and never look concurrent. Clamped to [1, 60] s.
+    """
+    if frame is None or frame.empty or "time" not in frame.columns \
+            or "device" not in frame.columns:
+        return 5.0
+    gaps = []
+    for _dev, g in frame.dropna(subset=["device"]).groupby("device"):
+        t = pd.to_datetime(g["time"], errors="coerce").dropna().sort_values()
+        if len(t) >= 2:
+            d = t.diff().dropna().dt.total_seconds()
+            d = d[d > 0]
+            if not d.empty:
+                gaps.append(float(d.median()))
+    if not gaps:
+        return 5.0
+    return float(min(60.0, max(1.0, max(gaps))))
+
+
+def detection_bin(frame: pd.DataFrame, plot_bin: str) -> str:
+    """The bin used to DETECT concurrency / shared-PCI, independent of the bin
+    the lines are plotted at: at least the sample cadence, never finer than the
+    plot bin. Returned as an integer-second freq string."""
+    secs = max(_bin_seconds(plot_bin), estimate_cadence(frame))
+    return f"{int(round(secs))}s"
+
+
 def bin_devices(
     frame: pd.DataFrame,
     bin: str = "5s",
@@ -359,7 +397,8 @@ def throughput_drivers(
 
 
 def overlay_by_condition(
-    binned: pd.DataFrame, overlay: pd.DataFrame, col: str
+    binned: pd.DataFrame, overlay: pd.DataFrame, col: str,
+    bin: Optional[str] = None,
 ) -> pd.DataFrame:
     """A per-bin overlay signal (e.g. QP ``rb_dl``) averaged under each timeline
     condition: one phone vs two active, and - among concurrent bins - same PCI
@@ -383,6 +422,10 @@ def overlay_by_condition(
     o = overlay[["time", col]].dropna()
     if o.empty:
         return empty
+    if bin is not None:
+        # align the (plot-binned) overlay onto the detection grid the flags use
+        o = o.assign(time=pd.to_datetime(o["time"], errors="coerce").dt.floor(bin))
+        o = o.dropna(subset=["time"]).groupby("time", as_index=False)[col].mean()
     act = _active_by_bin(binned)[["time", "n_active"]]
     sp = _shared_pci_by_bin(binned)[["time", "shared", "n_active"]]
 
@@ -428,7 +471,9 @@ class TimelineResult:
     by_concurrency: pd.DataFrame
     by_shared_pci: pd.DataFrame
     drivers: pd.DataFrame
+    binned_detect: Optional[pd.DataFrame] = None
     bin: str = "5s"
+    detect_bin: str = "5s"
     max_active: int = 0
     n_shared_bins: int = 0
 
@@ -441,19 +486,25 @@ def build(
     frame: pd.DataFrame, bin: str = "5s", agg: str = "mean",
     metric: str = "app_tput",
 ) -> TimelineResult:
-    """Bin the frame once and derive every timeline product from it."""
+    """Bin the frame for plotting at ``bin``; DETECT concurrency / shared-PCI
+    (and compute the comparison tables) on a separate, coarser-if-needed grid so
+    they do not vanish when the user picks a bin finer than the sample cadence."""
     binned = bin_devices(frame, bin=bin, agg=agg)
-    act = _active_by_bin(binned)
+    det_bin = detection_bin(frame, bin)
+    det = binned if det_bin == bin else bin_devices(frame, bin=det_bin, agg=agg)
+    act = _active_by_bin(det)
     max_active = int(act["n_active"].max()) if not act.empty else 0
-    shared = shared_pci_segments(binned)
-    n_shared_bins = int(_shared_pci_by_bin(binned)["shared"].sum()) if not binned.empty else 0
+    shared = shared_pci_segments(det)
+    n_shared_bins = int(_shared_pci_by_bin(det)["shared"].sum()) if not det.empty else 0
     return TimelineResult(
         binned=binned,
         devices=device_order(binned),
-        concurrency=concurrency_segments(binned),
+        concurrency=concurrency_segments(det),
         shared_pci=shared,
-        by_concurrency=compare_by_concurrency(binned, metric),
-        by_shared_pci=compare_by_shared_pci(binned, metric),
-        drivers=throughput_drivers(binned, metric),
-        bin=bin, max_active=max_active, n_shared_bins=n_shared_bins,
+        by_concurrency=compare_by_concurrency(det, metric),
+        by_shared_pci=compare_by_shared_pci(det, metric),
+        drivers=throughput_drivers(det, metric),
+        binned_detect=det,
+        bin=bin, detect_bin=det_bin,
+        max_active=max_active, n_shared_bins=n_shared_bins,
     )

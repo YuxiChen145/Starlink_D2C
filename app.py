@@ -2038,8 +2038,8 @@ if tab_timeline is not None:
 
                                     recs.append({
                                         "time": b, "slot": int(slot),
-                                        "phy_tput_dl": _m(_tp, gl.eq("DL"), 1 / 1000.0),
-                                        "phy_tput_ul": _m(_tp, gl.eq("UL"), 1 / 1000.0),
+                                        "phy_tput_dl": _m(_tp, gl.eq("DL")),
+                                        "phy_tput_ul": _m(_tp, gl.eq("UL")),
                                         "rsrp": _m(_rs),
                                         "rb_dl": _m(_rb, gl.eq("DL")),
                                         "rb_ul": _m(_rb, gl.eq("UL")),
@@ -2066,6 +2066,14 @@ if tab_timeline is not None:
                     "phones active at once; orange bands = the concurrent phones "
                     "shared one serving PCI."
                 )
+                if res.detect_bin != bin_choice:
+                    st.caption(
+                        f"Phones sample about every {res.detect_bin}, so the grey "
+                        f"/ orange bands (and the comparison tables) are detected "
+                        f"at {res.detect_bin} even though the lines are drawn at "
+                        f"{bin_choice} — otherwise the two phones rarely land in "
+                        "the same fine bin and the shading would vanish."
+                    )
                 _qp_scope = st.session_state.get("_tl_qp_scope") or []
                 if overlay_on and _qp_scope:
                     st.caption(
@@ -2144,17 +2152,21 @@ if tab_timeline is not None:
                 if _rb_present:
                     st.markdown("#### QP RBs / subframe — sanity check")
                     st.caption(
-                        "QP PHY resource blocks per phone under each condition. If "
-                        "a shared cell splits its RBs between two UEs, each phone "
-                        "should get **fewer** RBs when two phones are active and "
-                        "when they share a PCI (a negative Δ)."
+                        "QP PHY resource blocks per phone (scheduled sub-frames — "
+                        "*Avg RBs per SF*, the grant size, up to the carrier's "
+                        "25-RB ceiling on 5 MHz) under each condition. If a shared "
+                        "cell splits its RBs between two UEs, each phone should get "
+                        "**fewer** RBs when two phones are active and when they "
+                        "share a PCI (a negative Δ). The *all-SF* occupancy is the "
+                        "separate `RBs per subframe (all SF)` metric."
                     )
 
                     def _cell(mean, n):
                         return f"{mean:.1f} RB (n={int(n)})" if pd.notna(mean) else "—"
 
                     def _cond_rows(phone, series_df, col, lbl):
-                        cond = timeline.overlay_by_condition(res.binned, series_df, col)
+                        cond = timeline.overlay_by_condition(
+                            res.binned_detect, series_df, col, bin=res.detect_bin)
                         out = []
                         for _, r in cond.iterrows():
                             out.append({

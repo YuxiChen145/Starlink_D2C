@@ -274,3 +274,27 @@ def test_device_slots_maps_numeric_phone_tokens():
                        "twoPhone2 iperfDL", "twoPhone2 iperfUL"],
     })
     assert timeline.device_slots(frame) == {"A": 1, "B": 2}
+
+
+# --------------------------------------------------------------------------- #
+# Detection is decoupled from the plot bin (shading survives a fine bin)
+# --------------------------------------------------------------------------- #
+
+
+def test_shading_survives_a_bin_finer_than_the_cadence(multi):
+    # the multi fixture logs ~every 5 s; a 1 s plot bin must NOT collapse the
+    # concurrency / shared-PCI detection
+    coarse = timeline.build(multi, bin="5s")
+    fine = timeline.build(multi, bin="1s")
+    assert fine.detect_bin != "1s"          # detection fell back to the cadence
+    assert fine.max_active == coarse.max_active == 2
+    assert fine.n_shared_bins == coarse.n_shared_bins
+    assert len(fine.shared_pci) == len(coarse.shared_pci)
+    # the plotted frame is still at the requested fine resolution
+    gaps = fine.binned["time"].sort_values().diff().dropna().dt.total_seconds()
+    assert gaps.min() < 5.0
+
+
+def test_detection_bin_matches_plot_bin_when_coarser(multi):
+    r = timeline.build(multi, bin="30s")
+    assert r.detect_bin == "30s"            # coarser than cadence -> use plot bin
