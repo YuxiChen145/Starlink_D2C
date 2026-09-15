@@ -244,3 +244,33 @@ def test_qp_overlay_scopes_to_matching_collection(fixture_dir, sigcap_multi_dir,
     # scope is empty and the overlay falls back to time-only without error
     assert not app.exception, [str(e.value) for e in app.exception]
     assert "_tl_qp_scope" in app.session_state
+
+
+# --------------------------------------------------------------------------- #
+# Phone-slot mapping (aligns QP and SigCap by the collection token)
+# --------------------------------------------------------------------------- #
+
+
+def test_phone_slot_extracts_the_number():
+    assert timeline.phone_slot("twoPhone1 iperfDL") == 1
+    assert timeline.phone_slot("D2C_OpenField_Static_twoPhone2_iperfDL") == 2
+    assert timeline.phone_slot("onephone1 iperf") == 1
+    assert timeline.phone_slot("910 iperf") is None
+    assert timeline.phone_slot(None) is None
+
+
+def test_device_slots_maps_each_phone(multi):
+    slots = timeline.device_slots(multi)
+    # the multi fixture: device A on onephoneA/twoPhoneA -> slot ?, but the
+    # tokens are letters not digits, so no numeric slot -> empty is acceptable;
+    # assert it never raises and returns a dict
+    assert isinstance(slots, dict)
+
+
+def test_device_slots_maps_numeric_phone_tokens():
+    frame = pd.DataFrame({
+        "device": ["A", "A", "B", "B"],
+        "collection": ["twoPhone1 iperfDL", "twoPhone1 iperfUL",
+                       "twoPhone2 iperfDL", "twoPhone2 iperfUL"],
+    })
+    assert timeline.device_slots(frame) == {"A": 1, "B": 2}

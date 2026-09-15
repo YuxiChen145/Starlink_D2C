@@ -40,12 +40,50 @@ __all__ = [
     "compare_by_shared_pci",
     "throughput_drivers",
     "overlay_by_condition",
+    "phone_slot",
+    "device_slots",
     "TimelineResult",
     "build",
 ]
 
 # Aggregations offered to the user; applied to RSRP and throughput within a bin.
 AGGS = ("mean", "median", "max", "min")
+
+
+import re as _re
+
+
+def phone_slot(name) -> Optional[int]:
+    """The phone number encoded in a collection / session name.
+
+    Both sources tag the experiment phone in the name - SigCap ``twoPhone1``,
+    QP ``D2C_OpenField_Static_twoPhone1_iperfDL`` - so the trailing digit after
+    ``phone`` is the shared key that lets QP and SigCap line up by phone even
+    though their device IDs (uuid vs serial) are unrelated. ``None`` when the
+    name carries no ``phoneN`` token.
+    """
+    if name is None:
+        return None
+    m = _re.search(r"phone\s*_?\s*(\d+)", str(name), _re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def device_slots(frame: pd.DataFrame) -> Dict[str, int]:
+    """Map each SigCap ``device`` to its phone slot via the collection token.
+
+    A phone only ever plays one slot in the campaign, so the mapping is taken
+    from the most common ``phoneN`` token across that device's rows.
+    """
+    if frame is None or frame.empty or "device" not in frame.columns \
+            or "collection" not in frame.columns:
+        return {}
+    out: Dict[str, int] = {}
+    for dev, g in frame.dropna(subset=["device"]).groupby("device"):
+        slots = [phone_slot(c) for c in g["collection"].dropna().unique()]
+        slots = [x for x in slots if x is not None]
+        if slots:
+            out[str(dev)] = max(set(slots), key=slots.count)
+    return out
 
 
 def _agg_fn(agg: str):

@@ -1421,10 +1421,13 @@ def timeline_multi_figure(
     concurrency: Sequence[dict] = (),
     shared_pci: Sequence[dict] = (),
     qp_overlay: Optional[pd.DataFrame] = None,
+    qp_rb: Optional[pd.DataFrame] = None,
+    device_slots: Optional[dict] = None,
+    slot_labels: Optional[dict] = None,
     mode: str = "light",
     height: Optional[int] = None,
 ) -> "go.Figure":
-    """Shared wall-clock timeline: throughput, RSRP and serving PCI per phone.
+    """Shared wall-clock timeline: throughput, RSRP, RBs and serving PCI per phone.
 
     ``binned`` is :func:`qpviz.timeline.bin_devices` output. Downlink and uplink
     throughput get their own panel each - one solid line per phone, colour kept
@@ -1432,26 +1435,37 @@ def timeline_multi_figure(
     Bins where two phones are active are shaded grey, and bins where they share a
     serving PCI are shaded in an accent colour on top.
 
-    ``qp_overlay`` (optional) adds QP PHY-layer traces as dotted lines: downlink
-    / uplink throughput on the throughput panels, RSRP on the RSRP panel, and -
-    when the QP log carries RB counts (``rb_dl`` / ``rb_ul``) - a dedicated
-    **RBs / subframe** panel. That RB panel is the sanity check: under the grey
-    (two-phone) and orange (shared-PCI) bands, a cell splitting its resource
-    blocks between two UEs should hand each phone fewer RBs.
+    Phones are coloured by **phone slot** (``device_slots`` maps each SigCap
+    device to its slot) so a phone keeps one colour across SigCap *and* QP. The
+    QP overlay (dotted) adds DL/UL PHY throughput and RSRP; ``qp_rb`` (long:
+    ``time`` / ``slot`` / ``rb_dl`` / ``rb_ul``) draws the **RBs / subframe**
+    panel with one line per phone - the sanity check that a shared cell hands
+    each phone fewer resource blocks.
     """
     from plotly.subplots import make_subplots
 
     chrome = CHROME.get(mode, CHROME["light"])
+    device_slots = device_slots or {}
+    slot_labels = slot_labels or {}
     ov = qp_overlay if (qp_overlay is not None and not qp_overlay.empty) else None
-    has_rb = ov is not None and (
+    rb_pf = qp_rb if (qp_rb is not None and not qp_rb.empty) else None
+    has_rb_pooled = ov is not None and (
         ("rb_dl" in ov.columns and ov["rb_dl"].notna().any())
         or ("rb_ul" in ov.columns and ov["rb_ul"].notna().any())
     )
+    has_rb = rb_pf is not None or has_rb_pooled
+
+    def _slot_color(slot):
+        return series_style(int(slot) - 1, mode)[0]
+
+    def _dev_color(i, dev):
+        slot = device_slots.get(str(dev))
+        return _slot_color(slot) if slot else series_style(i, mode)[0]
 
     # Build the row layout dynamically so the RB panel only appears with data.
     plan = [("dl", "Downlink throughput (Mbps)"), ("ul", "Uplink throughput (Mbps)")]
     if has_rb:
-        plan.append(("rb", "RBs / subframe (QP PHY)"))
+        plan.append(("rb", "RBs / subframe (QP PHY, per phone)"))
     plan += [("rsrp", "RSRP (dBm)"), ("pci", "Serving PCI")]
     row_of = {name: i + 1 for i, (name, _) in enumerate(plan)}
     n = len(plan)
@@ -1467,12 +1481,7 @@ def timeline_multi_figure(
     )
     devices = list(devices)
 
-    def _dev_color(i):
-        return series_style(i, mode)[0]
-
     # --- shaded bands (drawn first, behind the traces) ---------------------- #
-    # add_vrect misbehaves with datetime x on subplots in plotly 7, so draw the
-    # bands as full-height rects (yref=paper) tied to the shared x-axis instead.
     def _band(x0, x1, color, opacity):
         fig.add_shape(type="rect", xref="x", yref="paper",
                       x0=x0, x1=x1, y0=0, y1=1, fillcolor=color,
@@ -1488,7 +1497,7 @@ def timeline_multi_figure(
     for seg in shared_pci:
         _band(seg["start"], seg["end"], accent, 0.18)
 
-    # --- per-device traces -------------------------------------------------- #
+    # --- per-device SigCap traces ------------------------------------------ #
     panels = [
         (row_of["dl"], "app_tput_dl", "Mbps"),
         (row_of["ul"], "app_tput_ul", "Mbps"),
@@ -1498,7 +1507,7 @@ def timeline_multi_figure(
         g = binned[binned["device"] == dev].sort_values("time")
         if g.empty:
             continue
-        color = _dev_color(i)
+        color = _dev_color(i, dev)
         for row, col, unit in panels:
             fig.add_trace(go.Scatter(
                 x=g["time"], y=g[col], name=str(dev),
@@ -1515,28 +1524,49 @@ def timeline_multi_figure(
             hovertemplate=f"<b>{dev}</b> PCI %{{y:.0f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
         ), row=row_of["pci"], col=1)
 
-    # --- optional QP PHY overlay (dotted) ---------------------------------- #
+    # --- QP PHY throughput / RSRP overlay (dotted grey context) ------------ #
     if ov is not None:
         q = ov.sort_values("time")
         qcolor = chrome["text_secondary"]
-        c_dl, _ = series_style(0, mode)
-        c_ul, _ = series_style(1, mode)
 
         def _ov(col, row, name, color, unit, show=True):
             if col in q.columns and q[col].notna().any():
                 fig.add_trace(go.Scatter(
                     x=q["time"], y=q[col], name=name, mode="lines",
-                    line=dict(color=color, width=1.6, dash="dot"),
-                    showlegend=show,
+                    line=dict(color=color, width=1.5, dash="dot"), showlegend=show,
                     hovertemplate=f"{name}: %{{y:.2f}} {unit}<br>%{{x|%H:%M:%S}}<extra></extra>",
                 ), row=row, col=1)
 
         _ov("phy_tput_dl", row_of["dl"], "QP PHY DL", qcolor, "Mbps")
         _ov("phy_tput_ul", row_of["ul"], "QP PHY UL", qcolor, "Mbps")
         _ov("rsrp", row_of["rsrp"], "QP RSRP", qcolor, "dBm", show=False)
-        if has_rb:
-            _ov("rb_dl", row_of["rb"], "QP RBs DL", c_dl, "RB")
-            _ov("rb_ul", row_of["rb"], "QP RBs UL", c_ul, "RB")
+
+    # --- RBs / subframe panel, one line per phone -------------------------- #
+    if has_rb:
+        rb_row = row_of["rb"]
+        if rb_pf is not None:
+            for slot, g in rb_pf.sort_values("time").groupby("slot"):
+                color = _slot_color(slot)
+                phone = slot_labels.get(int(slot), f"phone{int(slot)}")
+                for col, dash, dlabel in (("rb_dl", "dot", "DL"),
+                                          ("rb_ul", "longdash", "UL")):
+                    if col in g.columns and g[col].notna().any():
+                        fig.add_trace(go.Scatter(
+                            x=g["time"], y=g[col], name=f"QP RB · {phone} · {dlabel}",
+                            mode="lines", line=dict(color=color, width=1.7, dash=dash),
+                            hovertemplate=f"<b>{phone}</b> {dlabel} RB %{{y:.1f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
+                        ), row=rb_row, col=1)
+        elif ov is not None:
+            c_dl, _ = series_style(0, mode)
+            c_ul, _ = series_style(1, mode)
+            for col, color, name in (("rb_dl", c_dl, "QP RBs DL"),
+                                     ("rb_ul", c_ul, "QP RBs UL")):
+                if col in ov.columns and ov[col].notna().any():
+                    fig.add_trace(go.Scatter(
+                        x=ov["time"], y=ov[col], name=name, mode="lines",
+                        line=dict(color=color, width=1.6, dash="dot"),
+                        hovertemplate=f"{name}: %{{y:.1f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
+                    ), row=rb_row, col=1)
 
     fig.update_layout(
         height=height, template=None,
@@ -1555,7 +1585,6 @@ def timeline_multi_figure(
         fig.update_yaxes(gridcolor=chrome["grid"], zeroline=False,
                          linecolor=chrome["axis"],
                          tickfont=dict(color=chrome["muted"], size=11), row=r, col=1)
-    # keep the two throughput panels on one y-scale so DL and UL compare by eye
     tput_vals = pd.concat([binned["app_tput_dl"], binned["app_tput_ul"]])
     tmax = pd.to_numeric(tput_vals, errors="coerce").max()
     if pd.notna(tmax) and tmax > 0:

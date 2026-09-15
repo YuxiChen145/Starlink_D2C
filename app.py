@@ -1968,6 +1968,11 @@ if tab_timeline is not None:
                 # line up with the two throughput panels; RBs are the sanity
                 # check — a shared cell should hand each phone fewer RBs.
                 overlay = None
+                qp_rb = None          # per-phone QP RBs (long: time, slot, rb_dl, rb_ul)
+                sig_slots = timeline.device_slots(tframe)   # SigCap device -> phone slot
+                slot_labels = {}      # phone slot -> a SigCap device label (legend)
+                for _dev, _sl in sig_slots.items():
+                    slot_labels.setdefault(_sl, _dev)
                 if overlay_on and qp_present:
                     qp_keys_tech = [
                         k for k in qp_present
@@ -2026,8 +2031,6 @@ if tab_timeline is not None:
                                 ("phy_tput_dl", _binned(dl, "throughput", 1 / 1000.0)),
                                 ("phy_tput_ul", _binned(ul, "throughput", 1 / 1000.0)),
                                 ("rsrp", _binned(None, "rsrp")),
-                                ("rb_dl", _binned(dl, "rb")),
-                                ("rb_ul", _binned(ul, "rb")),
                             ):
                                 if series is not None:
                                     parts[name] = series
@@ -2036,7 +2039,45 @@ if tab_timeline is not None:
                                     pd.concat(parts, axis=1).reset_index()
                                     .sort_values("time")
                                 )
-                if overlay_on and (overlay is None or overlay.empty):
+
+                            # Per-phone RBs: QP recorded both phones (one
+                            # collection each), so split RBs by the phone slot
+                            # in the collection name, not by direction. Falls
+                            # back to a pooled rb_dl/rb_ul on `overlay` when no
+                            # phoneN token is present.
+                            if "rb" in qf.columns and qf["rb"].notna().any():
+                                qs = qf.copy()
+                                qs["slot"] = qs["collection"].map(timeline.phone_slot)
+                                qs = qs.dropna(subset=["slot"])
+                                if not qs.empty:
+                                    qs["slot"] = qs["slot"].astype(int)
+                                    ql = qs["link"].astype("string")
+                                    qs["_rb"] = pd.to_numeric(qs["rb"], errors="coerce")
+                                    recs = []
+                                    for (b, slot), g in qs.groupby(["_b", "slot"]):
+                                        gl = ql.loc[g.index]
+                                        rb = g["_rb"]
+                                        recs.append({
+                                            "time": b, "slot": int(slot),
+                                            "rb_dl": rb[gl.eq("DL")].mean() if gl.eq("DL").any() else float("nan"),
+                                            "rb_ul": rb[gl.eq("UL")].mean() if gl.eq("UL").any() else float("nan"),
+                                        })
+                                    qp_rb = pd.DataFrame(recs).sort_values("time")
+                                else:
+                                    # no phoneN token -> pooled RBs onto overlay
+                                    pooled = {}
+                                    for nm, sr in (("rb_dl", _binned(dl, "rb")),
+                                                   ("rb_ul", _binned(ul, "rb"))):
+                                        if sr is not None:
+                                            pooled[nm] = sr
+                                    if pooled:
+                                        rbf = pd.concat(pooled, axis=1).reset_index()
+                                        overlay = (rbf if overlay is None
+                                                   else overlay.merge(rbf, on="time", how="outer")
+                                                   ).sort_values("time")
+                if overlay_on and (overlay is None or overlay.empty) and (
+                    qp_rb is None or qp_rb.empty
+                ):
                     st.caption(
                         "No QP PHY samples overlap this window — the overlay is "
                         "empty (QP wasn't recording during these sessions)."
@@ -2045,7 +2086,8 @@ if tab_timeline is not None:
                 st.plotly_chart(
                     charts.timeline_multi_figure(
                         res.binned, res.devices, res.concurrency,
-                        res.shared_pci, qp_overlay=overlay, mode=MODE,
+                        res.shared_pci, qp_overlay=overlay, qp_rb=qp_rb,
+                        device_slots=sig_slots, slot_labels=slot_labels, mode=MODE,
                     ),
                     width="stretch",
                 )
@@ -2125,38 +2167,55 @@ if tab_timeline is not None:
                         hide_index=True, width="stretch",
                     )
 
-                # ---- QP RB sanity check ----------------------------------- #
-                if overlay is not None and any(
-                    c in overlay.columns and overlay[c].notna().any()
-                    for c in ("rb_dl", "rb_ul")
-                ):
+                # ---- QP RB sanity check (per phone) ----------------------- #
+                _rb_present = (qp_rb is not None and not qp_rb.empty) or (
+                    overlay is not None and any(
+                        c in overlay.columns and overlay[c].notna().any()
+                        for c in ("rb_dl", "rb_ul")
+                    )
+                )
+                if _rb_present:
                     st.markdown("#### QP RBs / subframe — sanity check")
                     st.caption(
-                        "QP PHY resource blocks under each condition. If a shared "
-                        "cell splits its RBs between two UEs, the QP phone should "
-                        "get **fewer** RBs when two phones are active and when they "
-                        "share a PCI (a negative Δ)."
+                        "QP PHY resource blocks per phone under each condition. If "
+                        "a shared cell splits its RBs between two UEs, each phone "
+                        "should get **fewer** RBs when two phones are active and "
+                        "when they share a PCI (a negative Δ)."
                     )
+
                     def _cell(mean, n):
                         return f"{mean:.1f} RB (n={int(n)})" if pd.notna(mean) else "—"
 
-                    rb_rows = []
-                    for col, lbl in (("rb_dl", "DL"), ("rb_ul", "UL")):
-                        if col not in overlay.columns or not overlay[col].notna().any():
-                            continue
-                        cond = timeline.overlay_by_condition(res.binned, overlay, col)
+                    def _cond_rows(phone, series_df, col, lbl):
+                        cond = timeline.overlay_by_condition(res.binned, series_df, col)
+                        out = []
                         for _, r in cond.iterrows():
-                            rb_rows.append({
-                                "RBs": lbl,
+                            out.append({
+                                "Phone": phone, "RBs": lbl,
                                 "Comparison": f"{r['a_label']} vs {r['b_label']}",
                                 "Higher load": _cell(r["a_mean"], r["a_n"]),
                                 "Baseline": _cell(r["b_mean"], r["b_n"]),
                                 "Δ": f"{r['delta_pct']:+.0f}%" if pd.notna(r["delta_pct"]) else "—",
                             })
+                        return out
+
+                    rb_rows = []
+                    if qp_rb is not None and not qp_rb.empty:
+                        for slot, g in qp_rb.groupby("slot"):
+                            phone = slot_labels.get(int(slot), f"phone{int(slot)}")
+                            for col, lbl in (("rb_dl", "DL"), ("rb_ul", "UL")):
+                                if col in g.columns and g[col].notna().any():
+                                    rb_rows += _cond_rows(phone, g[["time", col]], col, lbl)
+                    else:
+                        for col, lbl in (("rb_dl", "DL"), ("rb_ul", "UL")):
+                            if col in overlay.columns and overlay[col].notna().any():
+                                rb_rows += _cond_rows("all", overlay[["time", col]], col, lbl)
+
                     if rb_rows:
                         st.dataframe(
                             pd.DataFrame(rb_rows, columns=[
-                                "RBs", "Comparison", "Higher load", "Baseline", "Δ"]),
+                                "Phone", "RBs", "Comparison", "Higher load",
+                                "Baseline", "Δ"]),
                             hide_index=True, width="stretch",
                         )
                     else:
