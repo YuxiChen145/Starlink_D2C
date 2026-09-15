@@ -32,7 +32,7 @@ DEFAULT_SIGCAP_DIR = os.environ.get("SIGCAP_DATA_DIR", "Sigcap CSV")
 DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 7
+CACHE_VERSION = 9
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
@@ -750,17 +750,20 @@ def _sigcap_meta(path: Path) -> tuple[str, str]:
     else:
         tokens = [t for t in re.split(r"[_\s]+", stem) if t]
         loc = ""
+        workload = test  # fall back to the bare "iperf"/"http"
         for i, tok in enumerate(tokens):
             # match "iperf", "http" and their direction variants ("iperfDL",
-            # "iperfUL", "iperfdl", ...) so the location token before the
-            # workload is picked out either way
+            # "iperfUL", "iperfdl", ...). Keep the FULL token as the workload so
+            # a downlink and an uplink run at one spot stay separate collections
+            # ("twoPhone2 iperfDL" vs "twoPhone2 iperfUL"), not merged.
             if re.match(r"^(iperf|http)", tok, re.IGNORECASE):
+                workload = tok
                 if i > 0:
                     loc = tokens[i - 1]
                 break
         if not loc and tokens:
             loc = tokens[-1]
-        label = f"{loc} {test}"
+        label = workload if (not loc or loc == workload) else f"{loc} {workload}"
     label = re.sub(r"[_\s]+", " ", label).strip()
     return label, test
 

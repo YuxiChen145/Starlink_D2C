@@ -1890,9 +1890,14 @@ if tab_timeline is not None:
             load_sigcap_frame(sigcap_dir, tuple(sorted(sig_keys_tech)))
             if sig_keys_tech else loader.empty_frame()
         )
+        # Honour the sidebar Collections / time-window / region filters so
+        # selecting the one-phone & two-phone sessions scopes the analysis - but
+        # NOT the Direction filter (the timeline splits DL vs UL itself) or the
+        # PCI filter (it analyses which PCIs the phones used).
         tframe = flt.apply_filters(
             tframe,
             flt.Filters(
+                collections=collections,
                 time_range=time_range,
                 regions=st.session_state["regions"],
                 keep_ungeolocated=keep_ungeo,

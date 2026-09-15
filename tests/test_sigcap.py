@@ -53,6 +53,16 @@ def test_sigcap_meta_parses_both_naming_conventions():
         Path("2026-08-14-14-23-06[D2C_Static_OpenField_SigcapiperfDL].csv")
     )
     assert coll == "D2C Static OpenField SigcapiperfDL" and test == "iperf"
+    # the workload direction (DL/UL) is preserved so a downlink and an uplink
+    # run at one spot stay separate collections rather than merging
+    coll, test = loader._sigcap_meta(
+        Path("2026_09_S14_1946_E14_1957Z-0400_outdoor_T-Mobile_588a03fd_D2C_OpenField_Static_twoPhone2_iperfDL.debug_general.csv")
+    )
+    assert coll == "twoPhone2 iperfDL" and test == "iperf"
+    coll, test = loader._sigcap_meta(
+        Path("2026_09_S14_1959_E14_2010Z-0400_outdoor_T-Mobile_9edf8aa5_D2C_OpenField_Static_twoPhone2_iperfUL.debug_general.csv")
+    )
+    assert coll == "twoPhone2 iperfUL" and test == "iperf"
 
 
 # --------------------------------------------------------------------------- #
