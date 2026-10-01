@@ -1,6 +1,7 @@
-# Measurement data: raw CSVs stay local (large); the gzipped copies (*.csv.gz)
-# are committed so a plain clone / cloud deploy has data. The loader reads either.
-*.csv
+# Measurement data is committed as plain .csv (see README §3).
+# Never commit compressed copies.
+*.csv.gz
+*.zip
 
 # Parquet cache built by qpviz.loader
 .cache/

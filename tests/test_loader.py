@@ -161,26 +161,24 @@ def test_n_factor_absent_without_rssi(fixture_dir, cache_dir):
     assert frame.loc[frame["source"] == "lte_radio", "n_factor"].notna().any()
 
 
-def test_reads_gzipped_csv(fixture_dir, tmp_path):
-    # gzip a copy of an export into a fresh dir; the loader must read it as if raw
-    import gzip, shutil
+def test_only_exact_export_names_are_found(fixture_dir, tmp_path):
+    # a stray " 2" / gzipped copy next to an export is not an export
+    import shutil
     src = fixture_dir / DATASETS_BY_KEY["lte_radio"].filename
-    d = tmp_path / "gz"
+    d = tmp_path / "qp"
     d.mkdir()
-    with open(src, "rb") as f, gzip.open(d / (src.name + ".gz"), "wb") as g:
-        shutil.copyfileobj(f, g)
-    # only the .gz is present
-    assert loader._resolve_csv(d, DATASETS_BY_KEY["lte_radio"].filename).name.endswith(".gz")
+    shutil.copy(src, d / src.name.replace(".csv", " 2.csv"))
+    shutil.copy(src, d / (src.name + ".gz"))
+    assert loader._resolve_csv(d, DATASETS_BY_KEY["lte_radio"].filename) is None
+    assert loader.available_datasets(d) == []
+    shutil.copy(src, d / src.name)
     assert {x.key for x in loader.available_datasets(d)} == {"lte_radio"}
-    frame = loader.read_dataset(d, DATASETS_BY_KEY["lte_radio"], cache_dir=None)
-    assert len(frame) > 0 and "rsrp" in frame.columns
 
 
-def test_prism_collection_strips_gz_suffix():
+def test_prism_collection_from_file_name():
     from pathlib import Path
     a = loader.prism_collection(Path("2026_09_01_ LTE_8665_Cushing202_static.csv"))
-    b = loader.prism_collection(Path("2026_09_01_ LTE_8665_Cushing202_static.csv.gz"))
-    assert a == b == "Cushing202 static"
+    assert a == "Cushing202 static"
 
 
 def test_qp_traffic_splits_only_mixed_sessions_by_throughput():

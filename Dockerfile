@@ -2,7 +2,8 @@
 # Builds a code-only image; mount your data at run time:
 #   docker build -t starlink-d2c .
 #   docker run -p 8501:8501 -v "/abs/path/to/data:/data" starlink-d2c
-# where /abs/path/to/data contains "QP CSV", "PRISM CSV" and (optionally) "TLE".
+# where /abs/path/to/data contains "QP CSV", "PRISM CSV", "Sigcap CSV" and
+# (optionally) "TLE".
 
 FROM python:3.12-slim
 
@@ -18,6 +19,7 @@ COPY . .
 # Data + cache live on a mounted volume at /data.
 ENV QP_DATA_DIR="/data/QP CSV" \
     PRISM_DATA_DIR="/data/PRISM CSV" \
+    SIGCAP_DATA_DIR="/data/Sigcap CSV" \
     TLE_DATA_DIR="/data/TLE" \
     QP_CACHE_DIR="/data/.cache/qpviz"
 

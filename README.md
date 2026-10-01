@@ -38,10 +38,10 @@ vs two contend for D2C** on a shared timeline.
 ## 1. Prerequisites
 
 - **Python 3.10+** (developed on 3.12).
-- **git**, and ~200 MB free disk for the repo, its data, and the parquet cache.
+- **git**, and ~500 MB free disk for the repo, its data, and the parquet cache.
 - Access to this **private** GitHub repo. The measurement data lives inside it
-  (gzipped), so a clone gives you both the code and the data in one step — no
-  separate download.
+  as plain CSV, so a clone gives you both the code and the data in one step —
+  no separate download.
 
 ## 2. Quick start
 
@@ -61,21 +61,22 @@ show on first run. Streamlit opens `http://localhost:8501`.
 
 ## 3. The data (already in the repo)
 
-The measurement CSVs **ship in the repo, gzipped** (`*.csv.gz`, ~13 MB total),
-so a fresh `git clone` already has them and the loader reads `.csv` or
-`.csv.gz` transparently. The app reads three folders next to `app.py`:
+The measurement CSVs **ship in the repo as plain `.csv`** (~150 MB), so a fresh
+`git clone` already has them. The app reads three folders next to `app.py`:
 
 ```
 Starlink_D2C/
-├── QP CSV/       ← Qualipoc exports (the "… - Limited.csv[.gz]" files)
+├── QP CSV/       ← Qualipoc exports (the "… - Limited.csv" files)
 ├── PRISM CSV/    ← PRISM SDR scan CSVs (one file per location/carrier)
 ├── Sigcap CSV/   ← SigCap sessions (one CSV per iperf / HTTP capture)
 └── TLE/          ← (optional) Starlink TLEs for satellite visibility
 ```
 
-- **QP CSV/** — the Qualipoc exports (`LTE Radio [connected] - Limited.csv.gz`,
-  `NR PDSCH [per-carrier] - Limited.csv.gz`, …). The app auto-detects which are
-  present. Either measurement source alone is enough to run.
+- **QP CSV/** — the Qualipoc exports (`LTE Radio [connected] - Limited.csv`,
+  `NR PDSCH [per-carrier] - Limited.csv`, …). The app looks these up **by exact
+  file name** and auto-detects which are present; a re-export must replace the
+  file of the same name (a `… - Limited 2.csv` copy is ignored). Either
+  measurement source alone is enough to run.
 - **PRISM CSV/** — the SDR scan files (the collection name comes from the file
   name). PRISM carries signal metrics only and has no GPS in the current
   captures, so it is excluded from the map and satellite tabs.
@@ -90,32 +91,26 @@ Starlink_D2C/
   *not* committed; fetch them locally — see
   [`docs/FETCHING_TLE.md`](docs/FETCHING_TLE.md).
 
-**Refreshing or adding data — just run `./sync.sh`.** Drop new or updated CSVs
-in, then:
+**Refreshing or adding data** — drop the new or updated CSV into its folder and
+commit it like any other file:
 
 ```bash
-./sync.sh                 # gzips new/changed CSVs, commits, and pushes
-./sync.sh "your message"  # ...with your own commit message
+git add "PRISM CSV/2026_10_02_LTE_8665_NewPlace_static.csv"
+git commit -m "Add PRISM NewPlace static scan (2026-10-02)"
+git push
 ```
 
-`sync.sh` re-gzips only what changed, writes a sensible commit message, and
-pushes. Run it any time — if nothing changed, it does nothing. Raw `.csv` files
-stay local and git-ignored (a local raw file is preferred over its gzip when
-both exist).
+A few conventions keep the folders clean:
 
-Two more levels of automation are set up, so you never have to remember:
-
-- **Pre-commit hook** — your normal `git commit` auto-gzips new data first.
-  Enable once: `git config core.hooksPath .githooks`.
-- **launchd watcher (macOS)** — drop a CSV in a data folder and it pushes
-  itself, no command. Install once: `bash scripts/install-autosync.sh`.
-
-See **[`docs/AUTOSYNC.md`](docs/AUTOSYNC.md)** for all three.
-
-> **Why does this run on your Mac, not from Claude?** Pushing to GitHub needs
-> *your* GitHub login, which lives in your Mac's keychain — not in a Claude
-> session (a session's sandbox has no access to your credentials). So the sync
-> runs on your machine, where the login already is.
+- **No compressed copies.** `*.csv.gz` and `*.zip` are git-ignored; commit the
+  plain `.csv`.
+- **No duplicates.** macOS "keep both" copies (`… 2.csv`) and `(1)`/`(2)`
+  variants of PRISM files are read as *separate collections* and double-count,
+  so delete them before committing.
+- **File names are collection names** for PRISM and SigCap, so name a capture
+  the way you want it to appear in the app.
+- **Every file must be under 100 MB** (GitHub's hard limit). The largest QP
+  export today is ~19 MB.
 
 > **Privacy.** The QP exports carry GPS coordinates. That is why the repo is
 > **private** — keep it that way, and share access (or any deploy) only with
@@ -278,11 +273,8 @@ qpviz/
   mapview.py         folium map, draw control, categorical colouring
   satellites.py      TLE ingest, SGP4 propagation, D2C visibility
   theme.py           colour tokens
-docs/                screenshots + TLE and auto-sync guides
+docs/                screenshot + TLE guide
 tests/               pytest suite (synthetic data; no measurement CSVs needed)
-sync.sh              gzip new data, commit, push (see docs/AUTOSYNC.md)
-scripts/             auto-sync installer + launchd watcher (macOS)
-.githooks/           pre-commit hook: auto-gzip data on commit
 Dockerfile           container image for self-hosting
 ```
 
@@ -301,7 +293,7 @@ headlessly; if a real `QP CSV/` folder is present it also smoke-tests against it
 
 | Symptom | Fix |
 |---|---|
-| `No QP CSV files found` | Confirm `QP CSV/` has the `*.csv.gz` files (or set `QP_DATA_DIR`); check the sidebar folder box. |
+| `No QP CSV files found` | Confirm `QP CSV/` has the `… - Limited.csv` files (or set `QP_DATA_DIR`); check the sidebar folder box. |
 | Satellite tab says *sgp4 not installed* | `pip install -r requirements.txt` (adds `sgp4`), restart. |
 | TLE fetch `CERTIFICATE_VERIFY_FAILED` | macOS Python has no CA bundle — the `certifi` dependency fixes it; see the [TLE guide](docs/FETCHING_TLE.md). |
 | Stale numbers after replacing a CSV | Click **Reload data**; the parquet cache re-keys on file size/mtime, or delete `.cache/`. |

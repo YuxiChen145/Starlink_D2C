@@ -1,6 +1,7 @@
 # Keep the image small and free of data/secrets — mount data at run time.
 QP CSV/
 PRISM CSV/
+Sigcap CSV/
 TLE/*.tle
 TLE/*.txt
 .cache/

@@ -398,20 +398,9 @@ def _fingerprint(path: Path) -> str:
 
 
 def _resolve_csv(root: Path, filename: str) -> Optional[Path]:
-    """Locate an export as either ``name.csv`` or its committed ``name.csv.gz``.
-
-    The raw CSVs stay local (git-ignored); gzipped copies travel in the repo so
-    a plain clone or a cloud deploy has data. pandas reads ``.gz`` by extension,
-    so only the path lookup needs to know about it. A local raw CSV wins over a
-    gzip of the same name.
-    """
+    """Locate a QP export by its exact file name, or ``None`` if absent."""
     p = root / filename
-    if p.exists():
-        return p
-    gz = root / (filename + ".gz")
-    if gz.exists():
-        return gz
-    return None
+    return p if p.is_file() else None
 
 
 def read_dataset(
@@ -451,7 +440,7 @@ def read_dataset(
 
 
 def available_datasets(data_dir: os.PathLike | str) -> List[Dataset]:
-    """Datasets whose CSV (or gzipped CSV) is present in ``data_dir``."""
+    """Datasets whose CSV is present in ``data_dir``."""
     root = Path(data_dir)
     return [d for d in DATASETS if _resolve_csv(root, d.filename) is not None]
 
@@ -514,8 +503,6 @@ def prism_collection(path: Path) -> str:
     ``Shoreham Court Kitchen static``.
     """
     name = path.name
-    if name.endswith(".gz"):
-        name = name[:-3]
     if name.endswith(".csv"):
         name = name[:-4]
     stem = name.strip()
@@ -539,20 +526,11 @@ def _prism_key_for(path: Path) -> Optional[str]:
 
 
 def prism_files(prism_dir: os.PathLike | str) -> List[Path]:
-    """Every PRISM scan in the folder (``.csv`` or gzipped ``.csv.gz``).
-
-    When both a raw ``.csv`` and its ``.csv.gz`` exist, the raw one wins.
-    """
+    """Every PRISM scan (``*.csv``) in the folder, sorted by name."""
     root = Path(prism_dir)
     if not root.exists():
         return []
-    chosen: dict = {}
-    for p in sorted(root.glob("*.csv")) + sorted(root.glob("*.csv.gz")):
-        if not p.is_file():
-            continue
-        base = p.name[:-3] if p.name.endswith(".csv.gz") else p.name
-        chosen.setdefault(base, p)  # .csv globbed first -> preferred
-    return [chosen[b] for b in sorted(chosen)]
+    return sorted(p for p in root.glob("*.csv") if p.is_file())
 
 
 def prism_available(prism_dir: os.PathLike | str) -> List[str]:
@@ -822,8 +800,6 @@ def _sigcap_stem(path: Path) -> str:
     """File name with the extension, ``.debug_general`` tag and any macOS
     ``" 2"`` duplicate marker stripped - the stable identity of a session."""
     name = path.name
-    if name.endswith(".gz"):
-        name = name[:-3]
     if name.endswith(".csv"):
         name = name[:-4]
     name = _SIGCAP_SUFFIX_RE.sub("", name)
@@ -870,33 +846,26 @@ def _sigcap_meta(path: Path) -> tuple[str, str]:
 
 
 def sigcap_files(sigcap_dir: os.PathLike | str) -> List[Path]:
-    """Every SigCap session file in the folder (``.csv`` or ``.csv.gz``).
+    """Every SigCap session file (``*.csv``) in the folder.
 
-    When both a raw ``.csv`` and its ``.csv.gz`` exist, the raw one wins.
+    A macOS "keep both" duplicate (``... 2.csv``) of a session that is also
+    present under its canonical name is skipped.
     """
     root = Path(sigcap_dir)
     if not root.exists():
         return []
 
     def _pref(p: Path):
-        # lower is better: prefer a raw .csv over its .csv.gz, and the canonical
-        # name over a macOS "keep both" duplicate ("... 2.csv")
-        base = p.name[:-3] if p.name.endswith(".csv.gz") else p.name
-        base = base[:-4] if base.endswith(".csv") else base
+        # lower is better: the canonical name over a " 2" duplicate
+        base = p.name[:-4] if p.name.endswith(".csv") else p.name
         base = _SIGCAP_SUFFIX_RE.sub("", base)
         is_dup = 1 if _SIGCAP_DUP_RE.search(base.strip()) else 0
-        is_gz = 1 if p.name.endswith(".csv.gz") else 0
-        return (is_dup, is_gz, p.name)
+        return (is_dup, p.name)
 
     chosen: dict = {}
     for p in root.glob("*.csv"):
-        if not p.is_file():
-            continue
-        chosen.setdefault(_sigcap_stem(p).lower(), []).append(p)
-    for p in root.glob("*.csv.gz"):
-        if not p.is_file():
-            continue
-        chosen.setdefault(_sigcap_stem(p).lower(), []).append(p)
+        if p.is_file():
+            chosen.setdefault(_sigcap_stem(p).lower(), []).append(p)
     return [min(v, key=_pref) for _, v in sorted(chosen.items())]
 
 
