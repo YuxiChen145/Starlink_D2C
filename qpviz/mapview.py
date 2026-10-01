@@ -146,6 +146,11 @@ def build_map(
         if "enb" in plotted.columns
         else np.full(len(plotted), None)
     )
+    sector = (
+        plotted["sector"].astype("object").to_numpy()
+        if "sector" in plotted.columns
+        else np.full(len(plotted), None)
+    )
     times = pd.to_datetime(plotted["time"], errors="coerce").dt.strftime(
         "%Y-%m-%d %H:%M:%S"
     ).to_numpy()
@@ -155,9 +160,16 @@ def build_map(
 
     for i in range(len(plotted)):
         value = values[i]
+        # counts (satellites visible, sectors per eNB) read better whole
+        shown = (
+            f"{value:.0f}"
+            if np.isfinite(value) and float(value).is_integer()
+            else f"{value:.2f}"
+        )
         tooltip = (
-            f"<b>{metric_label}: {value:.2f}</b><br>{coll[i]}<br>"
-            f"PCI {_fmt(pci[i])} · eNB/gNB {_fmt(enb[i])} · ARFCN {_fmt(freq[i])}"
+            f"<b>{metric_label}: {shown}</b><br>{coll[i]}<br>"
+            f"PCI {_fmt(pci[i])} · eNB/gNB {_fmt(enb[i])} · "
+            f"Sector {_fmt(sector[i])} · ARFCN {_fmt(freq[i])}"
             f"<br>{times[i]}"
         )
         if categorical:

@@ -78,6 +78,7 @@ class Filters:
     pcis: Optional[Sequence[int]] = None
     techs: Optional[Sequence[str]] = None
     links: Optional[Sequence[str]] = None
+    traffic: Optional[Sequence[str]] = None
     sources: Optional[Sequence[str]] = None
     #: list of polygons, each a list of ``(lat, lon)`` vertices; OR-ed together
     regions: List[List[LatLon]] = field(default_factory=list)
@@ -117,6 +118,7 @@ def apply_filters(frame: pd.DataFrame, filters: Filters) -> pd.DataFrame:
 
     for column, values in (
         ("collection", filters.collections),
+        ("traffic", filters.traffic),
         ("band", filters.bands),
         ("freq", filters.freqs),
         ("pci", filters.pcis),

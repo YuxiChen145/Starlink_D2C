@@ -418,3 +418,66 @@ def test_segments_are_per_collection():
 def test_serving_segments_and_summary_empty_on_empty_input():
     assert identity.serving_segments(pd.DataFrame()).empty
     assert identity.segment_summary(pd.DataFrame()).empty
+
+
+# --------------------------------------------------------------------------- #
+# Sectors per eNB - the per-sample count the map colours by
+# --------------------------------------------------------------------------- #
+
+
+def _sector_frame():
+    """eNB 10 carries sectors 1 and 2, eNB 11 only sector 1, eNB 12 never
+    decoded a sector, and one row has no eNB at all."""
+    return pd.DataFrame(
+        {
+            "enb": pd.array([10, 10, 10, 11, 12, None], dtype="Int64"),
+            "sector": pd.array([1, 2, 2, 1, None, 3], dtype="Int32"),
+        }
+    )
+
+
+def test_sectors_per_enb_counts_distinct_sectors():
+    counts = identity.sectors_per_enb(_sector_frame())
+    assert counts.to_dict() == {10: 2, 11: 1}  # eNB 12 has no sector, so no row
+
+
+def test_sectors_per_enb_is_empty_without_both_columns():
+    assert identity.sectors_per_enb(pd.DataFrame()).empty
+    assert identity.sectors_per_enb(pd.DataFrame({"enb": [1]})).empty
+    assert identity.sectors_per_enb(pd.DataFrame({"sector": [1]})).empty
+
+
+def test_with_sectors_per_enb_paints_the_count_onto_every_row():
+    out = identity.with_sectors_per_enb(_sector_frame())
+    counted = out[identity.SECTORS_PER_ENB_COL]
+    assert counted.tolist()[:4] == [2.0, 2.0, 2.0, 1.0]
+    # an eNB whose sector never decoded, and a row with no eNB, stay blank
+    # rather than being counted as zero
+    assert counted.isna().tolist()[4:] == [True, True]
+
+
+def test_with_sectors_per_enb_accepts_counts_from_another_population():
+    """The map counts over the filtered set and paints the unregioned points,
+    so an eNB keeps its colour whether or not the region is applied."""
+    counts = identity.sectors_per_enb(_sector_frame())
+    subset = _sector_frame().iloc[[3]]  # only eNB 11, whose own count is 1
+    assert identity.with_sectors_per_enb(subset, counts)[
+        identity.SECTORS_PER_ENB_COL
+    ].tolist() == [1.0]
+    wider = identity.with_sectors_per_enb(subset, pd.Series({11: 7}, dtype="int64"))
+    assert wider[identity.SECTORS_PER_ENB_COL].tolist() == [7.0]
+
+
+def test_with_sectors_per_enb_leaves_frames_without_enb_alone():
+    frame = pd.DataFrame({"pci": [1, 2]})
+    assert identity.SECTORS_PER_ENB_COL not in identity.with_sectors_per_enb(frame)
+    assert identity.with_sectors_per_enb(pd.DataFrame()).empty
+
+
+def test_sectors_per_enb_on_the_real_fixture(fixture_dir, cache_dir):
+    frame = load(fixture_dir, ["lte_radio"], cache_dir)
+    counts = identity.sectors_per_enb(frame)
+    assert not counts.empty and (counts >= 1).all()
+    painted = identity.with_sectors_per_enb(frame)
+    both = frame["enb"].notna() & frame["sector"].notna()
+    assert painted.loc[both, identity.SECTORS_PER_ENB_COL].notna().all()

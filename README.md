@@ -227,9 +227,16 @@ where empty means *all*. SigCap rows also carry a **device identity** (the phone
 UUID + codename), so sessions logged by different phones at the same time stay
 distinct — the basis for the timeline analysis below.
 
-**Filters** — Measurement source, Direction (DL/UL), Data source, Collection,
-Band, EARFCN/NR-ARFCN, PCI (union or intersection across collections), a
-**region drawn on the map**, and a **time window** (with a per-session jump so
+**Filters** — Measurement source, Direction (DL/UL), **Traffic** (the generated
+traffic — iperf DL / iperf UL, Ookla, Ping, HTTP, Idle; read **per row from the
+data**: SigCap from its iperf/HTTP/ping columns, QP from its `Test Name` column
+and per-channel throughput, so a combined session splits into its active phases;
+`Mixed` = a combined session's rows that carry no bulk transfer). In the **D2C**
+campaign QP records idle (PHY only) while SigCap generates the traffic, so those
+QP rows are relabelled from the time-aligned SigCap traffic rather than QP's own
+idle columns or the (sometimes mistyped) collection name), Data source, Collection, Band,
+EARFCN/NR-ARFCN, PCI (union or intersection across collections), a **region drawn
+on the map**, and a **time window** (with a per-session jump so
 you can isolate a few minutes at a spot).
 
 **Metrics** — RSRP, RSRQ, RSSI, SINR, MCS, Throughput, **Spectral efficiency
@@ -242,7 +249,7 @@ HTTP pooled) and **Ping RTT (ms)**, wherever the selected exports carry them.
 
 | Tab | What it shows |
 |---|---|
-| 🗺️ Map | Each sample coloured by the metric, by serving PCI / eNB-gNB / sector (every cell its own colour), or by D2C satellites overhead. |
+| 🗺️ Map | Each sample coloured by the metric, by serving PCI / eNB-gNB / sector (every cell its own colour), by how many distinct sector ids the serving eNB carries, or by D2C satellites overhead. |
 | 🛰️ D2C visibility | How many Starlink Direct-to-Cell satellites were above the mask at each QP sample — distinct-in-window vs eNB counts, over time, distribution. Needs TLEs. |
 | 📈 CDF curves | One ECDF per group on one canvas — or the same groups as a **PDF** (overlaid histograms). CDF / CCDF / PDF toggle. |
 | 🛰️ Cell identity | Who is serving you and for how long: dwell timeline, eNB→sector→PCI tree, fan-out statistics. |

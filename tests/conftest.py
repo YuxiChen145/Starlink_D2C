@@ -280,15 +280,16 @@ def _write_sigcap(directory, filename, workload, rows=60, seed=11, tech="LTE",
                     row["nr_first_ss_rsrp_dbm"] = f"{rng.uniform(-120, -90):.0f}"
                     row["nr_first_ss_rsrq_db"] = f"{rng.uniform(-16, -5):.0f}"
                     row["nr_first_ss_sinr_db"] = f"{rng.uniform(-6, 18):.0f}"
-            # application-layer workload
-            if workload == "iperf":
+            # application-layer workload - phases are interleaved and mutually
+            # exclusive, like a real SigCap run (some rows ping, some iperf, ...)
+            if i % 6 == 0:
+                row["ping_rtt_mean_ms"] = f"{rng.uniform(50, 400):.1f}"
+            elif workload == "iperf":
                 row["iperf_tput_mean_mbps"] = f"{rng.uniform(0, 12):.3f}"
                 row["iperf_direction"] = "download" if i % 2 == 0 else "upload"
                 row["iperf_protocol"] = "TCP"
             else:
                 row["http_tput_mean_mbps"] = f"{rng.uniform(0, 3):.3f}"
-            if i % 6 == 0:
-                row["ping_rtt_mean_ms"] = f"{rng.uniform(50, 400):.1f}"
             writer.writerow(row)
     return path
 

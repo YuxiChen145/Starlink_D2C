@@ -109,6 +109,8 @@ HIDDEN_METRICS: List[str] = [
 #: canonical cell-identity columns (see qpviz.identity)
 IDENTITY_COLUMNS: List[str] = ["pci", "enb", "sector", "cell_id", "ssb"]
 
+QP_TEST_NAME_COL = "Test Name"
+
 DIMENSION_COLUMNS: List[str] = [
     "time",
     "collection",
@@ -134,7 +136,52 @@ DIMENSION_COLUMNS: List[str] = [
     "source_label",
     "provider",
     "test_type",
+    "traffic",
 ]
+
+def traffic_label(name) -> str:
+    """Classify a collection / session name into a single traffic type.
+
+    The measurement campaign encodes the generated traffic in the collection
+    name - ``iperfDL`` / ``iperfUL`` / ``Ookla`` / ``Ping`` / ``http`` / ``IDLE``
+    - so we read it back into one canonical label per row:
+
+    * one application only -> that type, with direction for iperf
+      (``iperf DL`` / ``iperf UL`` / ``iperf DL+UL`` / ``iperf``),
+    * several applications in one session (e.g. ``PingiperfULDL``) -> ``Mixed``,
+    * no recognisable traffic keyword -> ``Other``.
+
+    Direction for a bare ``iperf`` session (no DL/UL in the name) is not known
+    from the name - use the Direction filter to split those.
+    """
+    if name is None:
+        return "Other"
+    raw = str(name).lower().replace(" ", "")
+    apps = [a for a in ("iperf", "http", "ping", "ookla", "idle") if a in raw]
+    if not apps:
+        return "Other"
+    if len(apps) > 1:
+        return "Mixed"
+    app = apps[0]
+    if app == "iperf":
+        seg = raw.split("iperf", 1)[1][:6]
+        dl, ul = "dl" in seg, "ul" in seg
+        if dl and ul:
+            return "iperf DL+UL"
+        if dl:
+            return "iperf DL"
+        if ul:
+            return "iperf UL"
+        return "iperf"
+    return {"http": "HTTP", "ping": "Ping", "ookla": "Ookla", "idle": "Idle"}[app]
+
+
+#: fixed display order for the Traffic filter
+TRAFFIC_ORDER: List[str] = [
+    "iperf DL", "iperf UL", "iperf DL+UL", "iperf",
+    "HTTP", "Ping", "Ookla", "Idle", "Mixed", "Other",
+]
+
 
 #: measurement sources the platform can pool.  "QP" is the Qualipoc phone
 #: (connected-mode drive/walk logs); "PRISM" is the PRISM SDR scanner, which
@@ -207,6 +254,8 @@ class Dataset:
             cols.append(self.rb_sched_col)
         if self.scs_col:
             cols.append(self.scs_col)
+        if self.provider == "QP":
+            cols.append(QP_TEST_NAME_COL)  # Qualipoc's per-row active-test label
         cols.extend(self.extra_cols)
         return list(dict.fromkeys(cols))
 

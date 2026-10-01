@@ -32,6 +32,7 @@ from qpviz.schema import (
     PRISM_DATASETS_BY_KEY,
     SIGCAP_DATASETS_BY_KEY,
     TECHNOLOGIES,
+    TRAFFIC_ORDER,
     Dataset,
     datasets_for,
     metrics_available,
@@ -125,6 +126,25 @@ def load_prism_frame(prism_dir: str, dataset_keys: Tuple[str, ...]) -> pd.DataFr
 @st.cache_data(show_spinner="Loading SigCap data…")
 def load_sigcap_frame(sigcap_dir: str, dataset_keys: Tuple[str, ...]) -> pd.DataFrame:
     return loader.load_sigcap(sigcap_dir, list(dataset_keys))
+
+
+@st.cache_data(show_spinner=False)
+def sigcap_traffic_ref(sigcap_dir: str, dataset_keys: Tuple[str, ...]) -> pd.DataFrame:
+    """time + traffic from SigCap - the ground truth for labelling QP D2C rows,
+    which are QP-idle PHY captures of SigCap-generated traffic."""
+    sc = loader.load_sigcap(sigcap_dir, list(dataset_keys))
+    if sc.empty or "traffic" not in sc.columns:
+        return sc.iloc[0:0][["time"]].assign(traffic=[])
+    keep = sc["traffic"].isin(["iperf DL", "iperf UL", "HTTP", "Ping"])
+    return sc.loc[keep, ["time", "traffic"]].reset_index(drop=True)
+
+
+def _align_qp_d2c(fr: pd.DataFrame) -> pd.DataFrame:
+    """Relabel QP D2C traffic from the SigCap reference, when SigCap is present."""
+    if not sigcap_present:
+        return fr
+    ref = sigcap_traffic_ref(sigcap_dir, tuple(sorted(sigcap_present)))
+    return loader.align_d2c_traffic(fr, ref)
 
 
 @st.cache_data(show_spinner=False)
@@ -355,6 +375,9 @@ if sigcap_source_keys:
     _parts.append(load_sigcap_frame(sigcap_dir, tuple(sorted(sigcap_source_keys))))
 frame = loader.concat_frames(_parts)
 frame = frame[frame[metric].notna()] if metric in frame.columns else frame.iloc[0:0]
+# D2C QP rows are QP-idle PHY captures of SigCap-generated traffic -> label their
+# traffic from the time-aligned SigCap ground truth, not QP's own columns/name
+frame = _align_qp_d2c(frame)
 freq_label = loader.freq_label_for(frame)
 freq_prefix = loader.freq_prefix_for(frame)
 
@@ -374,6 +397,23 @@ with st.sidebar:
         placeholder=f"All ({len(link_options)})",
     )
     step0 = flt.apply_filters(frame, flt.Filters(links=links))
+
+    _traffic_present = loader.options(step0, "traffic")
+    traffic_options = (
+        [t for t in TRAFFIC_ORDER if t in _traffic_present]
+        + [t for t in _traffic_present if t not in TRAFFIC_ORDER]
+    )
+    traffic = st.multiselect(
+        "Traffic",
+        options=traffic_options,
+        default=[],
+        key="f_traffic",
+        help="Traffic type read from the session name (iperf DL/UL, Ookla, Ping, "
+             "HTTP, Idle). 'Mixed' = several traffic types in one session; a bare "
+             "'iperf' has no direction in its name (use Direction). Empty = all.",
+        placeholder=f"All ({len(traffic_options)})",
+    )
+    step0 = flt.apply_filters(step0, flt.Filters(traffic=traffic))
 
     source_options = [k for k in reading if k in set(step0["source"].dropna())]
     sources = st.multiselect(
@@ -468,8 +508,9 @@ with st.sidebar:
     _time_scope = flt.apply_filters(
         frame,
         flt.Filters(
-            links=links, sources=sources, collections=collections, bands=bands,
-            freqs=freqs, pcis=effective_pcis, regions=st.session_state["regions"],
+            links=links, sources=sources, collections=collections, traffic=traffic,
+            bands=bands, freqs=freqs, pcis=effective_pcis,
+            regions=st.session_state["regions"],
             require=("pci", "freq") if drop_unknown else (),
             keep_ungeolocated=keep_ungeo,
         ),
@@ -676,6 +717,7 @@ active = flt.apply_filters(
         links=links,
         sources=sources,
         collections=collections,
+        traffic=traffic,
         bands=bands,
         freqs=freqs,
         pcis=effective_pcis,
@@ -694,6 +736,7 @@ unregioned = flt.apply_filters(
         links=links,
         sources=sources,
         collections=collections,
+        traffic=traffic,
         bands=bands,
         freqs=freqs,
         pcis=effective_pcis,
@@ -797,26 +840,41 @@ with tab_map:
     left, right = st.columns([4, 1])
     with right:
         _SAT_OPT = "D2C satellites visible"
+        _SEC_OPT = identity.SECTORS_PER_ENB_LABEL
+        # How many distinct sector ids each eNB carries, counted over the
+        # filtered selection so the number describes what is on screen.
+        sector_counts = identity.sectors_per_enb(active)
         color_options = ["Metric"] + [
             l for l in identity.available_levels(active) if l != "ssb"
         ]
+        if not sector_counts.empty:
+            color_options.append(_SEC_OPT)
         if show_sat_kpi:
             color_options.append(_SAT_OPT)
+        _CONTINUOUS = ("Metric", _SAT_OPT, _SEC_OPT)
         color_choice = st.selectbox(
             "Colour by",
             color_options,
-            format_func=lambda c: c if c in ("Metric", _SAT_OPT) else identity.label_for(c),
+            format_func=lambda c: c if c in _CONTINUOUS else identity.label_for(c),
             help="Colour each point by the metric, categorically by serving PCI / "
-                 "eNB-gNB / Sector, or (when enabled) by how many D2C satellites "
+                 "eNB-gNB / Sector, by how many distinct sector ids the serving "
+                 "eNB carries, or (when enabled) by how many D2C satellites "
                  "were overhead at that instant.",
         )
+        if color_choice == _SEC_OPT:
+            st.caption(
+                f"{len(sector_counts):,} eNBs in the current selection carry "
+                f"{int(sector_counts.min())}–{int(sector_counts.max())} distinct "
+                f"sector ids (median {sector_counts.median():.0f}). Points whose "
+                "eNB or sector never decoded are not drawn."
+            )
 
         # When colouring by an identity there can be dozens of PCIs or eNBs.
         # "Every cell" gives each its own generated colour (no grey dump);
         # "Top N + Other" keeps the busiest N and folds the rest into grey.
         color_all = False
         color_max_slots = 8
-        if color_choice not in ("Metric", _SAT_OPT):
+        if color_choice not in _CONTINUOUS:
             n_ids = int(active[color_choice].nunique())
             cat_scheme = st.radio(
                 "Colour scheme",
@@ -860,24 +918,36 @@ with tab_map:
     # Colouring by satellite count is a continuous scale over the sat_vis column,
     # not the signal metric; everything else colours by the metric.
     sat_color = color_choice == _SAT_OPT
-    map_metric = sat_vis_col if sat_color else metric
+    sector_color = color_choice == _SEC_OPT
+    map_metric = (
+        identity.SECTORS_PER_ENB_COL
+        if sector_color
+        else (sat_vis_col if sat_color else metric)
+    )
     map_metric_label = (
-        f"D2C satellites ≥{int(sat_mask)}°" if sat_color else metric_meta.axis_label
+        _SEC_OPT
+        if sector_color
+        else (f"D2C satellites ≥{int(sat_mask)}°" if sat_color else metric_meta.axis_label)
     )
     map_source = active if apply_region_to_map else unregioned
+    if sector_color:
+        # Counts come from the filtered set, so an eNB keeps the same colour
+        # whether or not the drawn region is applied to the map.
+        map_source = identity.with_sectors_per_enb(map_source, sector_counts)
+        map_source = map_source[map_source[identity.SECTORS_PER_ENB_COL].notna()]
     fmap, _, _ = mapview.build_map(
         map_source,
         map_metric,
         map_metric_label,
-        scale="sequential" if sat_color else map_scale,
+        scale="sequential" if (sat_color or sector_color) else map_scale,
         midpoint=midpoint,
         max_points=int(max_map_points),
         tiles=tiles,
         mode=MODE,
         regions=st.session_state["regions"],
         radius=int(marker_radius),
-        color_by=None if color_choice in ("Metric", _SAT_OPT) else color_choice,
-        color_by_label="" if color_choice in ("Metric", _SAT_OPT) else identity.label_for(color_choice),
+        color_by=None if color_choice in _CONTINUOUS else color_choice,
+        color_by_label="" if color_choice in _CONTINUOUS else identity.label_for(color_choice),
         color_max_slots=int(color_max_slots),
         color_all=bool(color_all),
     )
@@ -1209,6 +1279,7 @@ with tab_cells:
     if sigcap_id_keys:
         _id_parts.append(load_sigcap_frame(sigcap_dir, sigcap_id_keys))
     radio = loader.concat_frames(_id_parts)
+    radio = _align_qp_d2c(radio)
 
     def _intersecting(values, column):
         """Only carry a filter across if it means anything in the identity frame."""
@@ -1221,6 +1292,7 @@ with tab_cells:
         radio,
         flt.Filters(
             collections=collections,
+            traffic=traffic,
             bands=_intersecting(bands, "band"),
             freqs=_intersecting(freqs, "freq"),
             pcis=_intersecting(effective_pcis, "pci"),
@@ -1761,6 +1833,7 @@ if tab_corr is not None:
             # honour the sidebar time window and any region drawn on the map, so a
             # session can be isolated the same way as everywhere else
             _cf_filters = flt.Filters(
+                traffic=traffic,
                 time_range=time_range,
                 regions=st.session_state["regions"],
                 keep_ungeolocated=keep_ungeo,
@@ -1899,6 +1972,7 @@ if tab_timeline is not None:
             tframe,
             flt.Filters(
                 collections=collections,
+                traffic=traffic,
                 time_range=time_range,
                 regions=st.session_state["regions"],
                 keep_ungeolocated=keep_ungeo,

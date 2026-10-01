@@ -113,3 +113,19 @@ def test_rb_metrics_map_scheduled_vs_all_sf():
         d = DATASETS_BY_KEY[key]
         assert d.metrics["rb"] == sched
         assert d.metrics["rb_occ"] == allsf
+
+
+def test_traffic_label_classifies_session_names():
+    from qpviz.schema import traffic_label
+    assert traffic_label("D2C_OpenField_Static_twoPhone1_iperfDL") == "iperf DL"
+    assert traffic_label("D2C_OpenField_Static_twoPhone1_iperfUL") == "iperf UL"
+    assert traffic_label("D2C_Static_IperfDlUlPing_Building") == "Mixed"
+    assert traffic_label("PingiperfULDL") == "Mixed"
+    assert traffic_label("NoForcing_Static_Ookla_Field") == "Ookla"
+    assert traffic_label("D2C_FitzWalking_Ping_Coverage") == "Ping"
+    assert traffic_label("1011 http") == "HTTP"
+    assert traffic_label("D2C_CampusWalking_IDLE_EARFCN8665") == "Idle"
+    assert traffic_label("910 iperf") == "iperf"          # no direction in name
+    assert traffic_label("iperfULDL") == "iperf DL+UL"
+    assert traffic_label("D2C_Boulder_MostStatic_EARFCN8665") == "Other"
+    assert traffic_label(None) == "Other"

@@ -215,3 +215,19 @@ def test_data_windows_splits_on_gaps():
     assert wins[0][2] == 3 and wins[1][2] == 2          # sample counts
     assert wins[0][0] == pd.Timestamp("2026-08-25 18:11:00")
     assert flt.data_windows([]) == []
+
+
+def test_traffic_filter_selects_by_session_type():
+    import pandas as pd
+    from qpviz import filters as flt
+    frame = pd.DataFrame({
+        "collection": ["a", "b", "c", "d"],
+        "traffic": ["iperf DL", "iperf UL", "Ookla", "Mixed"],
+        "link": ["DL", "UL", "-", "DL"],
+    })
+    out = flt.apply_filters(frame, flt.Filters(traffic=["iperf DL"]))
+    assert list(out["collection"]) == ["a"]
+    out2 = flt.apply_filters(frame, flt.Filters(traffic=["Ookla", "Mixed"]))
+    assert set(out2["collection"]) == {"c", "d"}
+    # empty selection -> no traffic filtering
+    assert len(flt.apply_filters(frame, flt.Filters(traffic=[]))) == 4

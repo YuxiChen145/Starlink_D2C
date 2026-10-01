@@ -179,3 +179,20 @@ def test_correlation_tab_present_only_with_both_sources(
     assert any("Correlation" in t.label for t in app.tabs)
     assert app.selectbox(key="corr_phy") is not None
     assert app.selectbox(key="corr_app") is not None
+
+
+def test_sigcap_traffic_is_per_row_not_from_the_name(sigcap_dir, cache_dir):
+    """A SigCap session named just 'iperf' actually interleaves ping / iperf DL /
+    iperf UL, so traffic must be read per row from the measurement columns."""
+    frame = loader.load_sigcap(sigcap_dir, ["sigcap_lte"], cache_dir)
+    # the synthetic iperf session alternates download/upload and logs ping
+    iperf_sess = frame[frame["collection"].astype(str).str.contains("910", na=False)]
+    kinds = set(iperf_sess["traffic"].dropna().unique())
+    assert {"iperf DL", "iperf UL"} <= kinds        # both directions recovered
+    assert "Ping" in kinds                          # the ping rows are separated
+    # the name-based label "iperf" must NOT be applied to these rows
+    assert "iperf" not in kinds
+    # http session -> HTTP rows
+    http_sess = frame[frame["collection"].astype(str).str.contains("http", na=False)]
+    if not http_sess.empty:
+        assert "HTTP" in set(http_sess["traffic"].dropna().unique())

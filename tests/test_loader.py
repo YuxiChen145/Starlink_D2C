@@ -181,3 +181,91 @@ def test_prism_collection_strips_gz_suffix():
     a = loader.prism_collection(Path("2026_09_01_ LTE_8665_Cushing202_static.csv"))
     b = loader.prism_collection(Path("2026_09_01_ LTE_8665_Cushing202_static.csv.gz"))
     assert a == b == "Cushing202 static"
+
+
+def test_qp_traffic_splits_only_mixed_sessions_by_throughput():
+    """QP direction-specific sessions keep their name label; a combined 'Mixed'
+    session is split per row by which channel actually carried bulk traffic
+    (ACKs on the reverse channel stay below the threshold)."""
+    import pandas as pd
+    from qpviz import loader
+    from qpviz.schema import DATASETS_BY_KEY
+
+    ds = DATASETS_BY_KEY["lte_pdsch_pc"]  # DL channel
+    out = pd.DataFrame({
+        "collection": [
+            "D2C_OpenField_Static_twoPhone1_iperfDL",   # direction-specific
+            "D2C_OpenField_Static_twoPhone1_iperfDL",
+            "D2C_OpenField_Static_onePhone1_PingiperfULDL",  # Mixed, DL bulk
+            "D2C_OpenField_Static_onePhone1_PingiperfULDL",  # Mixed, idle/ping
+        ],
+        "link": ["DL", "DL", "DL", "DL"],
+        "throughput": [3.0, 0.1, 4.0, 0.02],   # Mbps
+    })
+    raw = pd.DataFrame({"Test Name": ["-", "-", "-", "-"]})
+    traffic = loader._qp_traffic(out, raw, ds)
+    # a DL-only session is iperf DL on every row, even the low-throughput one
+    assert traffic.iloc[0] == "iperf DL"
+    assert traffic.iloc[1] == "iperf DL"
+    # the Mixed session: bulk DL row -> iperf DL; idle row -> stays Mixed
+    assert traffic.iloc[2] == "iperf DL"
+    assert traffic.iloc[3] == "Mixed"
+
+
+def test_qp_traffic_uses_test_name_for_unnamed_sessions():
+    import pandas as pd
+    from qpviz import loader
+    from qpviz.schema import DATASETS_BY_KEY
+
+    ds = DATASETS_BY_KEY["lte_pdsch_pc"]
+    out = pd.DataFrame({
+        "collection": ["D2C_Boulder_MostStatic_EARFCN8665"] * 3,  # -> "Other"
+        "link": ["DL", "DL", "DL"],
+        "throughput": [1.0, 1.0, 0.0],
+    })
+    raw = pd.DataFrame({"Test Name": ["Ookla(R)", "Ping", "-"]})
+    traffic = loader._qp_traffic(out, raw, ds)
+    assert traffic.iloc[0] == "Ookla"
+    assert traffic.iloc[1] == "Ping"
+    assert traffic.iloc[2] == "Other"
+
+
+def test_align_d2c_traffic_relabels_from_sigcap():
+    """QP D2C rows (QP-idle PHY captures) inherit the SigCap traffic active at
+    the same time; non-D2C and non-QP rows are untouched."""
+    import pandas as pd
+    from qpviz import loader
+
+    t0 = pd.Timestamp("2026-09-14 19:47:00")
+    qp = pd.DataFrame({
+        "time": [t0, t0 + pd.Timedelta("2s"), t0 + pd.Timedelta("30s")],
+        "collection": ["D2C_..._twoPhone1_PingiperULDL"] * 2 + ["NoForcing_Static_Ookla"],
+        "provider": ["QP", "QP", "QP"],
+        "traffic": pd.Series(["Ping", "Ping", "Ookla"], dtype="category"),
+    })
+    ref = pd.DataFrame({
+        "time": [t0, t0 + pd.Timedelta("2s")],
+        "traffic": ["iperf DL", "iperf UL"],
+    })
+    out = loader.align_d2c_traffic(qp, ref, tolerance="6s")
+    # the two D2C rows are relabelled to the aligned SigCap traffic
+    assert out.loc[0, "traffic"] == "iperf DL"
+    assert out.loc[1, "traffic"] == "iperf UL"
+    # the non-D2C Ookla row (and any far-from-ref row) keeps its own label
+    assert out.loc[2, "traffic"] == "Ookla"
+
+
+def test_align_d2c_traffic_keeps_unmatched_and_nonqp_rows():
+    import pandas as pd
+    from qpviz import loader
+    t0 = pd.Timestamp("2026-09-14 19:47:00")
+    frame = pd.DataFrame({
+        "time": [t0, t0],
+        "collection": ["D2C_x", "D2C_x"],
+        "provider": ["QP", "SIGCAP"],   # SigCap D2C row must not be overwritten
+        "traffic": pd.Series(["Mixed", "iperf DL"], dtype="category"),
+    })
+    ref = pd.DataFrame({"time": [t0 + pd.Timedelta("1h")], "traffic": ["Ping"]})  # too far
+    out = loader.align_d2c_traffic(frame, ref, tolerance="6s")
+    assert out.loc[0, "traffic"] == "Mixed"       # QP row, no match in tolerance
+    assert out.loc[1, "traffic"] == "iperf DL"    # SigCap row untouched

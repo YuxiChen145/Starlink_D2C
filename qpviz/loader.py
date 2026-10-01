@@ -21,6 +21,8 @@ from .schema import (
     PRISM_DATASETS_BY_KEY,
     SIGCAP_APP_TPUT_COL,
     SIGCAP_DEVICE_COL,
+    traffic_label,
+    QP_TEST_NAME_COL,
     SIGCAP_DATASETS,
     SIGCAP_DATASETS_BY_KEY,
     Dataset,
@@ -32,7 +34,7 @@ DEFAULT_SIGCAP_DIR = os.environ.get("SIGCAP_DATA_DIR", "Sigcap CSV")
 DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 12
+CACHE_VERSION = 15
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
@@ -67,6 +69,7 @@ _CATEGORICAL = (
     "source_label",
     "provider",
     "test_type",
+    "traffic",
 )
 
 #: free-text dimensions, always stored as pandas ``string``
@@ -208,12 +211,62 @@ def _add_n_factor(out: pd.DataFrame, ds: Dataset) -> None:
     out["n_factor"] = n
 
 
+#: a channel carrying more than this (Mbps) is a real bulk transfer; TCP ACKs on
+#: the reverse channel of a one-way iperf peak well below it (~0.4), real bulk is
+#: several Mbps, so this cleanly tells the active direction apart from ACKs
+_QP_BULK_MBPS = 0.5
+
+
+def _qp_traffic(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> pd.Series:
+    """Per-row QP traffic type from the columns, not just the session name.
+
+    Direction-specific sessions (``...iperfDL`` / ``...iperfUL`` / ``Ookla`` /
+    ``Ping`` / ``IDLE``) already name their traffic, so every row takes that
+    label. Only a **combined** session (name maps to ``Mixed`` - e.g.
+    ``PingiperfULDL``) is split per row: a channel actively transferring
+    (> ``_QP_BULK_MBPS``, so ACKs on the reverse channel don't count) is that
+    direction's iperf traffic; an idle row stays ``Mixed`` because QP can't tell
+    a ping from a gap. ``Test Name`` (Qualipoc's active-test column) fills in the
+    rows whose name carried no traffic keyword at all (``Other``).
+    """
+    idx = out.index
+    coll_label = (
+        out["collection"].astype("string").map(traffic_label)
+        if "collection" in out.columns
+        else pd.Series("Other", index=idx)
+    )
+    res = coll_label.astype("object")
+
+    link = (out["link"].astype("string") if "link" in out.columns
+            else pd.Series(ds.link, index=idx, dtype="string"))
+    tput = (pd.to_numeric(out["throughput"], errors="coerce")
+            if "throughput" in out.columns else pd.Series(np.nan, index=idx))
+    bulk = tput.fillna(0.0) > _QP_BULK_MBPS
+
+    # split only the ambiguous combined ("Mixed") sessions, by active direction
+    mixed = coll_label.eq("Mixed").to_numpy()
+    res[mixed & (bulk & link.eq("DL")).to_numpy()] = "iperf DL"
+    res[mixed & (bulk & link.eq("UL")).to_numpy()] = "iperf UL"
+
+    # enrich rows whose session name had no traffic keyword, using Test Name
+    if QP_TEST_NAME_COL in raw.columns:
+        tn = raw[QP_TEST_NAME_COL].astype("string").str.strip().str.lower().reindex(idx)
+        other = res.eq("Other").to_numpy() if hasattr(res, "eq") else (res == "Other")
+        other = (pd.Series(res, index=idx) == "Other").to_numpy()
+        res[other & tn.str.contains("ping", na=False).to_numpy()] = "Ping"
+        res[other & tn.str.contains("ookla", na=False).to_numpy()] = "Ookla"
+        res[other & tn.str.contains("iperf", na=False).to_numpy()] = "iperf"
+
+    return pd.Series(res, index=idx).astype("string")
+
+
 def normalise(
     raw: pd.DataFrame,
     ds: Dataset,
     collection: Optional[str] = None,
     link=None,
     test_type: Optional[str] = None,
+    traffic=None,
 ) -> pd.DataFrame:
     """Map one raw CSV frame onto the canonical schema.
 
@@ -277,6 +330,15 @@ def normalise(
         out["collection"] = collection
     if test_type is not None:
         out["test_type"] = test_type
+    # traffic type - one label per row. SigCap passes a per-row Series read from
+    # its measurement columns (a bare-"iperf" session is really ping + iperf
+    # UL/DL); QP / PRISM fall back to the collection-name classifier.
+    if traffic is not None:
+        out["traffic"] = pd.Series(traffic, index=out.index).astype("string")
+    elif ds.provider == "QP":
+        out["traffic"] = _qp_traffic(out, raw, ds)
+    elif "collection" in out.columns:
+        out["traffic"] = out["collection"].astype("string").map(traffic_label)
     if "lat" not in out.columns:
         out["lat"] = np.nan
         out["lon"] = np.nan
@@ -662,6 +724,39 @@ def _sigcap_link(raw: pd.DataFrame) -> pd.Series:
     return link
 
 
+def _sigcap_traffic(raw: pd.DataFrame) -> pd.Series:
+    """Per-row traffic type from SigCap's own measurement columns.
+
+    A SigCap session whose *name* is only "iperf" actually interleaves ping,
+    iperf downlink and iperf uplink phases - and each row records which one was
+    running (``iperf_tput_mean_mbps`` + ``iperf_direction``, ``http_tput_...``,
+    ``ping_rtt_mean_ms``). So the label is read per row, not from the file name:
+    iperf DL/UL first, then HTTP, then Ping; a radio-only row (no app sample) is
+    ``Other``.
+    """
+    idx = raw.index
+
+    def _num(col):
+        return (_to_numeric(raw[col]) if col in raw.columns
+                else pd.Series(np.nan, index=idx))
+
+    iperf = _num("iperf_tput_mean_mbps")
+    http = _num("http_tput_mean_mbps")
+    ping = _num("ping_rtt_mean_ms")
+    direction = (raw["iperf_direction"].astype("string").str.lower()
+                 if "iperf_direction" in raw.columns
+                 else pd.Series(pd.NA, index=idx, dtype="string"))
+
+    out = pd.Series("Other", index=idx, dtype="object")
+    has_iperf = iperf.notna()
+    out[has_iperf & direction.eq("download")] = "iperf DL"
+    out[has_iperf & direction.eq("upload")] = "iperf UL"
+    out[has_iperf & ~direction.isin(["download", "upload"])] = "iperf"
+    out[(out == "Other") & http.notna()] = "HTTP"
+    out[(out == "Other") & ping.notna()] = "Ping"
+    return out
+
+
 def _prep_sigcap(raw: pd.DataFrame) -> pd.DataFrame:
     """In-place prep before normalisation: strip tz, scrub sentinels, coalesce
     the iperf/HTTP throughput columns into one app-throughput column."""
@@ -858,7 +953,9 @@ def read_sigcap_file(
 
     collection, test_type = _sigcap_meta(path)
     link = _sigcap_link(raw)
-    frame = normalise(raw, ds, collection=collection, link=link, test_type=test_type)
+    traffic = _sigcap_traffic(raw)
+    frame = normalise(raw, ds, collection=collection, link=link,
+                      test_type=test_type, traffic=traffic)
 
     if cache_path is not None:
         try:
@@ -887,3 +984,58 @@ def load_sigcap(
             except Exception:  # pragma: no cover - skip a bad file, keep the rest
                 continue
     return concat_frames(frames)
+
+
+def align_d2c_traffic(
+    frame: pd.DataFrame,
+    ref: Optional[pd.DataFrame],
+    tolerance: str = "6s",
+) -> pd.DataFrame:
+    """Relabel QP ``D2C`` rows' traffic from a time-aligned SigCap reference.
+
+    In the D2C campaign QP runs *idle* (extracting PHY only) while SigCap
+    generates the traffic, so QP's own columns and its collection name (which
+    even carries typos like ``PingiperULDL``) are not a reliable traffic label.
+    ``ref`` is a ``time`` + ``traffic`` table taken from the SigCap rows (the
+    ground truth); each QP D2C row inherits the SigCap traffic active within
+    ``tolerance`` of its timestamp. Rows with no SigCap match, and every non-D2C
+    or non-QP row, keep the label they already had.
+    """
+    if (frame is None or frame.empty or ref is None or getattr(ref, "empty", True)
+            or "collection" not in frame.columns or "traffic" not in frame.columns):
+        return frame
+    prov = frame["provider"].astype("string") if "provider" in frame.columns else None
+    is_qp = prov.eq("QP").to_numpy() if prov is not None else np.ones(len(frame), bool)
+    is_d2c = (
+        frame["collection"].astype("string").str.contains("D2C", case=False, na=False).to_numpy()
+        & is_qp
+    )
+    if not is_d2c.any():
+        return frame
+
+    r = ref.dropna(subset=["time", "traffic"]).copy()
+    r["_time"] = pd.to_datetime(r["time"], errors="coerce")
+    r = r.dropna(subset=["_time"]).sort_values("_time")[["_time", "traffic"]]
+    r = r.rename(columns={"traffic": "_ref"})
+    if r.empty:
+        return frame
+
+    out = frame.copy()
+    out["traffic"] = out["traffic"].astype("string")  # leave Categorical so we
+    # can write SigCap labels that weren't already among QP's categories
+    sub = out.loc[is_d2c, ["time"]].copy()
+    sub["_idx"] = sub.index
+    sub["_time"] = pd.to_datetime(sub["time"], errors="coerce")
+    sub = sub.dropna(subset=["_time"]).sort_values("_time")
+    if sub.empty:
+        return frame
+
+    merged = pd.merge_asof(
+        sub, r, on="_time", direction="nearest",
+        tolerance=pd.Timedelta(tolerance),
+    )
+    matched = merged["_ref"].notna()
+    if matched.any():
+        idx = merged.loc[matched, "_idx"].to_numpy()
+        out.loc[idx, "traffic"] = merged.loc[matched, "_ref"].to_numpy()
+    return out
