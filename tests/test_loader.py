@@ -267,3 +267,27 @@ def test_align_d2c_traffic_keeps_unmatched_and_nonqp_rows():
     out = loader.align_d2c_traffic(frame, ref, tolerance="6s")
     assert out.loc[0, "traffic"] == "Mixed"       # QP row, no match in tolerance
     assert out.loc[1, "traffic"] == "iperf DL"    # SigCap row untouched
+
+
+def test_cache_key_changes_with_the_dataset_definition(fixture_dir):
+    """Editing a column map must not serve a parquet built from the old one."""
+    import dataclasses
+    ds = DATASETS_BY_KEY["lte_radio"]
+    path = fixture_dir / ds.filename
+    edited = dataclasses.replace(ds, metrics={**ds.metrics, "rssi": "Some Other Column"})
+    assert loader._fingerprint(path, ds) != loader._fingerprint(path, edited)
+    assert loader._fingerprint(path, ds) == loader._fingerprint(path, ds)
+
+
+def test_band_normalisation_is_per_value_not_per_row():
+    import pandas as pd
+    from qpviz.schema import DATASETS_BY_KEY
+    ds = DATASETS_BY_KEY["lte_radio"]
+    band_col = ds.dims["band"]
+    raw = pd.DataFrame({c: ["x"] * 4 for c in ds.raw_columns()})
+    for c in ds.metrics.values():
+        if c in raw.columns:
+            raw[c] = 1.0  # keep the rows: all-NaN metric rows are dropped
+    raw[band_col] = ["25", "LTE E-UTRA 25", None, "25.0"]
+    out = loader.normalise(raw, ds)
+    assert out["band"].tolist() == ["B25", "B25", "Unknown", "B25"]

@@ -619,11 +619,29 @@ def test_pdf_figure_overlays_normalised_histograms():
     ]
     fig = charts.pdf_figure(curves, "RSRQ N-factor (RB)", bins=40)
     assert len(fig.data) == 2
-    assert all(t.type == "histogram" for t in fig.data)
-    assert all(t.histnorm == "probability" for t in fig.data)
+    assert all(t.type == "bar" for t in fig.data)
+    # each group is a probability mass: bars sum to 1, shared bin grid
+    for t in fig.data:
+        assert abs(sum(t.y) - 1.0) < 1e-9
+    assert list(fig.data[0].x) == list(fig.data[1].x)
     assert fig.layout.barmode == "overlay"
     # empty input is handled
     assert len(charts.pdf_figure([], "x").data) == 0
+
+
+def test_pdf_figure_bins_raw_values_and_keeps_minor_modes():
+    import numpy as np
+    from qpviz.stats import Curve, cdf_curves
+    import pandas as pd
+    # 10,000 samples at 25 plus a 1% minor mode at 100
+    vals = np.concatenate([np.full(9900, 25.0), np.full(100, 100.0)])
+    frame = pd.DataFrame({"n_factor": vals, "pci": 1})
+    raw = cdf_curves(frame, "n_factor", group_by=("pci",), max_points=None)
+    assert len(raw) == 1 and raw[0].x.size == 10_000
+    fig = charts.pdf_figure(raw, "N", bins=75)
+    y = np.asarray(fig.data[0].y)
+    assert abs(y[-1] - 0.01) < 1e-6          # the minor mode survives, at 1%
+    assert "n=10,000" in fig.data[0].name
 
 
 # --------------------------------------------------------------------------- #
@@ -683,3 +701,32 @@ def test_serving_timeline_empty_is_blank():
     import pandas as pd
     fig = charts.serving_timeline_figure(pd.DataFrame(columns=["collection", "enb"]), [])
     assert len(fig.data) == 0
+
+
+def test_timeline_multi_figure_colours_never_collide():
+    """An unslotted device must not take phone 1's colour, and the QP overlay for
+    a slot shares that phone's colour; the throughput y-range covers the overlay."""
+    import pandas as pd
+    from qpviz import timeline
+    from qpviz.theme import CATEGORICAL
+    t = pd.date_range("2026-09-14 19:35:00", periods=12, freq="5s")
+    binned = pd.concat([
+        pd.DataFrame({"time": t, "device": d, "rsrp": -100.0, "sinr": 5.0,
+                      "app_tput_dl": 5.0, "app_tput_ul": 1.0, "app_tput": 5.0,
+                      "rtt": 50.0, "pci": 100, "n_samples": 5})
+        for d in ("phoneB-uuid", "stray-uuid")
+    ], ignore_index=True)
+    overlay = pd.DataFrame({"time": t, "slot": 2, "phy_tput_dl": 40.0,
+                            "phy_tput_ul": 2.0, "rsrp": -98.0})
+    fig = charts.timeline_multi_figure(
+        binned, ["phoneB-uuid", "stray-uuid"], qp_overlay=overlay,
+        device_slots={"phoneB-uuid": 2}, slot_labels={2: "phoneB-uuid"},
+    )
+    colour = {tr.name: tr.line.color for tr in fig.data if tr.type == "scatter" and tr.line.color}
+    pal = CATEGORICAL["light"]
+    assert colour["phoneB-uuid"] == pal[1]            # slot 2 -> orange
+    assert colour["stray-uuid"] == pal[0]             # first free slot -> blue
+    assert colour["QP PHY · phoneB-uuid · DL"] == pal[1]
+    assert colour["phoneB-uuid"] != colour["stray-uuid"]
+    # DL panel range includes the 40 Mbps PHY overlay
+    assert fig.layout.yaxis.range[1] >= 40.0

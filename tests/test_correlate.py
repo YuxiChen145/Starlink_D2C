@@ -41,7 +41,8 @@ def test_overlap_window_is_the_shared_span():
     assert r.overlap is not None
     lo, hi = r.overlap
     assert lo >= pd.Timestamp("2026-09-12 16:11:30")
-    assert hi <= pd.Timestamp("2026-09-12 16:12:59")
+    # the window ends at the END of the last paired bin, not its start
+    assert hi <= pd.Timestamp("2026-09-12 16:13:00") and hi.second % 5 == 0
 
 
 def test_no_temporal_overlap_yields_no_pairs():
@@ -85,3 +86,34 @@ def test_overlap_window_helper():
     win = correlate.overlap_window(qp, sig)
     assert win is not None and win[0] <= win[1]
     assert correlate.overlap_window(qp, None) is None
+
+
+def test_too_few_pairs_gives_no_coefficient():
+    qp = _qp(n=30)                            # 30 s of QP
+    sig = _sig_from(qp, offset="0s", n=6)     # 6 five-second bins
+    r = correlate.correlate(qp, "mcs", sig, "app_tput", bin="5s")
+    assert 0 < r.n < correlate.MIN_PAIRS
+    assert not r.has_pairs and np.isnan(r.pearson)
+
+
+def test_direction_is_not_pooled_when_link_given():
+    """PDSCH (DL) and PUSCH (UL) throughput must not be averaged together."""
+    qp = _qp(n=120)
+    sig = _sig_from(qp, offset="0s", n=24)
+    qp = qp.rename(columns={"mcs": "throughput"})
+    ul = qp.copy()
+    ul["link"] = "UL"
+    ul["throughput"] = 100.0 - ul["throughput"]      # opposite trend on UL
+    both = pd.concat([qp, ul], ignore_index=True)
+
+    pooled = correlate.correlate(both, "throughput", sig, "app_tput", bin="5s")
+    assert pooled.mixed_directions
+    dl = correlate.correlate(both, "throughput", sig, "app_tput", bin="5s", link="DL")
+    assert dl.link == "DL" and not dl.mixed_directions
+    assert dl.pearson > 0.9
+    # pooled DL+UL averages to a flat line: the relationship vanishes
+    assert np.isnan(pooled.pearson) or abs(pooled.pearson) < 0.5
+    # SigCap rows with no direction (ping) are kept for the chosen link
+    sig["link"] = "-"
+    undirected = correlate.correlate(both, "throughput", sig, "app_tput", bin="5s", link="DL")
+    assert undirected.n == dl.n

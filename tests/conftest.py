@@ -105,6 +105,18 @@ def write_dataset(directory: Path, ds: Dataset, rows: int = 240, seed: int = 7) 
     return path
 
 
+@pytest.fixture(autouse=True)
+def _isolated_environ():
+    """Several app tests point the data folders at fixtures via ``os.environ``
+    directly; restore the environment after every test so one file's choice
+    of SigCap / PRISM folder cannot leak into the next."""
+    import os
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 @pytest.fixture(scope="session")
 def fixture_dir(tmp_path_factory) -> Path:
     directory = tmp_path_factory.mktemp("qp_csv")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 from pathlib import Path
@@ -22,6 +23,7 @@ from .schema import (
     SIGCAP_APP_TPUT_COL,
     SIGCAP_DEVICE_COL,
     traffic_label,
+    PRISM_GPS_TIME_COL,
     QP_TEST_NAME_COL,
     SIGCAP_DATASETS,
     SIGCAP_DATASETS_BY_KEY,
@@ -33,8 +35,10 @@ DEFAULT_PRISM_DIR = os.environ.get("PRISM_DATA_DIR", "PRISM CSV")
 DEFAULT_SIGCAP_DIR = os.environ.get("SIGCAP_DATA_DIR", "Sigcap CSV")
 DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 
+log = logging.getLogger(__name__)
+
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 15
+CACHE_VERSION = 16
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
@@ -53,9 +57,10 @@ _BAND_RE = re.compile(r"(\d+)\s*$")
 
 #: PRISM file names encode the collection after a ``date_TECH_ARFCN_`` prefix,
 #: e.g. ``2026_09_01_ LTE_8665_Shoreham_Court_Kitchen_static`` -> the collection
-#: is ``Shoreham Court Kitchen static``.
+#: is ``Shoreham Court Kitchen static``. The separators are whatever the person
+#: typed that day: ``_``, a space, both, or a day-less ``2026_09`` date.
 _PRISM_NAME_RE = re.compile(
-    r"^\s*\d{4}_\d{2}_\d{2}_\s*(?:LTE|NR)_\d+_(.+)$", re.IGNORECASE
+    r"^\s*\d{4}_\d{2}(?:_\d{2})?[_\s]*(?:LTE|NR)[_\s]*\d+[_\s]+(.+)$", re.IGNORECASE
 )
 
 #: columns stored as pandas categoricals (kept object-backed so the parquet
@@ -121,6 +126,8 @@ def normalise_band(value, tech: str) -> str:
 
 
 def parse_time(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
     for fmt in _TIME_FORMATS:
         parsed = pd.to_datetime(series, format=fmt, errors="coerce")
         if parsed.notna().any():
@@ -251,7 +258,6 @@ def _qp_traffic(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> pd.Series:
     # enrich rows whose session name had no traffic keyword, using Test Name
     if QP_TEST_NAME_COL in raw.columns:
         tn = raw[QP_TEST_NAME_COL].astype("string").str.strip().str.lower().reindex(idx)
-        other = res.eq("Other").to_numpy() if hasattr(res, "eq") else (res == "Other")
         other = (pd.Series(res, index=idx) == "Other").to_numpy()
         res[other & tn.str.contains("ping", na=False).to_numpy()] = "Ping"
         res[other & tn.str.contains("ookla", na=False).to_numpy()] = "Ookla"
@@ -267,6 +273,7 @@ def normalise(
     link=None,
     test_type: Optional[str] = None,
     traffic=None,
+    time: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """Map one raw CSV frame onto the canonical schema.
 
@@ -275,6 +282,8 @@ def normalise(
     the per-dataset direction: SigCap passes a per-row Series (DL/UL from
     ``iperf_direction``) since one session mixes downlink and uplink tests.
     ``test_type`` tags the workload (``iperf``/``http``) for SigCap rows.
+    ``time`` replaces the parsed time column when the caller has already
+    derived a better clock (PRISM, see :func:`prism_timestamps`).
     """
     out = pd.DataFrame(index=raw.index)
 
@@ -283,7 +292,9 @@ def normalise(
             np.nan, index=raw.index
         )
         if canon == "time":
-            out["time"] = parse_time(col)
+            out["time"] = parse_time(col) if time is None else pd.Series(
+                time, index=raw.index
+            )
         elif canon in ("lat", "lon"):
             out[canon] = _to_numeric(col)
         elif canon == "enb_sector":
@@ -293,7 +304,9 @@ def normalise(
         elif canon in _INT_DIMS:
             out[canon] = _to_numeric(col).astype(_INT_DIMS[canon])
         elif canon == "band":
-            out["band"] = [normalise_band(v, ds.tech) for v in col]
+            # one call per distinct raw value, not per row
+            lookup = {v: normalise_band(v, ds.tech) for v in col.dropna().unique()}
+            out["band"] = col.map(lookup).fillna("Unknown").astype("object")
         else:
             out[canon] = col.astype("string").str.strip()
 
@@ -391,9 +404,12 @@ def coerce_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def _fingerprint(path: Path) -> str:
+def _fingerprint(path: Path, ds: Optional[Dataset] = None) -> str:
+    """Cache key for one file: loader version, dataset column map, file name,
+    size and mtime - any of them changing rebuilds the parquet."""
     stat = path.stat()
-    raw = f"v{CACHE_VERSION}:{path.name}:{stat.st_size}:{int(stat.st_mtime)}"
+    sig = ds.signature() if ds is not None else "-"
+    raw = f"v{CACHE_VERSION}:{sig}:{path.name}:{stat.st_size}:{int(stat.st_mtime)}"
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
@@ -415,7 +431,7 @@ def read_dataset(
 
     cache_path = None
     if cache_dir:
-        cache_path = Path(cache_dir) / f"{ds.key}-{_fingerprint(path)}.parquet"
+        cache_path = Path(cache_dir) / f"{ds.key}-{_fingerprint(path, ds)}.parquet"
         if cache_path.exists():
             try:
                 return coerce_dtypes(pd.read_parquet(cache_path))
@@ -511,6 +527,45 @@ def prism_collection(path: Path) -> str:
     return core.replace("_", " ").strip()
 
 
+#: a PRISM system clock this far from the GPS clock is unset, not merely drifting
+_PRISM_CLOCK_SLACK = pd.Timedelta(hours=1)
+
+
+def prism_timestamps(raw: pd.DataFrame, name: str = "") -> pd.Series:
+    """Best wall-clock time for each PRISM row.
+
+    PRISM stamps every row with its own ``system_date_time`` (millisecond
+    resolution) and, when it has a fix, the GPS clock ``gps_date_time`` (whole
+    seconds). Some captures were made with the system clock unset, which puts
+    them in the year 2070. When the two clocks disagree by more than
+    :data:`_PRISM_CLOCK_SLACK`, the median GPS-minus-system offset is added to
+    the system clock, which keeps the millisecond cadence while moving the
+    capture to the right day; rows without a fix are corrected too. A file with
+    a bad clock and no GPS fix at all is left as recorded and logged.
+    """
+    sys_t = parse_time(raw["system_date_time"]) if "system_date_time" in raw else pd.Series(
+        pd.NaT, index=raw.index
+    )
+    if PRISM_GPS_TIME_COL not in raw.columns:
+        return sys_t
+    gps_t = parse_time(raw[PRISM_GPS_TIME_COL])
+    both = gps_t.notna() & sys_t.notna()
+    if both.any():
+        offset = (gps_t[both] - sys_t[both]).median()
+        if abs(offset) > _PRISM_CLOCK_SLACK:
+            log.info("PRISM %s: system clock off by %s, corrected from GPS time", name, offset)
+            return sys_t + offset
+        return sys_t
+    # no row has both clocks: trust GPS where present, else the system clock
+    out = sys_t.where(sys_t.notna(), gps_t)
+    years = out.dt.year.dropna()
+    latest_plausible = pd.Timestamp.now().year + 1
+    if not years.empty and ((years < 2020) | (years > latest_plausible)).any():
+        log.warning("PRISM %s: system clock unset (year %d) and no GPS fix to correct it",
+                    name, int(years.iloc[0]))
+    return out
+
+
 def _prism_key_for(path: Path) -> Optional[str]:
     """Which PRISM dataset a file belongs to, decided from its header columns."""
     try:
@@ -551,7 +606,7 @@ def read_prism_file(
     """Read + normalise one PRISM scan file (collection from its name)."""
     cache_path = None
     if cache_dir:
-        cache_path = Path(cache_dir) / f"{ds.key}-{_fingerprint(path)}.parquet"
+        cache_path = Path(cache_dir) / f"{ds.key}-{_fingerprint(path, ds)}.parquet"
         if cache_path.exists():
             try:
                 return coerce_dtypes(pd.read_parquet(cache_path))
@@ -564,7 +619,8 @@ def read_prism_file(
     header = pd.read_csv(path, nrows=0)
     wanted = [c for c in ds.raw_columns() if c in header.columns]
     raw = pd.read_csv(path, usecols=wanted, low_memory=False)
-    frame = normalise(raw, ds, collection=prism_collection(path))
+    frame = normalise(raw, ds, collection=prism_collection(path),
+                      time=prism_timestamps(raw, name=path.name))
 
     if cache_path is not None:
         try:
@@ -590,7 +646,8 @@ def load_prism(
         ds = PRISM_DATASETS_BY_KEY[key]
         try:
             frames.append(read_prism_file(path, ds, cache_dir=cache_dir))
-        except Exception:  # pragma: no cover - skip a bad file, keep the rest
+        except Exception as exc:  # skip a bad file, keep the rest - but say so
+            log.warning("skipping PRISM file %s: %s: %s", path.name, type(exc).__name__, exc)
             continue
     return concat_frames(frames)
 
@@ -902,7 +959,7 @@ def read_sigcap_file(
     """Read + normalise one SigCap file for one dataset (LTE or NR rows only)."""
     cache_path = None
     if cache_dir:
-        cache_path = Path(cache_dir) / f"{ds.key}-{_fingerprint(path)}.parquet"
+        cache_path = Path(cache_dir) / f"{ds.key}-{_fingerprint(path, ds)}.parquet"
         if cache_path.exists():
             try:
                 return coerce_dtypes(pd.read_parquet(cache_path))
@@ -950,7 +1007,8 @@ def load_sigcap(
                 continue
             try:
                 frames.append(read_sigcap_file(path, ds, cache_dir=cache_dir))
-            except Exception:  # pragma: no cover - skip a bad file, keep the rest
+            except Exception as exc:  # skip a bad file, keep the rest - but say so
+                log.warning("skipping SigCap file %s: %s: %s", path.name, type(exc).__name__, exc)
                 continue
     return concat_frames(frames)
 

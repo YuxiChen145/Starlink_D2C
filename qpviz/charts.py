@@ -11,6 +11,8 @@ import plotly.graph_objects as go
 
 from .stats import Curve
 from .theme import (
+    BAND_CONCURRENT,
+    BAND_SHARED_PCI,
     CATEGORICAL,
     CHROME,
     DIVERGING_RED_BLUE,
@@ -121,6 +123,11 @@ def pdf_figure(
     Each group is normalised to a probability (its bars sum to 1), so groups of
     different sizes are comparable and the mass piling up at particular values
     (e.g. the RSRQ N-factor at 25 / 50 / 100 RBs) is easy to read.
+
+    ``curves`` must carry the *raw* sample values in ``x`` (build them with
+    ``cdf_curves(..., max_points=None)``): a histogram of a quantile-thinned
+    ECDF loses minor modes and misreports ``n``. The bins are computed here
+    with numpy so only ``bins`` bars per group reach the browser.
     """
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
@@ -133,23 +140,28 @@ def pdf_figure(
         lo, hi = float(allx.min()), float(allx.max())
         if hi <= lo:
             hi = lo + 1.0
-        size = (hi - lo) / max(1, int(bins))
-        xbins = dict(start=lo, end=hi + size, size=size)
+        edges = np.linspace(lo, hi, max(1, int(bins)) + 1)
     else:
-        xbins = None
+        edges = np.array([0.0, 1.0])
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    width = float(edges[1] - edges[0])
 
     for i, curve in enumerate(curves):
         color, _ = series_style(i, mode)
+        vals = np.asarray(curve.x, dtype="float64")
+        vals = vals[np.isfinite(vals)]
+        counts, _ = np.histogram(vals, bins=edges)
+        prob = counts / counts.sum() if counts.sum() else counts.astype("float64")
         fig.add_trace(
-            go.Histogram(
-                x=curve.x,
-                name=f"{curve.name}  (n={curve.n:,})",
-                histnorm="probability",
-                xbins=xbins,
+            go.Bar(
+                x=centers, y=prob, width=width,
+                name=f"{curve.name}  (n={vals.size:,})",
                 marker=dict(color=color, line=dict(width=0)),
                 opacity=0.55 if len(curves) > 1 else 0.85,
+                customdata=np.stack([edges[:-1], edges[1:]], axis=1),
                 hovertemplate=(
-                    f"<b>{curve.name}</b><br>{axis_label}: %{{x}}"
+                    f"<b>{curve.name}</b><br>{axis_label}: "
+                    "%{customdata[0]:.3g} – %{customdata[1]:.3g}"
                     "<br>%{y:.1%} of samples<extra></extra>"
                 ),
             )
@@ -202,8 +214,8 @@ def color_bins(
 ) -> Tuple[List[float], List[str]]:
     """Return ``(edges, colors)`` where ``len(edges) == len(colors) + 1``.
 
-    ``sequential`` uses a single blue hue light -> dark over the 5th-95th
-    percentile range.  ``diverging`` uses red <-> blue with a neutral grey
+    ``sequential`` uses a single blue hue light -> dark over the 2nd-98th
+    percentile range (so a few outliers do not wash out the scale).  ``diverging`` uses red <-> blue with a neutral grey
     midpoint and an equal number of steps per arm.
     """
     arr = _clean(values)
@@ -268,7 +280,8 @@ def nice_ticks(lo: float, hi: float, max_ticks: int = 7) -> Tuple[List[float], f
 
 
 def _tick_text(value: float, step: Optional[float] = None) -> str:
-    """Compact tick label - throughput runs to tens of thousands of kbps."""
+    """Compact tick label; values in the thousands (e.g. ARFCNs, cell ids,
+    sample counts) get a ``k`` suffix."""
     magnitude = abs(value)
     if magnitude >= 10_000:
         return f"{value / 1000:.0f}k"
@@ -1453,12 +1466,22 @@ def timeline_multi_figure(
         or ("rb_ul" in ov.columns and ov["rb_ul"].notna().any())
     )
 
+    # One colour policy for everything on the canvas: a phone with a slot owns
+    # categorical slot-1; a device without one takes the next slot no phone
+    # owns, so an unslotted device and phone 1 never share blue. The QP overlay
+    # for a slot reuses that slot's colour.
+    taken = {int(sl) - 1 for sl in device_slots.values() if sl}
+    free = iter(i for i in range(10_000) if i not in taken)
+    dev_color_index = {}
+    for dev in devices:
+        slot = device_slots.get(str(dev))
+        dev_color_index[str(dev)] = int(slot) - 1 if slot else next(free)
+
     def _slot_color(slot):
         return series_style(int(slot) - 1, mode)[0]
 
     def _dev_color(i, dev):
-        slot = device_slots.get(str(dev))
-        return _slot_color(slot) if slot else series_style(i, mode)[0]
+        return series_style(dev_color_index.get(str(dev), i), mode)[0]
 
     plan = [("dl", "Downlink throughput (Mbps)"), ("ul", "Uplink throughput (Mbps)")]
     if has_rb:
@@ -1485,13 +1508,9 @@ def timeline_multi_figure(
 
     for seg in concurrency:
         if seg.get("value", 0) and seg["value"] >= 2:
-            _band(seg["start"], seg["end"], chrome["muted"], 0.14)
-    try:
-        accent = DIVERGING_RED_BLUE[-1]
-    except Exception:
-        accent = "#eb6834"
+            _band(seg["start"], seg["end"], BAND_CONCURRENT.get(mode, BAND_CONCURRENT["light"]), 0.14)
     for seg in shared_pci:
-        _band(seg["start"], seg["end"], accent, 0.18)
+        _band(seg["start"], seg["end"], BAND_SHARED_PCI.get(mode, BAND_SHARED_PCI["light"]), 0.22)
 
     # --- per-device SigCap traces (solid) ---------------------------------- #
     panels = [
@@ -1565,7 +1584,12 @@ def timeline_multi_figure(
         fig.update_yaxes(gridcolor=chrome["grid"], zeroline=False,
                          linecolor=chrome["axis"],
                          tickfont=dict(color=chrome["muted"], size=11), row=r, col=1)
-    tput_vals = pd.concat([binned["app_tput_dl"], binned["app_tput_ul"]])
+    # the throughput panels share one y-range covering BOTH the app traces and
+    # the QP PHY overlay, so a PHY line above the app line is never clipped
+    tput_parts = [binned["app_tput_dl"], binned["app_tput_ul"]]
+    if ov is not None:
+        tput_parts += [ov[c] for c in ("phy_tput_dl", "phy_tput_ul") if c in ov.columns]
+    tput_vals = pd.concat(tput_parts)
     tmax = pd.to_numeric(tput_vals, errors="coerce").max()
     if pd.notna(tmax) and tmax > 0:
         fig.update_yaxes(range=[0, tmax * 1.08], row=row_of["dl"], col=1)

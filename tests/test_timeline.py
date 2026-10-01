@@ -298,3 +298,84 @@ def test_shading_survives_a_bin_finer_than_the_cadence(multi):
 def test_detection_bin_matches_plot_bin_when_coarser(multi):
     r = timeline.build(multi, bin="30s")
     assert r.detect_bin == "30s"            # coarser than cadence -> use plot bin
+
+
+# --------------------------------------------------------------------------- #
+# Activity means carrying traffic, not merely logging
+# --------------------------------------------------------------------------- #
+
+
+def _two_phones(idle_second=True):
+    """Phone A runs iperf DL for 60 s on PCI 100. Phone B logs the whole time
+    on PCI 100 but only carries traffic during the last 30 s."""
+    t = pd.date_range("2026-09-14 19:35:00", periods=60, freq="1s")
+    a = pd.DataFrame({"time": t, "device": "A", "app_tput": 10.0, "link": "DL",
+                      "pci": 100, "rsrp": -100.0})
+    b = pd.DataFrame({"time": t, "device": "B", "app_tput": np.nan, "link": "-",
+                      "pci": 100, "rsrp": -105.0})
+    if idle_second:
+        b.loc[b.index >= 30, ["app_tput", "link"]] = [5.0, "DL"]
+    return pd.concat([a, b], ignore_index=True)
+
+
+def test_idle_logger_is_not_a_contender():
+    res = timeline.build(_two_phones(), bin="5s")
+    # B is present in every bin but only active in the second half
+    act = timeline._active_by_bin(res.binned_detect)
+    assert (act["n_present"] == 2).all()
+    assert act["n_active"].tolist() == [1] * 6 + [2] * 6
+    cmp = res.by_concurrency.set_index("device")
+    assert cmp.loc["A", "solo_n"] == 6 and cmp.loc["A", "concurrent_n"] == 6
+    # shared PCI only counts while both carry traffic
+    assert res.n_shared_bins == 6
+    assert {"solo_std", "concurrent_std"} <= set(res.by_concurrency.columns)
+
+
+def test_direction_tables_are_separate():
+    res = timeline.build(_two_phones(), bin="5s")
+    assert set(res.by_concurrency_dir) == {"DL", "UL", "both"}
+    dl = res.by_concurrency_dir["DL"].set_index("device")
+    ul = res.by_concurrency_dir["UL"].set_index("device")
+    assert dl.loc["A", "concurrent_n"] == 6
+    assert ul["solo_n"].sum() == 0 and ul["concurrent_n"].sum() == 0
+
+
+def test_segments_use_the_declared_bin_width():
+    t = pd.to_datetime(["2026-09-14 19:00:00", "2026-09-14 19:00:20", "2026-09-14 19:00:25"])
+    # first two populated bins are 20 s apart: inferring the width from them
+    # would make a 5 s bin look 20 s wide
+    segs = timeline._segments_from_flags(pd.Series(t), pd.Series([1, 1, 1]),
+                                         width=pd.Timedelta("5s"))
+    assert segs[-1]["end"] == pd.Timestamp("2026-09-14 19:00:30")
+    # a gap of more than three bins breaks the run
+    assert len(segs) == 2
+
+
+def test_overlay_by_condition_keeps_slots_apart():
+    frame = _two_phones()
+    res = timeline.build(frame, bin="5s")
+    t = res.binned_detect["time"].unique()
+    # slot 1 gets fewer RBs under contention, slot 2 is constant: pooled they
+    # would hide each other
+    ov = pd.concat([
+        pd.DataFrame({"time": t, "slot": 1, "rb_dl": [20.0] * 6 + [10.0] * 6}),
+        pd.DataFrame({"time": t, "slot": 2, "rb_dl": 12.0}),
+    ])
+    out = timeline.overlay_by_condition(res.binned_detect, ov, "rb_dl", bin="5s")
+    assert "slot" in out.columns and set(out["slot"]) == {1, 2}
+    s1 = out[(out["slot"] == 1) & (out["comparison"] == "phones")].iloc[0]
+    assert s1["a_mean"] == 10.0 and s1["b_mean"] == 20.0 and s1["delta_pct"] == -50.0
+    s2 = out[(out["slot"] == 2) & (out["comparison"] == "phones")].iloc[0]
+    assert s2["delta_pct"] == 0.0
+
+
+def test_best_pci_needs_enough_bins():
+    frame = _two_phones()
+    # one stray bin on PCI 999 with a huge throughput must not win
+    stray = frame.iloc[[0]].copy()
+    stray["pci"] = 999
+    stray["app_tput"] = 1000.0
+    stray["time"] = pd.Timestamp("2026-09-14 19:40:00")
+    res = timeline.build(pd.concat([frame, stray], ignore_index=True), bin="5s")
+    best = res.drivers.set_index("device").loc["A", "best_pci"]
+    assert best == 100

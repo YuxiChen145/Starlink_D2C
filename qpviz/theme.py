@@ -33,6 +33,12 @@ CATEGORICAL: Dict[str, List[str]] = {
     ],
 }
 
+#: shaded-band accents on the multi-phone timeline. Phones take the categorical
+#: slots (blue, orange, ...), so the bands use hues no phone can get: a neutral
+#: grey for "two phones active" and the yellow for "shared PCI".
+BAND_CONCURRENT: Dict[str, str] = {"light": "#6b6b6b", "dark": "#a0a0a0"}
+BAND_SHARED_PCI: Dict[str, str] = {"light": "#eda100", "dark": "#c98500"}
+
 #: used as a secondary encoding once the 8 categorical slots are exhausted
 DASHES: List[str] = ["solid", "dash", "dot", "dashdot", "longdash", "longdashdot"]
 

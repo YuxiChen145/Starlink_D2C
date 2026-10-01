@@ -11,6 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -139,11 +140,12 @@ def sigcap_traffic_ref(sigcap_dir: str, dataset_keys: Tuple[str, ...]) -> pd.Dat
     return sc.loc[keep, ["time", "traffic"]].reset_index(drop=True)
 
 
-def _align_qp_d2c(fr: pd.DataFrame) -> pd.DataFrame:
+def _align_qp_d2c(fr: pd.DataFrame, sigcap_dir: str,
+                  sigcap_keys: Sequence[str]) -> pd.DataFrame:
     """Relabel QP D2C traffic from the SigCap reference, when SigCap is present."""
-    if not sigcap_present:
+    if not sigcap_keys:
         return fr
-    ref = sigcap_traffic_ref(sigcap_dir, tuple(sorted(sigcap_present)))
+    ref = sigcap_traffic_ref(sigcap_dir, tuple(sorted(sigcap_keys)))
     return loader.align_d2c_traffic(fr, ref)
 
 
@@ -218,7 +220,18 @@ def theme_mode() -> str:
 
 
 def multiselect_all(label: str, options: Sequence, key: str, help: str = ""):
-    """Multiselect where an empty selection means 'everything'."""
+    """Multiselect where an empty selection means 'everything'.
+
+    The options cascade (collections -> band -> carrier -> PCI), so a value
+    picked earlier can disappear from the list after an upstream change; it is
+    pruned from the stored selection before the widget renders rather than
+    lingering as an invisible filter.
+    """
+    if key in st.session_state:
+        opts = set(options)
+        kept = [v for v in st.session_state[key] if v in opts]
+        if len(kept) != len(st.session_state[key]):
+            st.session_state[key] = kept
     chosen = st.multiselect(
         label,
         options=list(options),
@@ -377,7 +390,7 @@ frame = loader.concat_frames(_parts)
 frame = frame[frame[metric].notna()] if metric in frame.columns else frame.iloc[0:0]
 # D2C QP rows are QP-idle PHY captures of SigCap-generated traffic -> label their
 # traffic from the time-aligned SigCap ground truth, not QP's own columns/name
-frame = _align_qp_d2c(frame)
+frame = _align_qp_d2c(frame, sigcap_dir, sigcap_present)
 freq_label = loader.freq_label_for(frame)
 freq_prefix = loader.freq_prefix_for(frame)
 
@@ -472,8 +485,9 @@ with st.sidebar:
     effective_pcis = pcis or (shared_pcis or _NO_PCI if shared_mode else [])
 
     drop_unknown = st.checkbox(
-        f"Require a known PCI and {freq_prefix}",
+        "Require a known PCI and carrier",
         value=True,
+        key="f_drop_unknown",
         help=(
             "Some exports (notably LTE Radio Neighbor) leave PCI and the "
             "carrier blank; those rows would otherwise collapse into one "
@@ -700,9 +714,13 @@ sat_active = (
 sat_vis_col = f"sat_vis_{int(sat_mask)}" if sat_enable else None
 if sat_active and not frame.empty:
     frame = frame.reset_index(drop=True)
+    # every input that changes `frame`'s rows must be in here, or a cached
+    # visibility column of the wrong length comes back
     _vis_key = (
-        qp_dir, tuple(sorted(qp_source_keys)), prism_dir,
-        tuple(sorted(prism_source_keys)), metric, float(sat_offset), tle_fp,
+        qp_dir, tuple(sorted(qp_source_keys)),
+        prism_dir, tuple(sorted(prism_source_keys)),
+        sigcap_dir, tuple(sorted(sigcap_source_keys)),
+        tuple(providers_active), metric, float(sat_offset), tle_fp, len(frame),
     )
     _vis = visibility_columns(
         frame, _vis_key, tle_dir, tle_fp, float(sat_offset),
@@ -1190,7 +1208,8 @@ with tab_cdf:
         metric,
         group_by=group_by,
         min_samples=int(min_samples),
-        max_points=int(max_curve_points),
+        # the PDF is binned from the raw samples; only the CDF lines are thinned
+        max_points=None if plot_as == "PDF" else int(max_curve_points),
         freq_prefix=freq_prefix,
     )
     total_curves = len(curves)
@@ -1237,7 +1256,10 @@ with tab_cdf:
 # Cell identity
 # --------------------------------------------------------------------------- #
 
-with tab_cells:
+def _render_cell_identity() -> None:
+    """The Cell identity tab. Returns early (instead of st.stop(), which
+    would also blank every tab after this one) when no source carries
+    cell identity for the current selection."""
     # Cell identity from whichever active sources carry it. QP connected-mode
     # Radio exports give a *serving* cell over time (dwell, hand-overs). PRISM is
     # an SDR scanner: its decoded eNB / sector / PCI are identity observations
@@ -1269,7 +1291,7 @@ with tab_cells:
             "that decodes eNB / PCI, or a SigCap session — none is available for "
             "this selection."
         )
-        st.stop()
+        return
 
     _id_parts = []
     if qp_radio_keys:
@@ -1279,7 +1301,7 @@ with tab_cells:
     if sigcap_id_keys:
         _id_parts.append(load_sigcap_frame(sigcap_dir, sigcap_id_keys))
     radio = loader.concat_frames(_id_parts)
-    radio = _align_qp_d2c(radio)
+    radio = _align_qp_d2c(radio, sigcap_dir, sigcap_present)
 
     def _intersecting(values, column):
         """Only carry a filter across if it means anything in the identity frame."""
@@ -1692,6 +1714,11 @@ with tab_cells:
 # Statistics
 # --------------------------------------------------------------------------- #
 
+
+
+with tab_cells:
+    _render_cell_identity()
+
 with tab_stats:
     stat_group = st.multiselect(
         "Group statistics by",
@@ -1849,12 +1876,17 @@ if tab_corr is not None:
                 placeholder=f"All ({len(work_opts)})",
                 help="iperf vs. HTTP. Leave empty to include all.",
             )
-            dir_opts = loader.options(sig_cf, "link")
-            dirs = fc2.multiselect(
-                "Direction", dir_opts, default=[], key="corr_dir",
-                placeholder=f"All ({len(dir_opts)})",
-                help="Applied to both sources (DL/UL). Leave empty to include all.",
+            dir_opts = [d for d in ("DL", "UL") if d in set(loader.options(sig_cf, "link"))
+                        or d in set(loader.options(qp_cf, "link"))] or ["DL", "UL"]
+            corr_link = fc2.selectbox(
+                "Direction", dir_opts + ["Both (pooled)"], index=0, key="corr_dir",
+                help="QP PHY exports are per direction (PDSCH = DL, PUSCH = UL), so "
+                     "both sources are restricted to one direction before pairing. "
+                     "SigCap rows with no direction (ping) are kept. 'Both' pools "
+                     "DL and UL into one series - only meaningful for direction-"
+                     "free PHY metrics such as RSRP.",
             )
+            corr_link = None if corr_link == "Both (pooled)" else corr_link
             sess_opts = loader.options(sig_cf, "collection")
             sessions = fc3.multiselect(
                 "SigCap session", sess_opts, default=[], key="corr_sess",
@@ -1865,14 +1897,10 @@ if tab_corr is not None:
                 sig_cf = sig_cf[sig_cf["test_type"].astype("string").isin(workloads)]
             if sessions:
                 sig_cf = sig_cf[sig_cf["collection"].astype("string").isin(sessions)]
-            if dirs:
-                sig_cf = sig_cf[sig_cf["link"].astype("string").isin(dirs)]
-                if "link" in qp_cf.columns:
-                    qp_cf = qp_cf[qp_cf["link"].astype("string").isin(dirs)]
-
             result = correlate.correlate(
                 qp_cf, phy_metric, sig_cf, app_metric,
                 bin=bin_choice, qp_agg=agg_choice, sig_agg=agg_choice,
+                link=corr_link,
             )
 
             def _span(fr):
@@ -1906,10 +1934,16 @@ if tab_corr is not None:
             elif not result.has_pairs:
                 st.warning(
                     f"Only {result.n} paired {bin_choice} bin(s) in the overlap — "
-                    "not enough to correlate. Try a coarser time bin or widen the "
-                    "time window."
+                    f"at least {correlate.MIN_PAIRS} are needed before a coefficient "
+                    "means anything. Try a finer time bin or widen the time window."
                 )
             else:
+                if result.mixed_directions:
+                    st.warning(
+                        "DL and UL QP rows are pooled into one series for "
+                        f"**{phy_label}** — pick a direction unless the metric is "
+                        "direction-free."
+                    )
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Pearson r", f"{result.pearson:+.2f}")
                 m2.metric("Spearman ρ", f"{result.spearman:+.2f}")
@@ -1953,7 +1987,9 @@ if tab_timeline is not None:
             "second phone starts using Starlink D2C, and whether throughput moves "
             "together when both phones camp on the **same PCI**. How many phones "
             "are \"using\" it at any instant is counted from the data (distinct "
-            "device UUIDs with a sample in the same bin), not from the file names."
+            "device UUIDs carrying iperf / HTTP traffic in the same bin — a phone "
+            "that is only logging its serving cell is not a contender), not from "
+            "the file names."
         )
 
         sig_keys_tech = [
@@ -2023,7 +2059,10 @@ if tab_timeline is not None:
                 span = (res.binned["time"].min(), res.binned["time"].max())
                 mcols = st.columns(4)
                 mcols[0].metric("Phones", f"{len(res.devices)}")
-                mcols[1].metric("Max concurrent", f"{res.max_active}")
+                mcols[1].metric(
+                    "Max concurrent", f"{res.max_active}",
+                    help="Most phones carrying app traffic in one bin.",
+                )
                 mcols[2].metric("Shared-PCI bins", f"{res.n_shared_bins:,}")
                 _span_min = (span[1] - span[0]).total_seconds() / 60.0
                 _span_txt = (
@@ -2044,6 +2083,7 @@ if tab_timeline is not None:
                 # exactly like the SigCap traces. Falls back to a single pooled
                 # "QP" series (slot 0) when a collection carries no phoneN token.
                 qp_overlay = None     # long: time, slot, phy_tput_dl/ul, rsrp, rb_dl/ul
+                st.session_state["_tl_qp_scope"] = []   # set below only when scoped
                 sig_slots = timeline.device_slots(tframe)   # SigCap device -> phone slot
                 slot_labels = {}      # phone slot -> a SigCap device label (legend)
                 for _dev, _sl in sig_slots.items():
@@ -2160,9 +2200,13 @@ if tab_timeline is not None:
                     d = df.copy()
                     for c in tputcols:
                         if c in d.columns:
-                            d[c] = d[c].map(
-                                lambda v: f"{v:.2f}" if pd.notna(v) else "—"
-                            )
+                            sd = d[c.replace("_mean", "_std")] if c.replace("_mean", "_std") in d.columns else None
+                            d[c] = [
+                                (f"{v:.2f} ± {s_:.2f}" if pd.notna(v) and pd.notna(s_)
+                                 else f"{v:.2f}" if pd.notna(v) else "—")
+                                for v, s_ in zip(d[c], sd if sd is not None else [np.nan] * len(d))
+                            ]
+                    d = d.drop(columns=[c for c in d.columns if c.endswith("_std")])
                     if "delta_pct" in d.columns:
                         d["delta_pct"] = d["delta_pct"].map(
                             lambda v: f"{v:+.0f}%" if pd.notna(v) else "—"
@@ -2172,15 +2216,18 @@ if tab_timeline is not None:
                 if res.has_concurrency:
                     st.markdown("#### 1 phone vs 2 phones active")
                     st.caption(
-                        "Mean throughput (Mbps) for each phone when it was the "
-                        "only one transmitting vs when a second phone was active "
-                        "at the same instant. Δ is the change under contention."
+                        "Mean ± std throughput (Mbps) for each phone when it was "
+                        "the only one carrying traffic vs when a second phone was "
+                        "active at the same instant, on the detection grid "
+                        f"({res.detect_bin} bins). Δ is the change under "
+                        "contention. Downlink and uplink are compared separately "
+                        "— pooling them would confound direction with contention."
                     )
-                    dl = timeline.compare_by_concurrency(res.binned, "app_tput_dl")
-                    ul = timeline.compare_by_concurrency(res.binned, "app_tput_ul")
-                    both = timeline.compare_by_concurrency(res.binned, "app_tput")
-                    tabs_dir = st.tabs(["Both directions", "Downlink", "Uplink"])
-                    for tb, df in zip(tabs_dir, (both, dl, ul)):
+                    dl = res.by_concurrency_dir["DL"]
+                    ul = res.by_concurrency_dir["UL"]
+                    both = res.by_concurrency_dir["both"]
+                    tabs_dir = st.tabs(["Downlink", "Uplink", "Both (pooled)"])
+                    for tb, df in zip(tabs_dir, (dl, ul, both)):
                         with tb:
                             st.dataframe(
                                 _fmt(
@@ -2202,21 +2249,25 @@ if tab_timeline is not None:
                 if res.n_shared_bins > 0:
                     st.markdown("#### Same PCI vs different PCI")
                     st.caption(
-                        "Among the bins where both phones were active, mean "
-                        "throughput (Mbps) when they shared one serving PCI vs "
-                        "when they were on different PCIs."
+                        "Among the bins where both phones were carrying traffic, "
+                        "mean ± std throughput (Mbps) when they shared one serving "
+                        "PCI vs when they were on different PCIs."
                     )
-                    sp_both = res.by_shared_pci
-                    st.dataframe(
-                        _fmt(
-                            sp_both,
-                            {"device": "Phone", "shared_n": "same-PCI bins",
-                             "shared_mean": "same-PCI mean", "diff_n": "diff-PCI bins",
-                             "diff_mean": "diff-PCI mean", "delta_pct": "Δ"},
-                            ["shared_mean", "diff_mean"],
-                        ),
-                        hide_index=True, width="stretch",
-                    )
+                    tabs_pci = st.tabs(["Downlink", "Uplink", "Both (pooled)"])
+                    for tb, df in zip(tabs_pci, (res.by_shared_pci_dir["DL"],
+                                                 res.by_shared_pci_dir["UL"],
+                                                 res.by_shared_pci_dir["both"])):
+                        with tb:
+                            st.dataframe(
+                                _fmt(
+                                    df,
+                                    {"device": "Phone", "shared_n": "same-PCI bins",
+                                     "shared_mean": "same-PCI mean", "diff_n": "diff-PCI bins",
+                                     "diff_mean": "diff-PCI mean", "delta_pct": "Δ"},
+                                    ["shared_mean", "diff_mean"],
+                                ),
+                                hide_index=True, width="stretch",
+                            )
 
                 # ---- QP RB sanity check (per phone) ----------------------- #
                 _rb_present = qp_overlay is not None and any(

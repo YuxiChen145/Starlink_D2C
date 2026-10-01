@@ -340,3 +340,41 @@ def test_time_window_filter_narrows_samples(fixture_dir, monkeypatch, tmp_path):
     _assert_clean(app)
     after = int(app.metric[0].value.replace(",", ""))
     assert after < before
+
+
+def test_later_tabs_survive_a_missing_identity_source(tmp_path, monkeypatch):
+    """With only a PDSCH export there is no cell-identity source; the Cell
+    identity tab must say so and leave Statistics / Data rendering (it used to
+    call st.stop() and blank every tab after it)."""
+    from qpviz.schema import DATASETS_BY_KEY
+    from tests.conftest import write_dataset
+    d = tmp_path / "qp_pdsch_only"
+    d.mkdir()
+    write_dataset(d, DATASETS_BY_KEY["lte_pdsch_pc"])
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(d)
+    _assert_clean(app)
+    assert any("Cell identity needs" in i.value for i in app.info)
+    # the Statistics tab (after Cell identity) still rendered its controls
+    assert app.multiselect(key="stat_group") is not None
+
+
+def test_filter_selection_is_pruned_when_options_cascade(fixture_dir, monkeypatch, tmp_path):
+    """A value picked in a downstream filter must not linger as an invisible
+    filter once an upstream change (here: Collections) no longer offers it."""
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    # pick a PCI with every collection selected
+    first = int(app.multiselect(key="f_pcis").options[0])
+    app.multiselect(key="f_pcis").select(first).run()
+    _assert_clean(app)
+    assert app.multiselect(key="f_pcis").value == [first]
+    # now restrict collections so the option lists downstream shrink
+    colls = app.multiselect(key="f_collections").options
+    app.multiselect(key="f_collections").set_value(colls[:1]).run()
+    _assert_clean(app)
+    opts = [int(o) for o in app.multiselect(key="f_pcis").options]
+    value = app.multiselect(key="f_pcis").value
+    # invariant the fix guarantees: whatever is selected is in the options
+    assert all(v in opts for v in value)

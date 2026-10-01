@@ -16,6 +16,8 @@ rsrp, rsrq, rssi, sinr, mcs, throughput, bler, cqi, tx_power, pathloss
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -243,6 +245,21 @@ class Dataset:
             self.metrics["rb"] = self.rb_sched_col
         if self.rb_all_col and "rb_occ" not in self.metrics:
             self.metrics["rb_occ"] = self.rb_all_col
+
+    def signature(self) -> str:
+        """Stable digest of the column mapping - part of the parquet cache key,
+        so editing a dataset definition invalidates its cached frames."""
+        payload = json.dumps(
+            {
+                "key": self.key, "tech": self.tech, "link": self.link,
+                "provider": self.provider, "dims": self.dims,
+                "metrics": self.metrics, "rb_all": self.rb_all_col,
+                "rb_sched": self.rb_sched_col, "scs": self.scs_col,
+                "extra": self.extra_cols,
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha1(payload.encode()).hexdigest()[:10]
 
     def raw_columns(self) -> List[str]:
         cols = list(self.dims.values()) + [
@@ -555,12 +572,17 @@ def metrics_available(dataset_keys: List[str]) -> List[str]:
 # reads every matching file in the PRISM folder and routes it by its own
 # ``tech`` column.
 
-#: columns every PRISM export shares
+#: columns every PRISM export shares.  ``system_date_time`` is the scanner's
+#: own clock, which is sometimes unset (it then reads year 2070); the loader
+#: also reads ``gps_date_time`` (see PRISM_GPS_TIME_COL) and uses it to put the
+#: system clock right when the two disagree.
 _PRISM_COMMON = {
     "time": "system_date_time",
     "lat": "latitude",
     "lon": "longitude",
 }
+#: PRISM's GPS-derived wall clock (whole seconds; blank without a fix)
+PRISM_GPS_TIME_COL = "gps_date_time"
 
 PRISM_DATASETS: List[Dataset] = [
     Dataset(
@@ -585,6 +607,7 @@ PRISM_DATASETS: List[Dataset] = [
             "n_factor": DERIVED_METRIC,
         },
         note="PRISM SDR scan - every audible LTE cell, not just the serving one.",
+        extra_cols=[PRISM_GPS_TIME_COL],
     ),
     Dataset(
         key="prism_nr",
@@ -610,15 +633,12 @@ PRISM_DATASETS: List[Dataset] = [
             "n_factor": DERIVED_METRIC,
         },
         note="PRISM SDR scan - every audible 5G NR cell, not just the serving one.",
+        extra_cols=[PRISM_GPS_TIME_COL],
     ),
 ]
 
 PRISM_DATASETS_BY_KEY: Dict[str, Dataset] = {d.key: d for d in PRISM_DATASETS}
 
-#: every dataset the platform knows about, QP and PRISM together - use this for
-#: label / metadata look-ups by key; the metric->dataset resolvers stay split
-#: so the two sources never get pooled by accident.
-ALL_DATASETS_BY_KEY: Dict[str, Dataset] = {**DATASETS_BY_KEY, **PRISM_DATASETS_BY_KEY}
 
 
 def prism_datasets_for(
@@ -749,7 +769,9 @@ SIGCAP_DATASETS: List[Dataset] = [
 
 SIGCAP_DATASETS_BY_KEY: Dict[str, Dataset] = {d.key: d for d in SIGCAP_DATASETS}
 
-#: rebuilt to include SigCap - use this for label / metadata look-ups by key
+#: every dataset the platform knows about (QP, PRISM and SigCap) - use this
+#: for label / metadata look-ups by key; the metric->dataset resolvers stay
+#: split so the sources never get pooled by accident.
 ALL_DATASETS_BY_KEY: Dict[str, Dataset] = {
     **DATASETS_BY_KEY,
     **PRISM_DATASETS_BY_KEY,
