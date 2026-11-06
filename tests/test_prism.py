@@ -197,13 +197,47 @@ def test_prism_timestamps_correct_an_unset_system_clock_from_gps():
     assert abs((out.iloc[0] - pd.Timestamp("2026-09-30T23:14:38")).total_seconds()) < 2
 
 
-def test_prism_timestamps_without_any_gps_fix_are_left_as_recorded(caplog):
+def test_prism_timestamps_without_gps_or_name_date_are_left_as_recorded(caplog):
     import logging
     sys_t = ["2070-01-01T00:07:46.000", "2070-01-01T00:07:47.000"]
     with caplog.at_level(logging.WARNING, logger="qpviz.loader"):
-        out = loader.prism_timestamps(_prism_rows(sys_t, ["", ""], with_geo=False), name="x.csv")
+        out = loader.prism_timestamps(
+            _prism_rows(sys_t, ["", ""], with_geo=False),
+            name="2026_09_LTE_8665_Chicago_indoors_static.csv",  # month only, no day
+        )
     assert (out.dt.year == 2070).all()
-    assert any("x.csv" in r.message and "no GPS" in r.message for r in caplog.records)
+    assert any("Chicago_indoors" in r.message and "no GPS" in r.message for r in caplog.records)
+
+
+def test_prism_timestamps_without_gps_use_the_file_name_date():
+    import pandas as pd
+    sys_t = ["2070-01-01T00:17:25.762", "2070-01-01T00:18:00.000", "2070-01-01T01:32:16.904"]
+    out = loader.prism_timestamps(
+        _prism_rows(sys_t, ["", "", ""], with_geo=False),
+        name="2026_09_30 LTE_8665_DC_Hotel_7thFloor_static.csv",
+    )
+    # right day, elapsed time since the clock started kept exactly
+    assert out.iloc[0] == pd.Timestamp("2026-09-30T00:17:25.762")
+    assert out.diff().dropna().tolist() == pd.to_datetime(sys_t).to_series().diff().dropna().tolist()
+
+
+def test_prism_timestamps_with_a_good_clock_ignore_the_file_name():
+    import pandas as pd
+    sys_t = ["2026-09-02T01:02:04.660", "2026-09-02T01:02:05.000"]
+    out = loader.prism_timestamps(
+        _prism_rows(sys_t, ["", ""], with_geo=False),
+        name="2026_09_01_ LTE_8665_Shoreham_Court_Kitchen_static.csv",  # UTC rolled over
+    )
+    assert out.tolist() == pd.to_datetime(sys_t).tolist()
+
+
+def test_prism_name_date():
+    import pandas as pd
+    assert loader.prism_name_date("2026_10_01 LTE_8665_DC_1.csv") == pd.Timestamp("2026-10-01")
+    assert loader.prism_name_date("2026_09_18LTE_8665_emptySta.csv") == pd.Timestamp("2026-09-18")
+    assert loader.prism_name_date("2026_09_LTE_8665_Chicago.csv") is None
+    assert loader.prism_name_date("2026_13_40_bad.csv") is None
+    assert loader.prism_name_date("scan.csv") is None
 
 
 def test_load_prism_uses_corrected_time(prism_dir, cache_dir, tmp_path):
