@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -19,6 +20,19 @@ from .charts import (
 )
 from .filters import LatLon, geolocated
 
+#: Environment variable / Streamlit secret holding the CARTO basemaps API key.
+#: CARTO stopped serving its raster basemaps without a key on 2026-09-25 (a
+#: keyless request now gets an "API KEY REQUIRED" tile), so the CARTO styles are
+#: only offered when a key is configured. Get a free key at
+#: https://carto.com/basemaps/apikey/.
+CARTO_KEY_NAME = "CARTO_API_KEY"
+
+#: Basemap choices backed by CARTO, mapped to their ``xyzservices`` provider.
+CARTO_TILES: Dict[str, str] = {
+    "Light (CartoDB positron)": "CartoDB.Positron",
+    "Dark (CartoDB dark_matter)": "CartoDB.DarkMatter",
+}
+
 TILE_CHOICES: Dict[str, Tuple[str, Optional[str]]] = {
     "OpenStreetMap": ("OpenStreetMap", None),
     "Light (CartoDB positron)": ("CartoDB positron", None),
@@ -28,6 +42,35 @@ TILE_CHOICES: Dict[str, Tuple[str, Optional[str]]] = {
         "Tiles &copy; Esri",
     ),
 }
+
+
+def carto_api_key(secrets=None) -> Optional[str]:
+    """The CARTO key from the environment, else from ``secrets`` (``st.secrets``)."""
+    key = os.environ.get(CARTO_KEY_NAME, "").strip()
+    if not key and secrets is not None:
+        try:
+            key = str(secrets.get(CARTO_KEY_NAME, "") or "").strip()
+        except Exception:  # no secrets.toml -> Streamlit raises on access
+            key = ""
+    return key or None
+
+
+def tile_choices(carto_key: Optional[str] = None) -> List[str]:
+    """Basemap names to offer: the CARTO styles only when a key is set."""
+    return [name for name in TILE_CHOICES if carto_key or name not in CARTO_TILES]
+
+
+def resolve_tiles(tiles: str, carto_key: Optional[str] = None):
+    """``(tiles, attr)`` for ``folium.Map``; a CARTO choice without a key falls
+    back to OpenStreetMap rather than rendering blank "API KEY REQUIRED" tiles."""
+    if tiles in CARTO_TILES:
+        if not carto_key:
+            return TILE_CHOICES["OpenStreetMap"]
+        import xyzservices
+
+        provider = xyzservices.providers.query_name(CARTO_TILES[tiles])
+        return provider(apikey=carto_key), None
+    return TILE_CHOICES.get(tiles, TILE_CHOICES["OpenStreetMap"])
 
 
 def regions_from_drawings(drawings) -> List[List[LatLon]]:
@@ -67,7 +110,8 @@ def build_map(
     scale: str = "diverging",
     midpoint: Optional[float] = None,
     max_points: int = 3000,
-    tiles: str = "Light (CartoDB positron)",
+    tiles: str = "OpenStreetMap",
+    carto_key: Optional[str] = None,
     mode: str = "light",
     regions: Sequence[Sequence[LatLon]] = (),
     radius: int = 4,
@@ -87,7 +131,7 @@ def build_map(
     import folium
     from folium.plugins import Draw
 
-    tile_value, attribution = TILE_CHOICES.get(tiles, TILE_CHOICES["OpenStreetMap"])
+    tile_value, attribution = resolve_tiles(tiles, carto_key)
     geo = geolocated(frame)
     box = bounds(geo)
     center = (41.7001, -86.2371)  # ND campus - sensible default when empty

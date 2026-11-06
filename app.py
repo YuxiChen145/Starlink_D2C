@@ -630,10 +630,16 @@ with st.sidebar:
         map_scale = st.selectbox(
             "Map colour scale", ["diverging", "sequential"], index=0
         )
+        carto_key = mapview.carto_api_key(st.secrets)
         tiles = st.selectbox(
             "Basemap",
-            list(mapview.TILE_CHOICES),
-            index=1,
+            mapview.tile_choices(carto_key),
+            # Light CARTO when a key is configured, otherwise OpenStreetMap.
+            index=1 if carto_key else 0,
+            help=None if carto_key else (
+                "The CARTO Light/Dark basemaps need a free API key: set "
+                "CARTO_API_KEY in .streamlit/secrets.toml or the environment."
+            ),
         )
 
     st.divider()
@@ -961,6 +967,7 @@ with tab_map:
         midpoint=midpoint,
         max_points=int(max_map_points),
         tiles=tiles,
+        carto_key=carto_key,
         mode=MODE,
         regions=st.session_state["regions"],
         radius=int(marker_radius),
