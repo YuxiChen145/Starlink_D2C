@@ -28,3 +28,6 @@ TLE/*.txt
 # Local agent / tooling directories
 .agents/
 .claude/
+
+# Streamlit secrets (CARTO_API_KEY etc.) — never commit
+.streamlit/secrets.toml

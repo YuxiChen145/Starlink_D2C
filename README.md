@@ -138,6 +138,7 @@ Point the app at data elsewhere with environment variables (all optional):
 | `SIGCAP_DATA_DIR` | `Sigcap CSV` | Folder of SigCap session CSVs |
 | `TLE_DATA_DIR` | `TLE` | Folder of Starlink TLE files |
 | `QP_CACHE_DIR` | `.cache/qpviz` | Parquet cache location |
+| `CARTO_API_KEY` | *(unset)* | Free key for the CARTO Light/Dark basemaps (see below) |
 
 ```bash
 QP_DATA_DIR="/data/QP CSV" PRISM_DATA_DIR="/data/PRISM CSV" streamlit run app.py
@@ -145,6 +146,25 @@ QP_DATA_DIR="/data/QP CSV" PRISM_DATA_DIR="/data/PRISM CSV" streamlit run app.py
 
 The **QP data folder** and **PRISM data folder** boxes in the sidebar override
 these at runtime too.
+
+**Map basemaps.** Since 25 Sept 2026 CARTO serves its Light (Positron) and Dark
+(Dark Matter) basemaps only with an API key; without one they render as blank
+"API KEY REQUIRED" tiles. The app therefore offers those two styles only when a
+key is configured, and otherwise defaults to OpenStreetMap (Esri satellite also
+works without a key). To enable them:
+
+1. Request a free key at <https://carto.com/basemaps/apikey/> (no account needed;
+   pick non-commercial for research use — 5M tile requests/month).
+2. In <https://dashboard.basemaps.carto.com> restrict the key to your hosts
+   (`localhost`, `127.0.0.1`, and your deploy's domain) — the key is visible in
+   the browser, so the restriction is what stops reuse.
+3. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` (git-ignored)
+   and set `CARTO_API_KEY = "…"`, or export `CARTO_API_KEY` in the environment
+   (the environment wins). On Streamlit Community Cloud, paste it into the app's
+   *Secrets* setting instead.
+
+Keep the CARTO and OpenStreetMap attribution visible on the map — it is a
+condition of the free tier.
 
 Optional — satellite visibility needs Starlink TLEs. Fetch the current set with:
 
@@ -298,6 +318,8 @@ headlessly; if a real `QP CSV/` folder is present it also smoke-tests against it
 | TLE fetch `CERTIFICATE_VERIFY_FAILED` | macOS Python has no CA bundle — the `certifi` dependency fixes it; see the [TLE guide](docs/FETCHING_TLE.md). |
 | Stale numbers after replacing a CSV | Click **Reload data**; the parquet cache re-keys on file size/mtime, or delete `.cache/`. |
 | Port already in use | `streamlit run app.py --server.port 8502`. |
+| `zsh: command not found: streamlit` (venv active) | Streamlit isn't installed in this venv: `pip install -r requirements.txt`, then `python -m streamlit run app.py`. |
+| Map tiles say *API KEY REQUIRED* or are blank | Set `CARTO_API_KEY` (see [Configuration](#5-configuration)) or pick the OpenStreetMap basemap. |
 
 More: **[docs/FETCHING_TLE.md](docs/FETCHING_TLE.md)** — getting Starlink TLEs
 (daily + historical) for the satellite-visibility tab.

@@ -68,3 +68,32 @@ def test_build_map_draws_the_selected_region(frame):
     region = [(41.69, -86.24), (41.69, -86.23), (41.71, -86.23), (41.71, -86.24)]
     fmap, _, _ = mapview.build_map(frame, "rsrp", "RSRP", max_points=20, regions=[region])
     assert "polygon" in fmap.get_root().render().lower()
+
+
+def test_carto_styles_hidden_without_key(monkeypatch):
+    monkeypatch.delenv(mapview.CARTO_KEY_NAME, raising=False)
+    assert mapview.carto_api_key() is None
+    assert mapview.carto_api_key({}) is None
+    names = mapview.tile_choices(None)
+    assert names[0] == "OpenStreetMap"
+    assert not set(mapview.CARTO_TILES) & set(names)
+    assert set(mapview.CARTO_TILES) <= set(mapview.tile_choices("k"))
+
+
+def test_carto_key_read_from_env_then_secrets(monkeypatch):
+    monkeypatch.delenv(mapview.CARTO_KEY_NAME, raising=False)
+    assert mapview.carto_api_key({mapview.CARTO_KEY_NAME: " abc "}) == "abc"
+    monkeypatch.setenv(mapview.CARTO_KEY_NAME, "env-key")
+    assert mapview.carto_api_key({mapview.CARTO_KEY_NAME: "abc"}) == "env-key"
+
+
+def test_carto_tiles_carry_key_or_fall_back_to_osm(frame):
+    with_key = mapview.build_map(
+        frame, "rsrp", "RSRP", max_points=5,
+        tiles="Light (CartoDB positron)", carto_key="SECRET123",
+    )[0].get_root().render()
+    assert "basemaps.cartocdn.com" in with_key and "key=SECRET123" in with_key
+    no_key = mapview.build_map(
+        frame, "rsrp", "RSRP", max_points=5, tiles="Dark (CartoDB dark_matter)",
+    )[0].get_root().render()
+    assert "cartocdn" not in no_key and "openstreetmap" in no_key.lower()
