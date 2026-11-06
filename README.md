@@ -280,8 +280,13 @@ and how the exports are normalised live in the `qpviz/` module docstrings
 ## Project layout
 
 ```
-app.py               Streamlit UI: filters, tabs, wiring
+app.py               Streamlit entry point: sidebar, filters, header KPIs, tab wiring
 qpviz/
+  ui/                Streamlit-only code
+    common.py        cached data loaders, satellite propagation cache, shared widgets
+    context.py       Ctx - the sidebar choices + filtered data every tab reads
+    tab_*.py         one module per tab (map, satellites, cdf, cells, stats, data,
+                     correlation, timeline), each with render(ctx)
   schema.py          the exports and their column maps; metric registry
   loader.py          CSV -> canonical frame (QP + PRISM + SigCap), derived metrics, cache
   filters.py         filter set, point-in-polygon region test, data windows
