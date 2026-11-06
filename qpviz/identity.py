@@ -482,9 +482,6 @@ def with_sectors_per_enb(
     return out
 
 
-FAN_OUT_PERCENTILES = (50, 90)
-
-
 def fan_out_summary(counts: pd.DataFrame) -> pd.DataFrame:
     """Descriptive statistics per relationship (and group)."""
     if counts.empty:

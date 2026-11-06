@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -26,13 +26,9 @@ from .schema import (
     PRISM_GPS_TIME_COL,
     QP_TEST_NAME_COL,
     SIGCAP_DATASETS,
-    SIGCAP_DATASETS_BY_KEY,
     Dataset,
 )
 
-DEFAULT_DATA_DIR = os.environ.get("QP_DATA_DIR", "QP CSV")
-DEFAULT_PRISM_DIR = os.environ.get("PRISM_DATA_DIR", "PRISM CSV")
-DEFAULT_SIGCAP_DIR = os.environ.get("SIGCAP_DATA_DIR", "Sigcap CSV")
 DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 
 log = logging.getLogger(__name__)

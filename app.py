@@ -34,7 +34,6 @@ from qpviz.schema import (
     SIGCAP_DATASETS_BY_KEY,
     TECHNOLOGIES,
     TRAFFIC_ORDER,
-    Dataset,
     datasets_for,
     metrics_available,
     prism_datasets_for,
@@ -1022,7 +1021,6 @@ if tab_sat is not None:
                 )
             else:
                 counts = pd.to_numeric(vis[sat_vis_col], errors="coerce")
-                elev = pd.to_numeric(vis["sat_max_elev"], errors="coerce")
                 summ = tle_summary(tle_dir, tle_fp)
                 emin, emax = summ["epoch_min"], summ["epoch_max"]
                 dmin = pd.to_datetime(vis["time"]).min()
@@ -1443,7 +1441,6 @@ def _render_cell_identity() -> None:
                             charts.serving_timeline_figure(
                                 segments[segments["collection"].isin(chosen)],
                                 collections=chosen,
-                                labels=[str(c) for c in chosen],
                                 subtitles=[_subtitle(c) for c in chosen],
                                 mode=MODE,
                             ),

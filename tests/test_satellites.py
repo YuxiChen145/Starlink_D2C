@@ -180,7 +180,6 @@ def test_annotate_frame_adds_columns_and_respects_geo():
 # End-to-end app integration
 # --------------------------------------------------------------------------- #
 
-import os  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 pytest.importorskip("streamlit")
