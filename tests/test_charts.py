@@ -631,7 +631,7 @@ def test_pdf_figure_overlays_normalised_histograms():
 
 def test_pdf_figure_bins_raw_values_and_keeps_minor_modes():
     import numpy as np
-    from qpviz.stats import Curve, cdf_curves
+    from qpviz.stats import cdf_curves
     import pandas as pd
     # 10,000 samples at 25 plus a 1% minor mode at 100
     vals = np.concatenate([np.full(9900, 25.0), np.full(100, 100.0)])
@@ -707,7 +707,6 @@ def test_timeline_multi_figure_colours_never_collide():
     """An unslotted device must not take phone 1's colour, and the QP overlay for
     a slot shares that phone's colour; the throughput y-range covers the overlay."""
     import pandas as pd
-    from qpviz import timeline
     from qpviz.theme import CATEGORICAL
     t = pd.date_range("2026-09-14 19:35:00", periods=12, freq="5s")
     binned = pd.concat([

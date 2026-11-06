@@ -194,7 +194,6 @@ def test_overlay_by_condition_partitions_solo_concurrent_and_pci(multi):
     # a synthetic QP overlay: RB count keyed to each bin, lower where the two
     # phones are active AND share a PCI (what the sanity check expects)
     binned = res.binned
-    import numpy as np
     times = sorted(binned["time"].unique())
     sp = timeline._shared_pci_by_bin(binned).set_index("time")
     act = timeline._active_by_bin(binned).set_index("time")

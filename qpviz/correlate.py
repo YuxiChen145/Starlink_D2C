@@ -18,7 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
 #: default common bin - SigCap's own cadence; the UI lets the user change it

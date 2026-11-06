@@ -617,7 +617,6 @@ CHANGE_CELL_COLOR = "#2f7ed8"  # blue
 def serving_timeline_figure(
     segments: pd.DataFrame,
     collections: Sequence,
-    labels: Optional[Sequence[str]] = None,
     subtitles: Optional[Sequence[str]] = None,
     mode: str = "light",
     height: Optional[int] = None,
@@ -637,7 +636,6 @@ def serving_timeline_figure(
     n = len(collections)
     if segments.empty or n == 0:
         return go.Figure()
-    label_map = {c: (labels[i] if labels else str(c)) for i, c in enumerate(collections)}
     sub_map = {c: (subtitles[i] if subtitles else "") for i, c in enumerate(collections)}
 
     orange, blue = CHANGE_ENB_COLOR, CHANGE_CELL_COLOR

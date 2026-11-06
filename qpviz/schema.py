@@ -108,9 +108,6 @@ HIDDEN_METRICS: List[str] = [
 # Datasets
 # --------------------------------------------------------------------------- #
 
-#: canonical cell-identity columns (see qpviz.identity)
-IDENTITY_COLUMNS: List[str] = ["pci", "enb", "sector", "cell_id", "ssb"]
-
 QP_TEST_NAME_COL = "Test Name"
 
 DIMENSION_COLUMNS: List[str] = [
@@ -185,14 +182,6 @@ TRAFFIC_ORDER: List[str] = [
 ]
 
 
-#: measurement sources the platform can pool.  "QP" is the Qualipoc phone
-#: (connected-mode drive/walk logs); "PRISM" is the PRISM SDR scanner, which
-#: sweeps every cell it can hear rather than logging one serving cell; "SIGCAP"
-#: is the SigCap logger on the same phone, adding application-layer iperf/HTTP
-#: throughput and ping RTT alongside its serving-cell radio snapshot.
-PROVIDERS: List[str] = ["QP", "PRISM", "SIGCAP"]
-
-
 @dataclass(frozen=True)
 class Dataset:
     """One QP CSV export and how its columns map onto the canonical schema."""
@@ -208,11 +197,12 @@ class Dataset:
     metrics: Dict[str, str]
     #: extra notes surfaced in the UI
     note: str = ""
-    #: which measurement source this export belongs to (see PROVIDERS)
+    #: which measurement source this export belongs to: "QP" is the Qualipoc
+    #: phone (connected-mode drive/walk logs); "PRISM" is the PRISM SDR
+    #: scanner, which sweeps every cell it can hear rather than logging one
+    #: serving cell; "SIGCAP" is the SigCap logger on the same phone, adding
+    #: application-layer iperf/HTTP throughput and ping RTT.
     provider: str = "QP"
-    #: PRISM exports are read by globbing a folder (many single-tech files),
-    #: not by matching one fixed filename like the QP exports
-    is_glob: bool = False
     #: raw column giving the RBs allocated averaged over *all* slots/subframes
     #: (incl. idle) - the denominator for the derived spectral-efficiency and
     #: throughput-per-RB metrics, and the ``rb_occ`` metric. ``None`` when the
@@ -592,7 +582,6 @@ PRISM_DATASETS: List[Dataset] = [
         tech="LTE",
         link="DL",
         provider="PRISM",
-        is_glob=True,
         dims={
             **_PRISM_COMMON,
             "pci": "physical_cell_id",
@@ -616,7 +605,6 @@ PRISM_DATASETS: List[Dataset] = [
         tech="NR",
         link="DL",
         provider="PRISM",
-        is_glob=True,
         dims={
             **_PRISM_COMMON,
             "pci": "physical_cell_id",
@@ -715,7 +703,6 @@ SIGCAP_DATASETS: List[Dataset] = [
         tech="LTE",
         link="DL",  # per-row link (DL/UL) is filled from iperf_direction
         provider="SIGCAP",
-        is_glob=True,
         dims={
             **_SIGCAP_COMMON,
             "device": SIGCAP_DEVICE_COL,
@@ -745,7 +732,6 @@ SIGCAP_DATASETS: List[Dataset] = [
         tech="NR",
         link="DL",
         provider="SIGCAP",
-        is_glob=True,
         dims={
             **_SIGCAP_COMMON,
             "device": SIGCAP_DEVICE_COL,

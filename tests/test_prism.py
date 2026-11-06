@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -88,6 +87,8 @@ def test_prism_cache_round_trip(prism_dir, cache_dir):
 def _run(qp_dir, prism_dir, tmp_path, monkeypatch, timeout=120):
     monkeypatch.setenv("QP_DATA_DIR", str(qp_dir))
     monkeypatch.setenv("PRISM_DATA_DIR", str(prism_dir))
+    # keep the repo's real "Sigcap CSV" folder out of these QP+PRISM tests
+    monkeypatch.setenv("SIGCAP_DATA_DIR", "/no-sigcap-dir")
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = AppTest.from_file(APP, default_timeout=timeout)
     app.run()
