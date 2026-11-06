@@ -34,7 +34,7 @@ DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 log = logging.getLogger(__name__)
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 16
+CACHE_VERSION = 17
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
@@ -537,7 +537,9 @@ def prism_timestamps(raw: pd.DataFrame, name: str = "") -> pd.Series:
     :data:`_PRISM_CLOCK_SLACK`, the median GPS-minus-system offset is added to
     the system clock, which keeps the millisecond cadence while moving the
     capture to the right day; rows without a fix are corrected too. A file with
-    a bad clock and no GPS fix at all is left as recorded and logged.
+    a bad clock and no GPS fix at all is moved onto the ``YYYY_MM_DD`` date its
+    file name starts with (see :func:`_anchor_unset_clock`); without such a date
+    it is left as recorded and logged.
     """
     sys_t = parse_time(raw["system_date_time"]) if "system_date_time" in raw else pd.Series(
         pd.NaT, index=raw.index
@@ -554,12 +556,53 @@ def prism_timestamps(raw: pd.DataFrame, name: str = "") -> pd.Series:
         return sys_t
     # no row has both clocks: trust GPS where present, else the system clock
     out = sys_t.where(sys_t.notna(), gps_t)
-    years = out.dt.year.dropna()
+    return _anchor_unset_clock(out, name)
+
+
+#: ``YYYY_MM_DD`` at the start of a PRISM file name - the capture date
+_PRISM_NAME_DATE_RE = re.compile(r"^\s*(\d{4})_(\d{2})_(\d{2})(?!\d)")
+
+
+def prism_name_date(name: str) -> Optional[pd.Timestamp]:
+    """The capture date a PRISM file name starts with, or ``None``.
+
+    ``2026_09_30 LTE_8665_DC_Hotel_7thFloor_static.csv`` -> 2026-09-30. A name
+    with only a year and month (``2026_09_LTE_...``) gives ``None``.
+    """
+    match = _PRISM_NAME_DATE_RE.match(name or "")
+    if not match:
+        return None
+    try:
+        return pd.Timestamp(year=int(match.group(1)), month=int(match.group(2)),
+                            day=int(match.group(3)))
+    except ValueError:
+        return None
+
+
+def _anchor_unset_clock(times: pd.Series, name: str) -> pd.Series:
+    """Move rows stamped by an unset clock (e.g. 2070-01-01 00:07) onto the
+    capture date in the file name, keeping the elapsed time since the clock
+    started: ``name date + (t - day the bad clock started)``.
+
+    The date is right; the time of day is only the time since the scanner
+    booted, because nothing in the file records the real one.
+    """
     latest_plausible = pd.Timestamp.now().year + 1
-    if not years.empty and ((years < 2020) | (years > latest_plausible)).any():
-        log.warning("PRISM %s: system clock unset (year %d) and no GPS fix to correct it",
-                    name, int(years.iloc[0]))
-    return out
+    years = times.dt.year
+    bad = times.notna() & ((years < 2020) | (years > latest_plausible))
+    if not bad.any():
+        return times
+    day = prism_name_date(name)
+    if day is None:
+        log.warning("PRISM %s: system clock unset (year %d), no GPS fix and no "
+                    "YYYY_MM_DD date in the file name to correct it",
+                    name, int(years[bad].iloc[0]))
+        return times
+    start = times[bad].min().normalize()
+    log.info("PRISM %s: system clock unset (year %d) and no GPS fix; placed on "
+             "%s from the file name (time of day is time since boot)",
+             name, int(years[bad].iloc[0]), day.date())
+    return times.where(~bad, day + (times - start))
 
 
 def _prism_key_for(path: Path) -> Optional[str]:
