@@ -746,6 +746,9 @@ _TZ_OFFSET_RE = re.compile(r"([+-]\d{2}:?\d{2})\s*$")
 _SIGCAP_SUFFIX_RE = re.compile(r"\s*\.debug[_ ]?general\s*$", re.IGNORECASE)
 #: macOS "keep both" duplicates append a trailing " 2" / " 3" before the ext
 _SIGCAP_DUP_RE = re.compile(r"\s+\d+$")
+#: SigCap's per-cell ``.debug_cellular`` export - a different layout (one row per
+#: heard cell, no serving-cell or app-layer columns), so it is not read
+_SIGCAP_CELLULAR_RE = re.compile(r"\.debug[_ ]?cellular\s*\.csv$", re.IGNORECASE)
 
 
 def _sigcap_serving_tech(raw: pd.DataFrame) -> pd.Series:
@@ -941,11 +944,19 @@ def _sigcap_meta(path: Path) -> tuple[str, str]:
     return label, test
 
 
-def sigcap_files(sigcap_dir: os.PathLike | str) -> List[Path]:
-    """Every SigCap session file (``*.csv``) in the folder.
+def _visible(path: Path, root: Path) -> bool:
+    """False for anything under a hidden folder or a macOS ``__MACOSX`` folder."""
+    parts = path.relative_to(root).parts
+    return not any(p.startswith(".") or p == "__MACOSX" for p in parts)
 
-    A macOS "keep both" duplicate (``... 2.csv``) of a session that is also
-    present under its canonical name is skipped.
+
+def sigcap_files(sigcap_dir: os.PathLike | str) -> List[Path]:
+    """Every SigCap session file (``*.csv``) in the folder or any subfolder.
+
+    Sessions can be grouped into subfolders (e.g. one per campaign). Hidden
+    and ``__MACOSX`` folders are ignored. Within one folder, a macOS "keep
+    both" duplicate (``... 2.csv``) of a session that is also present under its
+    canonical name is skipped. Files are returned sorted by relative path.
     """
     root = Path(sigcap_dir)
     if not root.exists():
@@ -959,9 +970,16 @@ def sigcap_files(sigcap_dir: os.PathLike | str) -> List[Path]:
         return (is_dup, p.name)
 
     chosen: dict = {}
-    for p in root.glob("*.csv"):
-        if p.is_file():
-            chosen.setdefault(_sigcap_stem(p).lower(), []).append(p)
+    for p in root.rglob("*.csv"):
+        if not (p.is_file() and _visible(p, root)):
+            continue
+        if _SIGCAP_CELLULAR_RE.search(p.name):
+            # per-cell export: no serving-cell or iperf/HTTP/ping columns
+            log.info("SigCap %s: .debug_cellular export, not read (needs the "
+                     ".debug_general export of the session)", p.name)
+            continue
+        key = (p.parent.relative_to(root).as_posix(), _sigcap_stem(p).lower())
+        chosen.setdefault(key, []).append(p)
     return [min(v, key=_pref) for _, v in sorted(chosen.items())]
 
 
