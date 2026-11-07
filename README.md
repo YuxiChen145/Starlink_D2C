@@ -68,7 +68,7 @@ The measurement CSVs **ship in the repo as plain `.csv`** (~150 MB), so a fresh
 Starlink_D2C/
 ├── QP CSV/       ← Qualipoc exports (the "… - Limited.csv" files)
 ├── PRISM CSV/    ← PRISM SDR scan CSVs (one file per location/carrier)
-├── Sigcap CSV/   ← SigCap sessions (one CSV per iperf / HTTP capture)
+├── Sigcap CSV/   ← SigCap sessions (one CSV per iperf / HTTP capture; subfolders OK)
 └── TLE/          ← (optional) Starlink TLEs for satellite visibility
 ```
 
@@ -80,7 +80,11 @@ Starlink_D2C/
 - **PRISM CSV/** — the SDR scan files (the collection name comes from the file
   name). PRISM carries signal metrics only and has no GPS in the current
   captures, so it is excluded from the map and satellite tabs.
-- **Sigcap CSV/** — SigCap sessions, one CSV per capture (the collection name
+- **Sigcap CSV/** — SigCap sessions, one CSV per capture. Sessions may sit
+  directly in the folder or be grouped into subfolders (any depth; hidden and
+  `__MACOSX` folders are skipped). Use SigCap's **`.debug_general`** export:
+  the per-cell `.debug_cellular` export has no serving-cell or iperf/HTTP/ping
+  columns and is skipped. The collection name
   comes from the file name; both the `…_910_iperf` and the
   `[D2C_Static_OpenField…]` naming conventions are recognised, and macOS
   "copy 2" duplicates are ignored). SigCap adds the serving cell (PCI / Cell Id)
