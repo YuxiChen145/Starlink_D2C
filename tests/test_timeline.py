@@ -14,6 +14,8 @@ from qpviz import loader, timeline
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+from tests.conftest import open_tab  # noqa: E402
+
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
@@ -166,6 +168,8 @@ def test_timeline_tab_present_and_computes(sigcap_multi_dir, monkeypatch, tmp_pa
     app = _run(sigcap_multi_dir)
     assert not app.exception, [str(e.value) for e in app.exception]
     assert any("Timeline analysis" in t.label for t in app.tabs)
+    open_tab(app, "Timeline analysis")
+    assert not app.exception, [str(e.value) for e in app.exception]
     assert any(m.key == "tl_devices" for m in app.multiselect)
     # the concurrency metric reflects the two overlapping phones
     conc = [m for m in app.metric if m.label == "Max concurrent"]
@@ -237,7 +241,7 @@ def test_qp_overlay_scopes_to_matching_collection(fixture_dir, sigcap_multi_dir,
     os.environ["QP_DATA_DIR"] = str(fixture_dir)
     os.environ["PRISM_DATA_DIR"] = "/no-prism-dir"
     os.environ["SIGCAP_DATA_DIR"] = str(sigcap_multi_dir)
-    app = AppTest.from_file(APP, default_timeout=200).run()
+    app = open_tab(AppTest.from_file(APP, default_timeout=200).run(), "Timeline analysis")
     # the synthetic QP fixture uses collections Collection_A/B/C, and the SigCap
     # multi fixture uses onephoneA/twoPhoneA/twoPhoneB - no token overlap, so the
     # scope is empty and the overlay falls back to time-only without error
