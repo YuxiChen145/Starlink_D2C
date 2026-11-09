@@ -46,6 +46,7 @@ from qpviz.ui.common import (
     load_sigcap_frame,
     multiselect_all,
     prism_present_keys,
+    release_memory,
     sigcap_present_keys,
     theme_mode,
     tle_summary,
@@ -56,6 +57,7 @@ from qpviz.ui.context import Ctx
 APP_TITLE = "Starlink D2C — Measurement Explorer"
 
 st.set_page_config(page_title=APP_TITLE, layout="wide", page_icon="📡")
+release_memory()  # what the previous rerun freed, before this one allocates
 
 # Collection names run to 60 characters, which the default sidebar truncates in
 # both the dropdown and the selected chips. Widen it a little and let long
@@ -153,6 +155,7 @@ with st.sidebar:
     )
     if st.button("Reload data", width="stretch"):
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.rerun()
 
     qp_present = available(qp_dir)
@@ -265,6 +268,7 @@ if prism_source_keys:
 if sigcap_source_keys:
     _parts.append(load_sigcap_frame(sigcap_dir, tuple(sorted(sigcap_source_keys))))
 frame = loader.concat_frames(_parts)
+del _parts  # its frames are pooled into `frame` now
 frame = frame[frame[metric].notna()] if metric in frame.columns else frame.iloc[0:0]
 # D2C QP rows are QP-idle PHY captures of SigCap-generated traffic -> label their
 # traffic from the time-aligned SigCap ground truth, not QP's own columns/name
@@ -408,6 +412,9 @@ with st.sidebar:
         ),
     )
     _tt = pd.to_datetime(_time_scope["time"], errors="coerce").dropna()
+    # only its timestamps are needed; drop the frame and the per-step ones above
+    # so they are not held next to `active` for the rest of the run
+    del _time_scope, step0, step1, step2, step3
     time_range = None
     _windows = flt.data_windows(_tt, gap_seconds=300.0)
     if _tt.empty or _tt.min() == _tt.max():
@@ -613,25 +620,8 @@ if sat_active and not frame.empty:
     for c in sat_columns:
         frame[c] = _vis[c].to_numpy()
 
-active = flt.apply_filters(
-    frame,
-    flt.Filters(
-        links=links,
-        sources=sources,
-        collections=collections,
-        traffic=traffic,
-        bands=bands,
-        freqs=freqs,
-        pcis=effective_pcis,
-        regions=st.session_state["regions"],
-        time_range=time_range,
-        metric=metric,
-        require=("pci", "freq") if drop_unknown else (),
-        keep_ungeolocated=keep_ungeo,
-    ),
-)
-
-# Same filters minus the region - used to draw the map you select the region on.
+# Every sidebar filter except the drawn region - the map draws this so you can
+# select a region with the context around it.
 unregioned = flt.apply_filters(
     frame,
     flt.Filters(
@@ -647,6 +637,13 @@ unregioned = flt.apply_filters(
         require=("pci", "freq") if drop_unknown else (),
     ),
 )
+# ...and the region on top. With no region drawn this is `unregioned` itself,
+# not a second copy of it.
+active = flt.apply_filters(
+    unregioned,
+    flt.Filters(regions=st.session_state["regions"], keep_ungeolocated=keep_ungeo),
+)
+del frame  # everything below reads `active` / `unregioned`
 
 
 # --------------------------------------------------------------------------- #
@@ -776,9 +773,10 @@ TAB_RENDERERS = {
     "🔗 Correlation": tab_correlation.render,
     "⏱️ Timeline analysis": tab_timeline.render,
 }
-# map tabs by label so the optional tabs never throw the positional unpacking off
-containers = dict(zip(tab_labels, st.tabs(tab_labels)))
-for label, render in TAB_RENDERERS.items():
-    if label in containers:
-        with containers[label]:
-            render(ctx)
+# Only the open tab runs. Switching tabs reruns the script (on_change="rerun"),
+# so a first visit builds the Map alone instead of every tab's frames at once,
+# which is what took the hosted app over its memory limit.
+for label, tab in zip(tab_labels, st.tabs(tab_labels, key="main_tab", on_change="rerun")):
+    if tab.open:
+        with tab:
+            TAB_RENDERERS[label](ctx)

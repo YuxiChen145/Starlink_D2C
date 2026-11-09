@@ -110,7 +110,12 @@ def _isin(series: pd.Series, values: Sequence) -> pd.Series:
 
 
 def apply_filters(frame: pd.DataFrame, filters: Filters) -> pd.DataFrame:
-    """Apply ``filters`` to a canonical frame and return the surviving rows."""
+    """Apply ``filters`` to a canonical frame and return the surviving rows.
+
+    When every row survives, ``frame`` itself comes back rather than a copy, so
+    treat the result as read-only. The sidebar applies one filter per step, and
+    copying the full frame at each step held several copies of it at once.
+    """
     if frame.empty:
         return frame
 
@@ -151,6 +156,8 @@ def apply_filters(frame: pd.DataFrame, filters: Filters) -> pd.DataFrame:
             region_mask |= ~(np.isfinite(lat) & np.isfinite(lon))
         mask &= region_mask
 
+    if mask.all():
+        return frame
     return frame.loc[mask]
 
 

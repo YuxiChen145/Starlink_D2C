@@ -14,6 +14,8 @@ from qpviz.schema import SIGCAP_APP_TPUT_COL
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+from tests.conftest import open_tab  # noqa: E402
+
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
@@ -214,6 +216,8 @@ def test_correlation_tab_present_only_with_both_sources(
     app = _run(fixture_dir, sigcap_dir)
     assert not app.exception, [str(e.value) for e in app.exception]
     assert any("Correlation" in t.label for t in app.tabs)
+    open_tab(app, "Correlation")
+    assert not app.exception, [str(e.value) for e in app.exception]
     assert app.selectbox(key="corr_phy") is not None
     assert app.selectbox(key="corr_app") is not None
 

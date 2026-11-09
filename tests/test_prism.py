@@ -11,6 +11,8 @@ from qpviz import loader
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+from tests.conftest import open_tab  # noqa: E402
+
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
@@ -137,6 +139,8 @@ def test_identity_tab_opens_on_prism_decoded_cells(fixture_dir, prism_dir, tmp_p
     app = _run(fixture_dir, prism_dir, tmp_path, monkeypatch)
     _clean(app)
     app.multiselect(key="f_providers").select("PRISM").run()
+    _clean(app)
+    open_tab(app, "Cell identity")
     _clean(app)
     # PRISM-only now opens the Cell identity tab on its decoded eNB/sector/PCI,
     # offering the relationship views (no serving-cell timelines, no QP prompt)

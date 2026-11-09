@@ -15,6 +15,18 @@ import pytest
 
 from qpviz.schema import DATASETS_BY_KEY, Dataset
 
+
+def open_tab(app, name: str):
+    """Open the app tab whose label contains ``name`` and rerun.
+
+    Only the open tab runs (``st.tabs(on_change="rerun")``), so a test that
+    checks a tab's widgets has to open that tab first. The Map is open by
+    default.
+    """
+    label = next(t.label for t in app.tabs if name in t.label)
+    app.session_state["main_tab"] = label
+    return app.run()
+
 METRIC_RANGES = {
     "rsrp": (-125.0, -75.0),
     "rsrq": (-20.0, -6.0),
