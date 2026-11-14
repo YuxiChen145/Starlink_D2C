@@ -39,7 +39,7 @@ DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 log = logging.getLogger(__name__)
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 21
+CACHE_VERSION = 22
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12

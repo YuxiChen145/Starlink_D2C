@@ -180,6 +180,9 @@ def test_traffic_label_classifies_session_names():
     assert traffic_label("910 iperf") == "Mixed"
     assert traffic_label("iperfULDL") == "Mixed"
     assert traffic_label("D2C_Sta_Gate1011_PinghttpULDL") == "Mixed"
+    # a misspelt "iper" still counts as iperf (a real session name)
+    assert traffic_label("D2C_OpenField_Static_twoPhone1_PingiperULDL") == "Mixed"
+    assert traffic_label("x_iperDL") == "iperf DL"
     assert traffic_label("D2C_Boulder_MostStatic_EARFCN8665") == "Other"
     assert traffic_label(None) == "Other"
 
@@ -200,6 +203,7 @@ def test_traffic_app_names_the_one_transfer_test_in_a_session_name():
     assert traffic_app("D2C_Sta_Gate1011_PinghttpULDL") == "HTTP"
     assert traffic_app("D2C_Sta_Gate1011_PingiperfULDL") == "iperf"
     assert traffic_app("D2C_OpenField_Static_onephone1_http") == "HTTP"
+    assert traffic_app("D2C_OpenField_Static_twoPhone1_PingiperULDL") == "iperf"
     assert traffic_app("x_iperf_http") is None   # two transfer tests: cannot tell
     assert traffic_app("x_Ping") is None
     assert traffic_app(None) is None
