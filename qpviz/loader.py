@@ -39,7 +39,7 @@ DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 log = logging.getLogger(__name__)
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 20
+CACHE_VERSION = 21
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
@@ -395,9 +395,11 @@ def normalise(
     for col in THROUGHPUT_METRICS:
         if ds.metrics.get(col, DERIVED_METRIC) != DERIVED_METRIC:
             out[col] = pd.to_numeric(out[col], errors="coerce") / 1000.0
-    # The exports give sub-frame / slot usage as a 0-1 fraction; show percent.
-    if "sf_usage" in out.columns:
-        out["sf_usage"] = pd.to_numeric(out["sf_usage"], errors="coerce") * 100.0
+    # The exports give sub-frame / slot usage and BLER as 0-1 fractions; the
+    # metrics are in percent.
+    for col in ("sf_usage", "bler"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce") * 100.0
     _add_carrier_sum(out, ds)
 
     # NR gives the gNB-Id and the full cell identity but no explicit sector;
