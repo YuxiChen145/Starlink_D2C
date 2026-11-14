@@ -30,12 +30,10 @@ from qpviz.schema import (
 from qpviz.ui import (
     tab_cdf,
     tab_cells,
-    tab_correlation,
     tab_data,
     tab_map,
     tab_satellites,
     tab_stats,
-    tab_timeline,
 )
 from qpviz.ui.common import (
     align_qp_d2c,
@@ -704,18 +702,9 @@ if active.empty:
     st.info("No samples match the current filters.")
     st.stop()
 
-# Correlation needs both a QP source (PHY layer) and a SigCap source (app layer)
-corr_enable = bool(qp_present and sigcap_present)
-# Timeline analysis is a SigCap feature (per-phone device identity + app tput)
-timeline_enable = bool(sigcap_present)
-
 tab_labels = ["🗺️ Map", "📈 CDF curves", "🛰️ Cell identity", "📊 Statistics", "🧾 Data"]
 if sat_enable:
     tab_labels.insert(1, "🛰️ D2C visibility")
-if timeline_enable:
-    tab_labels.append("⏱️ Timeline analysis")
-if corr_enable:
-    tab_labels.append("🔗 Correlation")
 
 
 # --------------------------------------------------------------------------- #
@@ -770,8 +759,6 @@ TAB_RENDERERS = {
     "🛰️ Cell identity": tab_cells.render,
     "📊 Statistics": tab_stats.render,
     "🧾 Data": tab_data.render,
-    "🔗 Correlation": tab_correlation.render,
-    "⏱️ Timeline analysis": tab_timeline.render,
 }
 # Only the open tab runs. Switching tabs reruns the script (on_change="rerun"),
 # so a first visit builds the Map alone instead of every tab's frames at once,

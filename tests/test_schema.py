@@ -1,3 +1,5 @@
+import pytest
+
 from qpviz import schema
 
 
@@ -20,9 +22,10 @@ def test_freq_label_follows_technology():
     assert schema.DATASETS_BY_KEY["nr_radio"].freq_label == "NR-ARFCN"
 
 
-def test_pucch_has_no_geo():
-    assert schema.DATASETS_BY_KEY["lte_pucch"].has_geo is False
+def test_qp_exports_carry_gps():
     assert schema.DATASETS_BY_KEY["lte_radio"].has_geo is True
+    # the PUCCH export (CQI / Tx power only, no GPS) is no longer read
+    assert "lte_pucch" not in schema.DATASETS_BY_KEY
 
 
 def test_datasets_with_metric_filters_by_tech():
@@ -38,25 +41,25 @@ def test_datasets_with_metric_filters_by_tech():
     }
 
 
-def test_offered_and_hidden_metrics_partition_the_registry():
-    assert set(schema.METRIC_ORDER) | set(schema.HIDDEN_METRICS) == set(schema.METRICS)
-    assert not set(schema.METRIC_ORDER) & set(schema.HIDDEN_METRICS)
+def test_every_registered_metric_is_offered():
+    assert set(schema.METRIC_ORDER) == set(schema.METRICS)
+    assert len(schema.METRIC_ORDER) == len(set(schema.METRIC_ORDER))
 
 
-def test_hidden_metrics_are_never_offered():
+def test_all_sources_together_supply_exactly_the_offered_metrics():
     # the union of every source (QP + PRISM + SigCap) supplies exactly the
-    # offered metric set, in display order - app_tput/rtt come from SigCap only
+    # offered metric set, in display order - rtt comes from SigCap only
     every_dataset = list(schema.ALL_DATASETS_BY_KEY)
-    offered = schema.metrics_available(every_dataset)
-    assert offered == schema.METRIC_ORDER
-    for metric in schema.HIDDEN_METRICS:
-        assert metric not in offered
-        # still mapped by the datasets, so restoring one needs no other change
-        assert schema.datasets_with_metric(metric)
+    assert schema.metrics_available(every_dataset) == schema.METRIC_ORDER
 
 
-def test_pucch_carries_only_hidden_metrics_so_it_is_not_reachable():
-    assert schema.metrics_available(["lte_pucch"]) == []
+@pytest.mark.parametrize(
+    "metric", ["app_tput", "tput_per_rb", "cqi", "tx_power", "pathloss"]
+)
+def test_cut_metrics_are_gone_from_the_registry_and_every_dataset(metric):
+    assert metric not in schema.METRICS
+    for ds in schema.ALL_DATASETS_BY_KEY.values():
+        assert metric not in ds.metrics
 
 
 def test_metrics_available_is_in_display_order():

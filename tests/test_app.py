@@ -282,17 +282,16 @@ def test_cell_identity_pools_qp_serving_and_prism_scans(
 def test_metric_picker_offers_only_the_metrics_in_metric_order(
     fixture_dir, monkeypatch, tmp_path
 ):
-    from qpviz.schema import HIDDEN_METRICS, METRICS
+    from qpviz.schema import METRIC_ORDER, METRICS
 
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
     options = app.selectbox(key="metric_choice").options
-    for metric in HIDDEN_METRICS:
-        assert METRICS[metric].axis_label not in options
-    assert "CQI (index)" not in options
-    assert "Tx Power (dBm)" not in options
-    assert "DL Pathloss (dB)" not in options
+    assert set(options) <= {METRICS[m].axis_label for m in METRIC_ORDER}
+    for cut in ("CQI (index)", "Tx Power (dBm)", "DL Pathloss (dB)",
+                "Throughput per RB (bits/RB)", "App throughput (Mbps)"):
+        assert cut not in options
 
 
 def test_pci_set_modes_offer_the_union_and_the_intersection(

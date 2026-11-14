@@ -35,9 +35,6 @@ METRIC_RANGES = {
     "mcs": (0.0, 28.0),
     "throughput": (0.0, 90000.0),
     "bler": (0.0, 30.0),
-    "cqi": (0.0, 15.0),
-    "tx_power": (-10.0, 23.0),
-    "pathloss": (80.0, 150.0),
     "rb": (1.0, 25.0),      # RBs per subframe, scheduled (rb_sched_col)
     "rb_occ": (0.0, 14.0),  # RBs per subframe, all SF (rb_all_col)
 }
@@ -104,7 +101,7 @@ def write_dataset(directory: Path, ds: Dataset, rows: int = 240, seed: int = 7) 
                 row[ds.dims["ssb"]] = (i % 2) * 2
             for metric, source_col in ds.metrics.items():
                 if source_col == "@derived":
-                    continue  # spec_eff / tput_per_rb are computed, not read
+                    continue  # spec_eff is computed, not read
                 lo, hi = METRIC_RANGES[metric]
                 # every 17th row leaves the metric blank, like the real exports
                 row[source_col] = "" if i % 17 == 0 else f"{rng.uniform(lo, hi):.3f}"
@@ -132,7 +129,7 @@ def _isolated_environ():
 @pytest.fixture(scope="session")
 def fixture_dir(tmp_path_factory) -> Path:
     directory = tmp_path_factory.mktemp("qp_csv")
-    for key in ("lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pusch_pc", "lte_pucch"):
+    for key in ("lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pusch_pc"):
         write_dataset(directory, DATASETS_BY_KEY[key])
     return directory
 

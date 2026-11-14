@@ -87,10 +87,12 @@ Starlink_D2C/
   columns and is skipped. The collection name
   comes from the file name; both the `…_910_iperf` and the
   `[D2C_Static_OpenField…]` naming conventions are recognised, and macOS
-  "copy 2" duplicates are ignored). SigCap adds the serving cell (PCI / Cell Id)
-  plus **application-layer** metrics — iperf / HTTP throughput and ping RTT —
-  and has GPS, so it appears on the map. Its app metrics are what feed the
-  **Correlation** tab against the QP PHY layer.
+  "copy 2" duplicates are ignored). SigCap adds the serving cell (PCI / Cell Id),
+  RSRP / RSRQ / RSSI and **ping RTT**, and has GPS, so it appears on the map.
+  It also ran the iperf / HTTP / ping tests, so its columns say which test was
+  active on each row. Its own iperf / HTTP throughput figure is **not** shown:
+  it is not the throughput through the chip and transmitter, which the QP
+  PDSCH / PUSCH exports measure.
 - **TLE/** — optional; only needed for the **D2C visibility** tab. TLEs are
   *not* committed; fetch them locally — see
   [`docs/FETCHING_TLE.md`](docs/FETCHING_TLE.md).
@@ -244,7 +246,7 @@ from GitHub → **Community Cloud (B)**; a stable, controlled internal site →
 PRISM / SigCap) pools or isolates them; every other filter is a multi-select
 where empty means *all*. SigCap rows also carry a **device identity** (the phone
 UUID + codename), so sessions logged by different phones at the same time stay
-distinct — the basis for the timeline analysis below.
+distinct.
 
 **Filters** — Measurement source, Direction (DL/UL), **Traffic** (the generated
 traffic — iperf DL / iperf UL, Ookla, Ping, HTTP, Idle; read **per row from the
@@ -259,12 +261,12 @@ on the map**, and a **time window** (with a per-session jump so
 you can isolate a few minutes at a spot).
 
 **Metrics** — RSRP, RSRQ, RSSI, SINR, MCS, Throughput, **Spectral efficiency
-(bps/Hz)**, **Throughput per RB (bits/RB)**, **RBs per subframe** (two readings:
+(bps/Hz)**, **RBs per subframe** (two readings:
 *scheduled* — the grant size, `Avg RBs per SF`, reaching the carrier's RB ceiling;
 and *all SF* — time-averaged occupancy including idle sub-frames), BLER, the
 **RSRQ N-factor**
-(`N = RSRQ·RSSI/RSRP`), and — from SigCap — **App throughput (Mbps)** (iperf and
-HTTP pooled) and **Ping RTT (ms)**, wherever the selected exports carry them.
+(`N = RSRQ·RSSI/RSRP`), and — from SigCap — **Ping RTT (ms)**, wherever the
+selected exports carry them.
 
 | Tab | What it shows |
 |---|---|
@@ -274,8 +276,6 @@ HTTP pooled) and **Ping RTT (ms)**, wherever the selected exports carry them.
 | 🛰️ Cell identity | Who is serving you and for how long: dwell timeline, eNB→sector→PCI tree, fan-out statistics. |
 | 📊 Statistics | Per-group n / mean / std / percentiles, downloadable. |
 | 🧾 Data | The filtered rows, downloadable as CSV. |
-| 🔗 Correlation | PHY vs. application on the same phone: pick a QP PHY metric and a SigCap app metric (App throughput / RTT), a time bin and an aggregate; both are resampled onto common bins over the window where the two recordings overlap and shown as a dual-axis timeline and a scatter, with Pearson r, Spearman ρ, and the paired-bin count. Appears only when both QP and SigCap are loaded. |
-| ⏱️ Timeline analysis | Several phones on one wall clock: per-phone throughput (DL/UL, separate panels), RSRP and serving PCI, with the stretches where two phones are active shaded grey and the stretches where they share a PCI shaded orange. Concurrency is **inferred from overlapping sample timestamps** across device UUIDs, not from file names. Quantifies throughput **1 phone vs 2 phones active**, **same PCI vs different PCI**, and each phone's throughput-vs-RSRP correlation and best-throughput PCI. The optional **QP PHY overlay** adds DL/UL PHY throughput, RSRP and an **RBs / subframe** panel with a sanity-check table — a shared cell that splits its resource blocks should hand each phone fewer RBs under contention / a shared PCI. Appears when SigCap is loaded. |
 
 Deeper notes on cell identity, the QP↔PRISM differences, satellite visibility,
 and how the exports are normalised live in the `qpviz/` module docstrings
@@ -289,16 +289,14 @@ qpviz/
   ui/                Streamlit-only code
     common.py        cached data loaders, satellite propagation cache, shared widgets
     context.py       Ctx - the sidebar choices + filtered data every tab reads
-    tab_*.py         one module per tab (map, satellites, cdf, cells, stats, data,
-                     correlation, timeline), each with render(ctx)
+    tab_*.py         one module per tab (map, satellites, cdf, cells, stats, data),
+                     each with render(ctx)
   schema.py          the exports and their column maps; metric registry
   loader.py          CSV -> canonical frame (QP + PRISM + SigCap), derived metrics, cache
   filters.py         filter set, point-in-polygon region test, data windows
   identity.py        serving-cell scope, dwell runs, hierarchy, fan-out
   stats.py           ECDF + grouped summary statistics
-  charts.py          plotly figures: CDF/PDF, timeline, tree, fan-out, satellites, correlation
-  correlate.py       time-bin alignment of QP PHY vs SigCap app metrics; Pearson/Spearman
-  timeline.py        multi-phone concurrency + shared-PCI analysis (SigCap device timelines)
+  charts.py          plotly figures: CDF/PDF, timeline, tree, fan-out, satellites
   mapview.py         folium map, draw control, categorical colouring
   satellites.py      TLE ingest, SGP4 propagation, D2C visibility
   theme.py           colour tokens

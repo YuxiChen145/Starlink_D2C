@@ -57,8 +57,9 @@ def test_build_map_renders_markers_and_legend(frame):
 
 
 def test_build_map_without_geo_returns_bare_map(fixture_dir, cache_dir):
-    pucch = load(fixture_dir, ["lte_pucch"], cache_dir)
-    fmap, edges, colors = mapview.build_map(pucch, "cqi", "CQI")
+    no_gps = load(fixture_dir, ["lte_radio"], cache_dir).copy()
+    no_gps[["lat", "lon"]] = float("nan")
+    fmap, edges, colors = mapview.build_map(no_gps, "rsrp", "RSRP")
     assert edges == [] and colors == []
     assert "circleMarker" not in fmap.get_root().render()
 

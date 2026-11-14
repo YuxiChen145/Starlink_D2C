@@ -11,7 +11,7 @@ lat, lon, pci, freq, band, tech, link, source, source_label
 
 Canonical metric columns
 ------------------------
-rsrp, rsrq, rssi, sinr, mcs, throughput, bler, cqi, tx_power, pathloss
+rsrp, rsrq, rssi, sinr, mcs, throughput, bler, rtt
 """
 
 from __future__ import annotations
@@ -48,12 +48,10 @@ METRICS: Dict[str, Metric] = {
         Metric("sinr", "SINR", "dB"),
         Metric("mcs", "MCS", "index"),
         Metric("throughput", "Throughput", "Mbps"),
-        # Application-layer performance (SigCap iperf/http + ping):
-        Metric("app_tput", "App throughput", "Mbps"),
+        # Ping round-trip time, logged by SigCap (the only source that pings):
         Metric("rtt", "Ping RTT", "ms", higher_is_better=False),
         # Derived (computed in the loader from throughput + allocated RBs + SCS):
         Metric("spec_eff", "Spectral efficiency", "bps/Hz"),
-        Metric("tput_per_rb", "Throughput per RB", "bits/RB"),
         # PHY resource allocation. Two readings from the per-carrier exports:
         #   rb      = Avg RBs *per SF* - the grant size averaged over SCHEDULED
         #             sub-frames/slots only (reaches the carrier's RB ceiling;
@@ -67,9 +65,6 @@ METRICS: Dict[str, Metric] = {
         # measurement bandwidth in RBs (25/50/100), but empirically it drifts.
         Metric("n_factor", "RSRQ N-factor", "RB"),
         Metric("bler", "BLER", "%", higher_is_better=False),
-        Metric("cqi", "CQI", "index"),
-        Metric("tx_power", "Tx Power", "dBm"),
-        Metric("pathloss", "DL Pathloss", "dB", higher_is_better=False),
     ]
 }
 
@@ -82,10 +77,8 @@ METRIC_ORDER: List[str] = [
     "mcs",
     "throughput",
     "spec_eff",
-    "tput_per_rb",
     "rb",
     "rb_occ",
-    "app_tput",
     "rtt",
     "bler",
     "n_factor",
@@ -94,15 +87,6 @@ METRIC_ORDER: List[str] = [
 #: metrics computed in the loader rather than read from a raw column; their
 #: value in a dataset's ``metrics`` map is this sentinel, not a column name
 DERIVED_METRIC = "@derived"
-
-#: Still parsed, cached and filterable, but not offered in the metric picker
-#: for now. Moving a key back into METRIC_ORDER is all it takes to restore it -
-#: the datasets already map the underlying columns.
-HIDDEN_METRICS: List[str] = [
-    "cqi",
-    "tx_power",
-    "pathloss",
-]
 
 # --------------------------------------------------------------------------- #
 # Datasets
@@ -200,13 +184,13 @@ class Dataset:
     #: which measurement source this export belongs to: "QP" is the Qualipoc
     #: phone (connected-mode drive/walk logs); "PRISM" is the PRISM SDR
     #: scanner, which sweeps every cell it can hear rather than logging one
-    #: serving cell; "SIGCAP" is the SigCap logger on the same phone, adding
-    #: application-layer iperf/HTTP throughput and ping RTT.
+    #: serving cell; "SIGCAP" is the SigCap logger on the same phone, which
+    #: runs the iperf/HTTP/ping tests and adds ping RTT.
     provider: str = "QP"
     #: raw column giving the RBs allocated averaged over *all* slots/subframes
-    #: (incl. idle) - the denominator for the derived spectral-efficiency and
-    #: throughput-per-RB metrics, and the ``rb_occ`` metric. ``None`` when the
-    #: export can't supply them.
+    #: (incl. idle) - the denominator for the derived spectral-efficiency
+    #: metric, and the ``rb_occ`` metric. ``None`` when the export can't supply
+    #: them.
     rb_all_col: Optional[str] = None
     #: raw column giving the RBs averaged over *scheduled* slots/subframes only
     #: (the grant size) - the ``rb`` metric. ``None`` when unavailable.
@@ -214,8 +198,8 @@ class Dataset:
     #: raw column giving the subcarrier spacing in kHz (NR); ``None`` -> 15 (LTE)
     scs_col: Optional[str] = None
     #: extra raw CSV columns to read beyond dims/metrics - used to synthesise
-    #: values before normalisation (e.g. SigCap coalesces iperf/http into one
-    #: app-throughput column and reads the serving tech to route each row)
+    #: values before normalisation (e.g. SigCap reads the serving tech to route
+    #: each row and the iperf/HTTP columns to label its traffic)
     extra_cols: List[str] = field(default_factory=list)
 
     @property
@@ -361,7 +345,6 @@ DATASETS: List[Dataset] = [
             "mcs": "MCS",
             "throughput": "LTE Net PDSCH Throughput",
             "spec_eff": DERIVED_METRIC,
-            "tput_per_rb": DERIVED_METRIC,
             "bler": "BLER",
         },
         rb_all_col="PDSCH Avg RBs all SF",  # LTE SCS is 15 kHz -> scs_col=None
@@ -405,29 +388,9 @@ DATASETS: List[Dataset] = [
             "mcs": "MCS",
             "throughput": "LTE Net PUSCH Throughput",
             "spec_eff": DERIVED_METRIC,
-            "tput_per_rb": DERIVED_METRIC,
-            "tx_power": "PUSCH Tx Power",
-            "pathloss": "DL Pathloss",
         },
         rb_all_col="PUSCH Avg RBs all SF",
         rb_sched_col="PUSCH Avg RBs per SF",
-    ),
-    Dataset(
-        key="lte_pucch",
-        filename="LTE PUCCH - Limited.csv",
-        label="LTE PUCCH",
-        tech="LTE",
-        link="UL",
-        dims={
-            **_COMMON,
-            "pci": "PCI LTE",
-            "enb_sector": "eNB-Id / Sector Id",
-            "freq": "DL EARFCN",
-            "band": "Band Number",
-            "cell_type": "Cell Type",
-        },
-        metrics={"cqi": "CQI0", "tx_power": "TxPower"},
-        note="No GPS columns in this export - excluded from the map and from any drawn-region filter.",
     ),
     Dataset(
         key="nr_pdsch_pc",
@@ -448,7 +411,6 @@ DATASETS: List[Dataset] = [
             "mcs": "MCS",
             "throughput": "5G NR Net PDSCH Throughput",
             "spec_eff": DERIVED_METRIC,
-            "tput_per_rb": DERIVED_METRIC,
             "sinr": "PDSCH SINR",
             "bler": "PDSCH BLER",
         },
@@ -495,9 +457,6 @@ DATASETS: List[Dataset] = [
             "mcs": "MCS",
             "throughput": "5G NR Net PUSCH Throughput",
             "spec_eff": DERIVED_METRIC,
-            "tput_per_rb": DERIVED_METRIC,
-            "tx_power": "PUSCH Tx Power",
-            "pathloss": "DL Pathloss",
         },
         rb_all_col="PUSCH Avg RBs all Slots",
         rb_sched_col="PUSCH Avg RBs per Slot",
@@ -651,23 +610,23 @@ def prism_datasets_for(
 # two very different kinds of data at once:
 #
 #   * the phone's serving-cell radio snapshot - primary LTE cell (RSRP / RSRQ /
-#     RSSI / RSSNR / CQI, PCI, EARFCN, band) or the first NR cell - directly
-#     comparable to QP and PRISM; and
-#   * application-layer performance the other sources never measure - iperf and
-#     HTTP throughput (Mbps) and ping round-trip time (ms).
+#     RSSI, PCI, EARFCN, band) or the first NR cell - directly comparable to QP
+#     and PRISM; and
+#   * the tests it ran: which of iperf DL / iperf UL / HTTP / ping was active on
+#     each row, and the ping round-trip time (ms).
+#
+# SigCap's own iperf/HTTP throughput figure is deliberately not a metric: it is
+# not the throughput through the chip and transmitter. Qualipoc's PDSCH/PUSCH
+# throughput is the one the platform shows. The iperf/HTTP columns are still
+# read, only to tell which test was running (the traffic label and direction).
 #
 # So SigCap is a third measurement source.  Like PRISM it is read by globbing a
 # folder, but structurally it differs again: one wide file per session (not one
 # per metric family or per carrier), the collection/location/workload encoded
 # in the file name, and both LTE and NR columns side by side in every row.  The
 # loader routes each row to the LTE or NR dataset by its serving technology, so
-# a row's app-layer throughput rides with whichever radio was actually serving
-# and is never double-counted across the two.
-#
-# The two app columns (iperf / HTTP) are coalesced into one canonical
-# ``app_tput`` before normalisation - only one is populated per session - and
-# the per-row uplink/downlink direction comes from ``iperf_direction``.  CQI is
-# logged as Android's 2147483647 "unknown" sentinel and scrubbed to NaN.
+# a row is never double-counted across the two. The per-row uplink/downlink
+# direction comes from ``iperf_direction``.
 
 #: columns every SigCap export shares
 _SIGCAP_COMMON = {
@@ -677,8 +636,6 @@ _SIGCAP_COMMON = {
     "operator": "operator",
 }
 
-#: synthesised in the loader before normalisation (see loader._prep_sigcap)
-SIGCAP_APP_TPUT_COL = "__app_tput_mbps__"
 #: synthesised per-phone identity: device_name + short uuid (see _prep_sigcap).
 #: SigCap sessions from several phones can run concurrently, so the physical
 #: phone - not the file - is the unit the timeline analysis groups by.
@@ -715,15 +672,11 @@ SIGCAP_DATASETS: List[Dataset] = [
             "rsrp": "lte_primary_rsrp_dbm",
             "rsrq": "lte_primary_rsrq_db",
             "rssi": "lte_primary_rssi_dbm",
-            "sinr": "lte_primary_rssnr_db",  # RSSNR, the LTE SNR measure
-            "cqi": "lte_primary_cqi",
-            "app_tput": SIGCAP_APP_TPUT_COL,
             "rtt": "ping_rtt_mean_ms",
             "n_factor": DERIVED_METRIC,
         },
         extra_cols=_SIGCAP_EXTRA,
-        note="SigCap on the phone - serving LTE cell plus app-layer iperf/HTTP "
-             "throughput and ping. 'SINR' here is the reported RSSNR.",
+        note="SigCap on the phone - serving LTE cell (RSRP, RSRQ, RSSI) and ping RTT.",
     ),
     Dataset(
         key="sigcap_nr",
@@ -743,13 +696,10 @@ SIGCAP_DATASETS: List[Dataset] = [
         metrics={
             "rsrp": "nr_first_ss_rsrp_dbm",
             "rsrq": "nr_first_ss_rsrq_db",
-            "sinr": "nr_first_ss_sinr_db",
-            "app_tput": SIGCAP_APP_TPUT_COL,
             "rtt": "ping_rtt_mean_ms",
         },
         extra_cols=_SIGCAP_EXTRA,
-        note="SigCap on the phone - serving NR cell plus app-layer iperf/HTTP "
-             "throughput and ping.",
+        note="SigCap on the phone - serving NR cell (RSRP, RSRQ) and ping RTT.",
     ),
 ]
 

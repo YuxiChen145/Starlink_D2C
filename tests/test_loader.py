@@ -73,7 +73,6 @@ def test_available_datasets_lists_only_present_files(fixture_dir):
         "nr_radio",
         "lte_pdsch_pc",
         "lte_pusch_pc",
-        "lte_pucch",
     }
 
 
@@ -89,11 +88,6 @@ def test_load_with_no_valid_keys_returns_empty_frame(fixture_dir):
     frame = loader.load(fixture_dir, ["does_not_exist"], None)
     assert frame.empty
     assert "rsrp" in frame.columns
-
-
-def test_pucch_gets_null_geo_columns(fixture_dir, cache_dir):
-    frame = loader.read_dataset(fixture_dir, DATASETS_BY_KEY["lte_pucch"], cache_dir)
-    assert frame["lat"].isna().all() and frame["lon"].isna().all()
 
 
 def test_freq_label_for():
@@ -121,16 +115,14 @@ def test_freq_prefix_for_is_short():
 def test_spectral_efficiency_derived_metric(fixture_dir, cache_dir):
     ds = DATASETS_BY_KEY["lte_pdsch_pc"]
     frame = loader.read_dataset(fixture_dir, ds, cache_dir)
-    # both derived metrics exist and are finite where throughput + RBs are present
-    assert "spec_eff" in frame.columns and "tput_per_rb" in frame.columns
+    # the derived metric exists and is finite where throughput + RBs are present
+    assert "spec_eff" in frame.columns
     ok = frame["throughput"].notna() & frame["spec_eff"].notna()
     assert ok.any()
-    # exact relation: bits/RB = spec_eff x 12 x 15kHz x 1ms = spec_eff x 180 (LTE)
-    sub = frame.loc[ok]
-    ratio = (sub["tput_per_rb"] / sub["spec_eff"]).round(3)
-    assert (ratio == 180.0).all()
-    # and they are positive
-    assert (sub["spec_eff"] > 0).all()
+    assert (frame.loc[ok, "spec_eff"] > 0).all()
+    # throughput per RB was the same quantity in other units (x180 on LTE), so
+    # it is no longer computed
+    assert "tput_per_rb" not in frame.columns
 
 
 def test_spectral_efficiency_only_on_pdsch_pusch(fixture_dir, cache_dir):

@@ -20,7 +20,6 @@ from .schema import (
     METRICS,
     PRISM_DATASETS,
     PRISM_DATASETS_BY_KEY,
-    SIGCAP_APP_TPUT_COL,
     SIGCAP_DEVICE_COL,
     traffic_label,
     PRISM_GPS_TIME_COL,
@@ -34,12 +33,10 @@ DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 log = logging.getLogger(__name__)
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 17
+CACHE_VERSION = 18
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
-#: LTE subframe / NR 15-kHz slot cadence; NR scales with the subcarrier spacing
-_LTE_TTIS_PER_SEC = 1000
 
 _TIME_FORMATS = (
     "%Y-%m-%d %H:%M:%S.%f",
@@ -152,13 +149,12 @@ def split_enb_sector(series: pd.Series):
 
 
 def _add_efficiency(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> None:
-    """Fill the derived ``spec_eff`` (bps/Hz) and ``tput_per_rb`` (bits/RB) columns.
+    """Fill the derived ``spec_eff`` (bps/Hz) column.
 
-    Both come from the net throughput and the RBs allocated averaged over *all*
+    It comes from the net throughput and the RBs allocated averaged over *all*
     slots/subframes (so numerator and denominator cover the same window):
 
-        spec_eff    = throughput_bps / (RB_all x 12 x SCS_Hz)          [bps/Hz]
-        tput_per_rb = throughput_bps / (RB_all x TTIs_per_second)      [bits/RB]
+        spec_eff = throughput_bps / (RB_all x 12 x SCS_Hz)          [bps/Hz]
 
     ``RB_all`` is the time-averaged occupancy, so ``RB_all x 12 x SCS`` is the
     average occupied bandwidth and the ratio is the spectral efficiency of the
@@ -180,13 +176,10 @@ def _add_efficiency(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> None:
 
     valid = np.isfinite(rb_all) & (rb_all > 0) & np.isfinite(scs_khz) & (scs_khz > 0)
     rb_bw_hz = _SUBCARRIERS_PER_RB * scs_khz * 1000.0
-    ttis = _LTE_TTIS_PER_SEC * (scs_khz / 15.0)  # slots/s: 15 kHz->1000, 30->2000
 
     with np.errstate(invalid="ignore", divide="ignore"):
         spec = np.where(valid, tput_bps / (rb_all * rb_bw_hz), np.nan)
-        per_rb = np.where(valid, tput_bps / (rb_all * ttis), np.nan)
     out["spec_eff"] = spec
-    out["tput_per_rb"] = per_rb
 
 
 def _add_n_factor(out: pd.DataFrame, ds: Dataset) -> None:
@@ -358,7 +351,14 @@ def normalise(
 
     metric_cols = list(ds.metrics)
     if metric_cols:
-        out = out[out[metric_cols].notna().any(axis=1)]
+        keep = out[metric_cols].notna().any(axis=1)
+        if traffic is not None:
+            # SigCap: a row logged while a test ran still dates that test phase
+            # for the traffic reference (see align_d2c_traffic), even when it
+            # carries no radio fix and so no metric value
+            in_test = out["traffic"].notna() & out["traffic"].ne("Other")
+            keep |= in_test.fillna(False).astype(bool)
+        out = out[keep]
 
     ordered = DIMENSION_COLUMNS + metric_cols
     out = out[ordered].reset_index(drop=True)
@@ -731,16 +731,10 @@ def options(frame: pd.DataFrame, column: str) -> List:
 #
 # SigCap ships one wide file per test session, with both LTE and NR columns on
 # every row and the collection/workload in the file name.  Each row is routed
-# to the LTE or NR dataset by its *serving* technology, so a row's app-layer
-# throughput rides with the radio that was actually serving and is never
-# double-counted.  The two app-throughput columns (iperf / HTTP) are coalesced
-# into one before normalisation, and CQI's 2147483647 "unknown" sentinel is
-# scrubbed to NaN.
+# to the LTE or NR dataset by its *serving* technology, so a row is never
+# double-counted.  The iperf / HTTP columns are read only to label which test a
+# row belongs to; SigCap's throughput figure itself is not a metric.
 
-#: SigCap logs Android's Integer.MAX_VALUE for an unavailable integer reading
-_SIGCAP_INT_SENTINEL = 2147483647
-#: integer-valued source columns that use the sentinel
-_SIGCAP_SENTINEL_COLS = ("lte_primary_cqi",)
 #: trailing tz offset on an ISO-8601 stamp, e.g. ``...930-0400`` / ``...+05:30``
 _TZ_OFFSET_RE = re.compile(r"([+-]\d{2}:?\d{2})\s*$")
 _SIGCAP_SUFFIX_RE = re.compile(r"\s*\.debug[_ ]?general\s*$", re.IGNORECASE)
@@ -835,27 +829,12 @@ def _sigcap_traffic(raw: pd.DataFrame) -> pd.Series:
 
 
 def _prep_sigcap(raw: pd.DataFrame) -> pd.DataFrame:
-    """In-place prep before normalisation: strip tz, scrub sentinels, coalesce
-    the iperf/HTTP throughput columns into one app-throughput column."""
+    """In-place prep before normalisation: strip the tz offset and synthesise
+    the per-phone device label."""
     if "timestamp" in raw.columns:
         raw["timestamp"] = (
             raw["timestamp"].astype("string").str.replace(_TZ_OFFSET_RE, "", regex=True)
         )
-    for col in _SIGCAP_SENTINEL_COLS:
-        if col in raw.columns:
-            v = _to_numeric(raw[col])
-            raw[col] = v.mask(v.abs() >= _SIGCAP_INT_SENTINEL)
-    iperf = (
-        _to_numeric(raw["iperf_tput_mean_mbps"])
-        if "iperf_tput_mean_mbps" in raw.columns
-        else pd.Series(np.nan, index=raw.index)
-    )
-    http = (
-        _to_numeric(raw["http_tput_mean_mbps"])
-        if "http_tput_mean_mbps" in raw.columns
-        else pd.Series(np.nan, index=raw.index)
-    )
-    raw[SIGCAP_APP_TPUT_COL] = iperf.where(iperf.notna(), http)
     raw[SIGCAP_DEVICE_COL] = _sigcap_device(raw)
     return raw
 

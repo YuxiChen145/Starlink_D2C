@@ -82,15 +82,16 @@ def test_region_filter_and_union(frame):
 
 
 def test_region_can_keep_ungeolocated_rows(fixture_dir, cache_dir):
-    mixed = load(fixture_dir, ["lte_radio", "lte_pucch"], cache_dir)
+    mixed = load(fixture_dir, ["lte_radio"], cache_dir).copy()
+    no_gps = mixed.index[:20]  # e.g. samples logged before the first GPS fix
+    mixed.loc[no_gps, ["lat", "lon"]] = np.nan
     far_away = flt.bbox_polygon(0, 1, 0, 1)
     dropped = flt.apply_filters(mixed, flt.Filters(regions=[far_away]))
     kept = flt.apply_filters(
         mixed, flt.Filters(regions=[far_away], keep_ungeolocated=True)
     )
     assert len(dropped) == 0
-    assert len(kept) > 0
-    assert set(kept["source"].unique()) == {"lte_pucch"}
+    assert list(kept.index) == list(no_gps)
 
 
 def test_time_range_filter(frame):
@@ -122,7 +123,7 @@ def test_empty_frame_passes_through():
 def test_require_drops_rows_with_null_dimensions(fixture_dir, cache_dir):
     from qpviz.loader import load as _load
 
-    mixed = _load(fixture_dir, ["lte_radio", "lte_pucch"], cache_dir)
+    mixed = _load(fixture_dir, ["lte_radio", "nr_radio"], cache_dir)
     patched = mixed.copy()
     patched.loc[patched.index[:5], "pci"] = None
     out = flt.apply_filters(patched, flt.Filters(require=["pci"]))
