@@ -33,7 +33,11 @@ METRIC_RANGES = {
     "rssi": (-100.0, -55.0),
     "sinr": (-8.0, 25.0),
     "mcs": (0.0, 28.0),
-    "throughput": (0.0, 90000.0),
+    # the three throughput metrics read from a raw column, in kbps
+    "tput_dl": (0.0, 90000.0),
+    "tput_dl_cc": (0.0, 90000.0),
+    "tput_ul_cc": (0.0, 90000.0),
+    "sf_usage": (0.0, 1.0),  # the exports give sub-frame usage as a fraction
     "bler": (0.0, 30.0),
     "rb": (1.0, 25.0),      # RBs per subframe, scheduled (rb_sched_col)
     "rb_occ": (0.0, 14.0),  # RBs per subframe, all SF (rb_all_col)
@@ -129,7 +133,7 @@ def _isolated_environ():
 @pytest.fixture(scope="session")
 def fixture_dir(tmp_path_factory) -> Path:
     directory = tmp_path_factory.mktemp("qp_csv")
-    for key in ("lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pusch_pc"):
+    for key in ("lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pdsch_agg", "lte_pusch_pc"):
         write_dataset(directory, DATASETS_BY_KEY[key])
     return directory
 

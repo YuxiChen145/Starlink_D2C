@@ -143,12 +143,9 @@ def test_direction_filter(fixture_dir, cache_dir):
     assert len(flt.apply_filters(both, flt.Filters(links=["DL", "UL"]))) == len(both)
 
 
-def test_source_filter(fixture_dir, cache_dir):
-    from qpviz.loader import load as _load
-
-    both = _load(fixture_dir, ["lte_pdsch_pc", "lte_pusch_pc"], cache_dir)
-    out = flt.apply_filters(both, flt.Filters(sources=["lte_pusch_pc"]))
-    assert set(out["source"].unique()) == {"lte_pusch_pc"}
+def test_there_is_no_data_source_filter():
+    # each metric reads a fixed export, so the export is not a filter
+    assert "sources" not in flt.Filters.__dataclass_fields__
 
 
 # --------------------------------------------------------------------------- #

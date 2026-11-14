@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from .schema import (
+    CARRIER_GROUP,
     DATASETS,
     DATASETS_BY_KEY,
     DERIVED_METRIC,
@@ -25,6 +26,7 @@ from .schema import (
     PRISM_GPS_TIME_COL,
     QP_TEST_NAME_COL,
     SIGCAP_DATASETS,
+    THROUGHPUT_METRICS,
     Dataset,
 )
 
@@ -33,7 +35,7 @@ DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 log = logging.getLogger(__name__)
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 18
+CACHE_VERSION = 19
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
@@ -161,7 +163,8 @@ def _add_efficiency(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> None:
     resource the scheduler actually granted (not the whole carrier). LTE fixes
     SCS at 15 kHz; NR reads it per row. Throughput is kbps in the export.
     """
-    if not ds.rb_all_col or "throughput" not in out.columns:
+    tput_col = ds.tput_metric
+    if not ds.rb_all_col or tput_col is None or tput_col not in out.columns:
         return
     if ds.rb_all_col not in raw.columns:
         return
@@ -172,7 +175,7 @@ def _add_efficiency(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> None:
         scs_khz = np.where(scs_khz >= 1000.0, scs_khz / 1000.0, scs_khz)
     else:
         scs_khz = np.full(len(out), 15.0)  # LTE
-    tput_bps = out["throughput"].to_numpy(dtype="float64") * 1000.0
+    tput_bps = out[tput_col].to_numpy(dtype="float64") * 1000.0
 
     valid = np.isfinite(rb_all) & (rb_all > 0) & np.isfinite(scs_khz) & (scs_khz > 0)
     rb_bw_hz = _SUBCARRIERS_PER_RB * scs_khz * 1000.0
@@ -180,6 +183,47 @@ def _add_efficiency(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> None:
     with np.errstate(invalid="ignore", divide="ignore"):
         spec = np.where(valid, tput_bps / (rb_all * rb_bw_hz), np.nan)
     out["spec_eff"] = spec
+
+
+def _add_carrier_sum(out: pd.DataFrame, ds: Dataset) -> None:
+    """Fill the derived all-carriers uplink throughput (``tput_ul``).
+
+    Qualipoc exports an aggregated PDSCH file but no aggregated PUSCH one, so
+    the uplink total is built here: the per-carrier throughputs of one phone at
+    one timestamp (:data:`~qpviz.schema.CARRIER_GROUP`) are summed, and the sum
+    is written on ONE row of the group - its primary carrier - leaving the
+    others empty. That gives one sample per timestamp, filed under the primary
+    cell's PCI and carrier, which is how the aggregated downlink export is laid
+    out. A timestamp with a single carrier keeps its own value.
+    """
+    if ds.metrics.get("tput_ul") != DERIVED_METRIC or "tput_ul_cc" not in out.columns:
+        return
+    out["tput_ul"] = np.nan
+    if out.empty:
+        return
+    keys = [out[c] if c in out.columns else pd.Series(pd.NA, index=out.index)
+            for c in CARRIER_GROUP]
+    gid = pd.Series(
+        out.groupby(keys, dropna=False, sort=False).ngroup().to_numpy(), index=out.index
+    )
+    cc = out["tput_ul_cc"]
+    total = cc.groupby(gid).transform("sum", min_count=1)
+
+    kind = (out["cell_type"].astype("string").str.lower()
+            if "cell_type" in out.columns else pd.Series("", index=out.index))
+    # the primary carrier is the PCell, else the PSCell (NR as the secondary
+    # cell group), else whichever carrier is logged
+    rank = np.where(
+        kind.str.contains("pcell", na=False).to_numpy(), 2,
+        np.where(kind.str.contains("pscell", na=False).to_numpy(), 1, 0),
+    )
+    order = pd.DataFrame({"gid": gid, "rank": rank, "cc": cc.fillna(-np.inf)})
+    # per timestamp: the primary carrier first, and of two records for the
+    # same carrier the one that actually carried data
+    anchor = order.sort_values(
+        ["gid", "rank", "cc"], ascending=[True, False, False], kind="stable"
+    ).drop_duplicates("gid").index
+    out.loc[anchor, "tput_ul"] = total.loc[anchor]
 
 
 def _add_n_factor(out: pd.DataFrame, ds: Dataset) -> None:
@@ -235,8 +279,9 @@ def _qp_traffic(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> pd.Series:
 
     link = (out["link"].astype("string") if "link" in out.columns
             else pd.Series(ds.link, index=idx, dtype="string"))
-    tput = (pd.to_numeric(out["throughput"], errors="coerce")
-            if "throughput" in out.columns else pd.Series(np.nan, index=idx))
+    tput_col = ds.tput_metric
+    tput = (pd.to_numeric(out[tput_col], errors="coerce")
+            if tput_col in out.columns else pd.Series(np.nan, index=idx))
     bulk = tput.fillna(0.0) > _QP_BULK_MBPS
 
     # split only the ambiguous combined ("Mixed") sessions, by active direction
@@ -310,11 +355,16 @@ def normalise(
     _add_efficiency(out, raw, ds)
     _add_n_factor(out, ds)
 
-    # QP logs net throughput in kbps; store it in Mbps to match the SigCap
-    # app-layer throughput and to keep axes readable (kbps renders as "5k").
-    # Done AFTER _add_efficiency, which needs the kbps value for its bps maths.
-    if "throughput" in out.columns:
-        out["throughput"] = pd.to_numeric(out["throughput"], errors="coerce") / 1000.0
+    # QP logs net throughput in kbps; store it in Mbps to keep axes readable
+    # (kbps renders as "5k"). Done AFTER _add_efficiency, which needs the kbps
+    # value for its bps maths.
+    for col in THROUGHPUT_METRICS:
+        if ds.metrics.get(col, DERIVED_METRIC) != DERIVED_METRIC:
+            out[col] = pd.to_numeric(out[col], errors="coerce") / 1000.0
+    # The exports give sub-frame / slot usage as a 0-1 fraction; show percent.
+    if "sf_usage" in out.columns:
+        out["sf_usage"] = pd.to_numeric(out["sf_usage"], errors="coerce") * 100.0
+    _add_carrier_sum(out, ds)
 
     # NR gives the gNB-Id and the full cell identity but no explicit sector;
     # the cell-local id is what corresponds to LTE's sector.

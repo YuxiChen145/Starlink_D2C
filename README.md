@@ -251,18 +251,29 @@ and per-channel throughput, so a combined session splits into its active phases;
 `Mixed` = a combined session's rows that carry no bulk transfer). In the **D2C**
 campaign QP records idle (PHY only) while SigCap generates the traffic, so those
 QP rows are relabelled from the time-aligned SigCap traffic rather than QP's own
-idle columns or the (sometimes mistyped) collection name), Data source, Collection, Band,
+idle columns or the (sometimes mistyped) collection name), Collection, Band,
 EARFCN/NR-ARFCN, PCI (union or intersection across collections), a **region drawn
 on the map**, and a **time window** (with a per-session jump so
 you can isolate a few minutes at a spot).
 
-**Metrics** — RSRP, RSRQ, RSSI, SINR, MCS, Throughput, **Spectral efficiency
-(bps/Hz)**, **RBs per subframe** (two readings:
-*scheduled* — the grant size, `Avg RBs per SF`, reaching the carrier's RB ceiling;
-and *all SF* — time-averaged occupancy including idle sub-frames), BLER, the
-**RSRQ N-factor**
-(`N = RSRQ·RSSI/RSRP`), and — from SigCap — **Ping RTT (ms)**, wherever the
-selected exports carry them.
+**Metrics** — each one is read from one fixed Qualipoc export, named above the
+plots, so there is no export to pick and no sample is counted twice:
+
+| Metric | Read from |
+|---|---|
+| RSRP, RSRQ, RSSI, SINR, **RSRQ N-factor** (`N = RSRQ·RSSI/RSRP`) | Radio [connected] — the serving cell only (plus the PRISM and SigCap readings when those sources are selected) |
+| **DL throughput, all carriers** | PDSCH [aggregated] |
+| **DL throughput, per carrier** | PDSCH [per-carrier] |
+| **UL throughput, all carriers** and **per carrier** | PUSCH [per-carrier]; there is no aggregated uplink export, so the all-carriers figure is the sum of the carriers at each timestamp |
+| MCS, BLER (DL only) | PDSCH / PUSCH [per-carrier] |
+| **Spectral efficiency (bps/Hz)**, **Subframe usage (%)**, **RBs per used subframe**, **RBs per subframe, all subframes** | PDSCH / PUSCH [per-carrier] |
+| **Ping RTT (ms)** | SigCap |
+
+*Subframe usage* is the share of the available sub-frames (slots on NR) in which
+the phone was scheduled. *RBs per used subframe* is the grant size in those
+sub-frames (`Avg RBs per SF`, reaching the carrier's RB ceiling); *RBs per
+subframe, all subframes* averages over idle sub-frames too, so it equals the
+grant size times the usage.
 
 | Tab | What it shows |
 |---|---|

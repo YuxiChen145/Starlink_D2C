@@ -79,7 +79,6 @@ class Filters:
     techs: Optional[Sequence[str]] = None
     links: Optional[Sequence[str]] = None
     traffic: Optional[Sequence[str]] = None
-    sources: Optional[Sequence[str]] = None
     #: list of polygons, each a list of ``(lat, lon)`` vertices; OR-ed together
     regions: List[List[LatLon]] = field(default_factory=list)
     time_range: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
@@ -129,7 +128,6 @@ def apply_filters(frame: pd.DataFrame, filters: Filters) -> pd.DataFrame:
         ("pci", filters.pcis),
         ("tech", filters.techs),
         ("link", filters.links),
-        ("source", filters.sources),
     ):
         if values:
             mask &= _isin(frame[column], values)

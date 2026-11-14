@@ -11,7 +11,14 @@ lat, lon, pci, freq, band, tech, link, source, source_label
 
 Canonical metric columns
 ------------------------
-rsrp, rsrq, rssi, sinr, mcs, throughput, bler, rtt
+rsrp, rsrq, rssi, sinr, n_factor, tput_dl, tput_dl_cc, tput_ul, tput_ul_cc,
+mcs, bler, spec_eff, sf_usage, rb, rb_occ, rtt
+
+Each metric reads one fixed Qualipoc export (the PRISM scanner and SigCap add
+their own serving-cell readings of the signal metrics): the signal metrics the
+Radio [connected] export, the all-carriers downlink throughput the PDSCH
+[aggregated] export, and everything else the per-carrier PDSCH / PUSCH exports.
+No metric is pooled from two exports of the same phone.
 """
 
 from __future__ import annotations
@@ -47,20 +54,33 @@ METRICS: Dict[str, Metric] = {
         Metric("rssi", "RSSI", "dBm"),
         Metric("sinr", "SINR", "dB"),
         Metric("mcs", "MCS", "index"),
-        Metric("throughput", "Throughput", "Mbps"),
+        # Throughput is four metrics, not one: downlink and uplink, each as the
+        # total over every carrier the phone used and as one carrier's share.
+        # Each reads one fixed export (see Dataset.metrics):
+        #   tput_dl     PDSCH [aggregated]   - one row per timestamp, all carriers
+        #   tput_dl_cc  PDSCH [per-carrier]  - one row per carrier
+        #   tput_ul_cc  PUSCH [per-carrier]  - one row per carrier
+        #   tput_ul     PUSCH [per-carrier], summed over the carriers of each
+        #               timestamp (Qualipoc has no aggregated uplink export)
+        Metric("tput_dl", "DL throughput, all carriers", "Mbps"),
+        Metric("tput_dl_cc", "DL throughput, per carrier", "Mbps"),
+        Metric("tput_ul", "UL throughput, all carriers", "Mbps"),
+        Metric("tput_ul_cc", "UL throughput, per carrier", "Mbps"),
         # Ping round-trip time, logged by SigCap (the only source that pings):
         Metric("rtt", "Ping RTT", "ms", higher_is_better=False),
         # Derived (computed in the loader from throughput + allocated RBs + SCS):
         Metric("spec_eff", "Spectral efficiency", "bps/Hz"),
-        # PHY resource allocation. Two readings from the per-carrier exports:
-        #   rb      = Avg RBs *per SF* - the grant size averaged over SCHEDULED
-        #             sub-frames/slots only (reaches the carrier's RB ceiling;
-        #             this is the value shown in the CSV as "Avg RBs per SF").
-        #   rb_occ  = Avg RBs *all SF* - averaged over ALL sub-frames incl. idle,
-        #             i.e. time-averaged occupancy (much lower).
+        # PHY resource allocation, from the per-carrier exports:
+        #   sf_usage = share of the available sub-frames (NR: slots) in which
+        #              the phone was scheduled at all ("SF Utilization").
+        #   rb       = Avg RBs *per SF* - the grant size averaged over the USED
+        #              sub-frames/slots only (reaches the carrier's RB ceiling).
+        #   rb_occ   = Avg RBs *all SF* - averaged over ALL sub-frames incl.
+        #              idle ones, so rb_occ = rb x sf_usage.
         # A shared cell splitting its RBs between two UEs should show fewer RBs.
-        Metric("rb", "RBs per subframe (scheduled)", "RB"),
-        Metric("rb_occ", "RBs per subframe (all SF)", "RB"),
+        Metric("sf_usage", "Subframe usage", "%"),
+        Metric("rb", "RBs per used subframe", "RB"),
+        Metric("rb_occ", "RBs per subframe, all subframes", "RB"),
         # Derived from the RSRQ = N·RSRP/RSSI identity: N should be the RSSI
         # measurement bandwidth in RBs (25/50/100), but empirically it drifts.
         Metric("n_factor", "RSRQ N-factor", "RB"),
@@ -74,19 +94,29 @@ METRIC_ORDER: List[str] = [
     "rsrq",
     "rssi",
     "sinr",
+    "n_factor",
+    "tput_dl",
+    "tput_dl_cc",
+    "tput_ul",
+    "tput_ul_cc",
     "mcs",
-    "throughput",
+    "bler",
     "spec_eff",
+    "sf_usage",
     "rb",
     "rb_occ",
     "rtt",
-    "bler",
-    "n_factor",
 ]
+
+#: the throughput metrics, as a group (the raw exports log them in kbps)
+THROUGHPUT_METRICS = ("tput_dl", "tput_dl_cc", "tput_ul", "tput_ul_cc")
 
 #: metrics computed in the loader rather than read from a raw column; their
 #: value in a dataset's ``metrics`` map is this sentinel, not a column name
 DERIVED_METRIC = "@derived"
+
+#: rows of one phone that share a timestamp are the carriers of one sample
+CARRIER_GROUP = ("collection", "serial", "time")
 
 # --------------------------------------------------------------------------- #
 # Datasets
@@ -210,6 +240,15 @@ class Dataset:
     def has_geo(self) -> bool:
         return "lat" in self.dims and "lon" in self.dims
 
+    @property
+    def tput_metric(self) -> Optional[str]:
+        """The throughput metric this export logs in a raw column (the
+        per-carrier one where the all-carriers figure is derived), if any."""
+        for key in THROUGHPUT_METRICS:
+            if self.metrics.get(key, DERIVED_METRIC) != DERIVED_METRIC:
+                return key
+        return None
+
     def __post_init__(self):
         # Expose the RB counts a dataset reports as canonical metrics (frozen
         # dataclass: mutating the dict is allowed - we are not rebinding it).
@@ -290,25 +329,6 @@ DATASETS: List[Dataset] = [
         },
     ),
     Dataset(
-        key="lte_neighbor",
-        filename="LTE Radio Neighbor - Limited.csv",
-        label="LTE Radio Neighbor",
-        tech="LTE",
-        link="DL",
-        dims={
-            **_COMMON,
-            **_GEO,
-            "pci": "PCI LTE",
-            "freq": "DL EARFCN",
-            "band": "Band Number",
-        },
-        metrics={
-            "rsrp": "RSRP", "rsrq": "RSRQ", "rssi": "RSSI",
-            "n_factor": DERIVED_METRIC,
-        },
-        note="Neighbour cells; PCI/EARFCN are often blank in the export.",
-    ),
-    Dataset(
         key="nr_radio",
         filename="NR Radio [connected] - Limited.csv",
         label="NR Radio [connected]",
@@ -343,9 +363,10 @@ DATASETS: List[Dataset] = [
         },
         metrics={
             "mcs": "MCS",
-            "throughput": "LTE Net PDSCH Throughput",
+            "tput_dl_cc": "LTE Net PDSCH Throughput",
             "spec_eff": DERIVED_METRIC,
             "bler": "BLER",
+            "sf_usage": "PDSCH SF Utilization",
         },
         rb_all_col="PDSCH Avg RBs all SF",  # LTE SCS is 15 kHz -> scs_col=None
         rb_sched_col="PDSCH Avg RBs per SF",
@@ -363,11 +384,9 @@ DATASETS: List[Dataset] = [
             "freq": "DL EARFCN",
             "band": "PCell Band",
         },
-        metrics={
-            "mcs": "MCS",
-            "throughput": "LTE Net PDSCH Throughput",
-            "bler": "BLER",
-        },
+        # MCS and BLER are in this export too, but they are read per carrier
+        # (above) so that no sample is counted twice
+        metrics={"tput_dl": "LTE Net PDSCH Throughput"},
         note="Carrier-aggregated totals - throughput sums all component carriers.",
     ),
     Dataset(
@@ -386,8 +405,11 @@ DATASETS: List[Dataset] = [
         },
         metrics={
             "mcs": "MCS",
-            "throughput": "LTE Net PUSCH Throughput",
+            "tput_ul_cc": "LTE Net PUSCH Throughput",
+            # no aggregated uplink export: the loader sums the carriers
+            "tput_ul": DERIVED_METRIC,
             "spec_eff": DERIVED_METRIC,
+            "sf_usage": "PUSCH SF Utilization",
         },
         rb_all_col="PUSCH Avg RBs all SF",
         rb_sched_col="PUSCH Avg RBs per SF",
@@ -407,12 +429,14 @@ DATASETS: List[Dataset] = [
             "band": "Band Number",
             "cell_type": "Cell Type",
         },
+        # "PDSCH SINR" is in this export too; SINR is read from Radio
+        # [connected] only, like the other signal metrics
         metrics={
             "mcs": "MCS",
-            "throughput": "5G NR Net PDSCH Throughput",
+            "tput_dl_cc": "5G NR Net PDSCH Throughput",
             "spec_eff": DERIVED_METRIC,
-            "sinr": "PDSCH SINR",
             "bler": "PDSCH BLER",
+            "sf_usage": "PDSCH Slot Utilization",
         },
         rb_all_col="PDSCH Avg RBs all Slots",
         rb_sched_col="PDSCH Avg RBs per Slot",
@@ -431,11 +455,7 @@ DATASETS: List[Dataset] = [
             "freq": "DL NR-ARFCN",
             "band": "PCell Band",
         },
-        metrics={
-            "mcs": "MCS",
-            "throughput": "5G NR Net PDSCH Throughput",
-            "bler": "PDSCH BLER",
-        },
+        metrics={"tput_dl": "5G NR Net PDSCH Throughput"},
         note="Carrier-aggregated totals - throughput sums all component carriers.",
     ),
     Dataset(
@@ -455,8 +475,10 @@ DATASETS: List[Dataset] = [
         },
         metrics={
             "mcs": "MCS",
-            "throughput": "5G NR Net PUSCH Throughput",
+            "tput_ul_cc": "5G NR Net PUSCH Throughput",
+            "tput_ul": DERIVED_METRIC,
             "spec_eff": DERIVED_METRIC,
+            "sf_usage": "PUSCH Slot Utilization",
         },
         rb_all_col="PUSCH Avg RBs all Slots",
         rb_sched_col="PUSCH Avg RBs per Slot",
@@ -484,8 +506,8 @@ def datasets_for(
 ) -> List[Dataset]:
     """Every export that can supply ``metric`` for ``tech``.
 
-    This is what replaces picking datasets by hand: the technology and the
-    metric together determine which files are read.
+    The technology and the metric together determine which files are read:
+    one export per technology, never a pool of two (see the module docstring).
     """
     out = datasets_with_metric(metric, tech)
     if available is not None:

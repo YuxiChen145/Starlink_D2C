@@ -10,6 +10,7 @@ import pytest
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+from qpviz import schema  # noqa: E402
 from tests.conftest import open_tab  # noqa: E402
 
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
@@ -131,7 +132,7 @@ def test_metric_with_both_directions_defaults_to_downlink(
     app = _run(fixture_dir)
     _assert_clean(app)
     app.radio(key="tech_choice").set_value("LTE").run()
-    app.selectbox(key="metric_choice").set_value("throughput").run()
+    app.selectbox(key="metric_choice").set_value("mcs").run()
     _assert_clean(app)
 
     direction = app.multiselect(key="f_links_DL-UL")
@@ -144,22 +145,39 @@ def test_metric_with_both_directions_defaults_to_downlink(
     assert int(app.metric[0].value.replace(",", "")) > downlink_only
 
 
-def test_data_source_filter_narrows_the_pooled_exports(
-    fixture_dir, monkeypatch, tmp_path
+def _captions(app):
+    return [c.value for c in app.caption]
+
+
+@pytest.mark.parametrize(
+    "metric, export, direction",
+    [
+        ("rsrp", "LTE Radio [connected]", ["DL"]),
+        ("tput_dl", "LTE PDSCH [aggregated]", ["DL"]),
+        ("tput_dl_cc", "LTE PDSCH [per-carrier]", ["DL"]),
+        ("tput_ul", "LTE PUSCH [per-carrier]", ["UL"]),
+        ("tput_ul_cc", "LTE PUSCH [per-carrier]", ["UL"]),
+        ("bler", "LTE PDSCH [per-carrier]", ["DL"]),
+        ("sf_usage", "LTE PDSCH [per-carrier]", ["DL", "UL"]),
+    ],
+)
+def test_each_metric_reads_one_fixed_export_named_with_the_plots(
+    fixture_dir, monkeypatch, tmp_path, metric, export, direction
 ):
+    """There is no Data source filter: the metric decides the export, and the
+    page says which one it is."""
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
     app.radio(key="tech_choice").set_value("LTE").run()
-    app.selectbox(key="metric_choice").set_value("throughput").run()
+    app.selectbox(key="metric_choice").set_value(metric).run()
     _assert_clean(app)
 
-    sources = app.multiselect(key="f_sources")
-    # the DL default leaves only the PDSCH export in play; options render as labels
-    assert sources.options == ["LTE PDSCH [per-carrier]"]
-    sources.select("lte_pdsch_pc").run()
-    _assert_clean(app)
-    assert app.multiselect(key="f_sources").value == ["lte_pdsch_pc"]
+    assert "f_sources" not in app.session_state
+    assert "Data source" not in [m.label for m in app.multiselect]
+    label = schema.METRICS[metric].label
+    assert f"{label} is read from **{export}**." in _captions(app)
+    assert app.multiselect(key=f"f_links_{'-'.join(direction)}").options == direction
 
 
 REAL_DATA = Path(__file__).resolve().parents[1] / "QP CSV"
@@ -234,7 +252,7 @@ def test_cell_identity_survives_a_metric_with_no_identity_columns(
     # throughput comes from the PDSCH/PUSCH exports, which carry no eNB-Id -
     # the tab must still work, reading the Radio exports underneath
     app.radio(key="tech_choice").set_value("LTE").run()
-    app.selectbox(key="metric_choice").set_value("throughput").run()
+    app.selectbox(key="metric_choice").set_value("tput_dl_cc").run()
     _assert_clean(app)
     assert app.selectbox(key="identity_level").options == [
         "eNB / gNB-Id",

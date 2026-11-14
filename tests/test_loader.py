@@ -72,12 +72,13 @@ def test_available_datasets_lists_only_present_files(fixture_dir):
         "lte_radio",
         "nr_radio",
         "lte_pdsch_pc",
+        "lte_pdsch_agg",
         "lte_pusch_pc",
     }
 
 
 def test_load_concatenates_and_skips_missing(fixture_dir, cache_dir):
-    frame = loader.load(fixture_dir, ["lte_radio", "nr_radio", "lte_pdsch_agg"], cache_dir)
+    frame = loader.load(fixture_dir, ["lte_radio", "nr_radio", "nr_pdsch_agg"], cache_dir)
     assert set(frame["tech"].unique()) == {"LTE", "NR"}
     assert set(frame["source"].unique()) == {"lte_radio", "nr_radio"}
     # NR contributes no RSSI, LTE contributes no NR-only column -> NaN filled
@@ -117,7 +118,7 @@ def test_spectral_efficiency_derived_metric(fixture_dir, cache_dir):
     frame = loader.read_dataset(fixture_dir, ds, cache_dir)
     # the derived metric exists and is finite where throughput + RBs are present
     assert "spec_eff" in frame.columns
-    ok = frame["throughput"].notna() & frame["spec_eff"].notna()
+    ok = frame["tput_dl_cc"].notna() & frame["spec_eff"].notna()
     assert ok.any()
     assert (frame.loc[ok, "spec_eff"] > 0).all()
     # throughput per RB was the same quantity in other units (x180 on LTE), so
@@ -189,7 +190,7 @@ def test_qp_traffic_splits_only_mixed_sessions_by_throughput():
             "D2C_OpenField_Static_onePhone1_PingiperfULDL",  # Mixed, idle/ping
         ],
         "link": ["DL", "DL", "DL", "DL"],
-        "throughput": [3.0, 0.1, 4.0, 0.02],   # Mbps
+        "tput_dl_cc": [3.0, 0.1, 4.0, 0.02],   # Mbps
     })
     raw = pd.DataFrame({"Test Name": ["-", "-", "-", "-"]})
     traffic = loader._qp_traffic(out, raw, ds)
@@ -210,7 +211,7 @@ def test_qp_traffic_uses_test_name_for_unnamed_sessions():
     out = pd.DataFrame({
         "collection": ["D2C_Boulder_MostStatic_EARFCN8665"] * 3,  # -> "Other"
         "link": ["DL", "DL", "DL"],
-        "throughput": [1.0, 1.0, 0.0],
+        "tput_dl_cc": [1.0, 1.0, 0.0],
     })
     raw = pd.DataFrame({"Test Name": ["Ookla(R)", "Ping", "-"]})
     traffic = loader._qp_traffic(out, raw, ds)
@@ -282,3 +283,82 @@ def test_band_normalisation_is_per_value_not_per_row():
     raw[band_col] = ["25", "LTE E-UTRA 25", None, "25.0"]
     out = loader.normalise(raw, ds)
     assert out["band"].tolist() == ["B25", "B25", "Unknown", "B25"]
+
+
+# --------------------------------------------------------------------------- #
+# Throughput split, uplink carrier sum, subframe usage
+# --------------------------------------------------------------------------- #
+
+
+def _pusch_raw(rows):
+    """A raw NR PUSCH [per-carrier] frame from (time, cell type, PCI, kbps)."""
+    ds = DATASETS_BY_KEY["nr_pusch_pc"]
+    raw = pd.DataFrame({
+        "Time": [r[0] for r in rows],
+        "Collection": "Campus_walk_iperfUL",
+        "Serial Number": "R5CX32LGQBD",
+        "Cell Type": [r[1] for r in rows],
+        "PCI 5G NR": [r[2] for r in rows],
+        "UL NR-ARFCN": 380970,
+        "Band Number": 25,
+        "5G NR Net PUSCH Throughput": [r[3] for r in rows],
+        "PUSCH Slot Utilization": 0.25,
+    })
+    return raw, ds
+
+
+def test_uplink_all_carriers_is_the_sum_of_the_carriers_at_each_timestamp():
+    t0, t1, t2 = (f"2026-07-30 12:10:0{i}.000" for i in range(3))
+    raw, ds = _pusch_raw([
+        (t0, "MCG SCell2", 11, 2000.0),   # two carriers at t0 ...
+        (t0, "MCG PCell", 98, 5000.0),    # ... the PCell carries the total
+        (t1, "MCG PCell", 98, 0.0),       # two records of one carrier at t1:
+        (t1, "MCG PCell", 98, 3000.0),    #   the one with data carries it
+        (t2, "SCG PSCell", 77, 1000.0),   # a single carrier keeps its value
+    ])
+    out = loader.normalise(raw, ds)
+    # per carrier: every row, in Mbps
+    assert out["tput_ul_cc"].tolist() == [2.0, 5.0, 0.0, 3.0, 1.0]
+    # all carriers: one sample per timestamp, on the primary carrier's row
+    assert out["tput_ul"].notna().tolist() == [False, True, False, True, True]
+    assert out["tput_ul"].dropna().tolist() == [7.0, 3.0, 1.0]
+    assert out.loc[out["tput_ul"].notna(), "pci"].tolist() == [98, 98, 77]
+
+
+def test_uplink_sum_keeps_two_phones_at_the_same_instant_apart():
+    t0 = "2026-07-30 12:10:00.000"
+    raw, ds = _pusch_raw([(t0, "MCG PCell", 98, 4000.0), (t0, "MCG PCell", 98, 6000.0)])
+    raw["Serial Number"] = ["PHONE_A", "PHONE_B"]
+    out = loader.normalise(raw, ds)
+    assert out["tput_ul"].tolist() == [4.0, 6.0]
+
+
+def test_downlink_throughput_metrics_come_from_separate_exports(fixture_dir, cache_dir):
+    frame = loader.load(fixture_dir, ["lte_pdsch_pc", "lte_pdsch_agg"], cache_dir)
+    per_carrier = frame[frame["source"] == "lte_pdsch_pc"]
+    aggregated = frame[frame["source"] == "lte_pdsch_agg"]
+    assert per_carrier["tput_dl_cc"].notna().any() and per_carrier["tput_dl"].isna().all()
+    assert aggregated["tput_dl"].notna().any() and aggregated["tput_dl_cc"].isna().all()
+    # the aggregated export supplies throughput only: its MCS and BLER would
+    # count every downlink sample twice
+    assert aggregated[["mcs", "bler"]].isna().all().all()
+    # kbps in the export, Mbps on screen
+    assert frame[["tput_dl", "tput_dl_cc"]].max().max() <= 90.0
+    assert "throughput" not in frame.columns
+
+
+def test_subframe_usage_is_a_percentage_and_links_the_two_rb_metrics():
+    raw, ds = _pusch_raw([("2026-07-30 12:10:00.000", "MCG PCell", 98, 4000.0)])
+    raw["PUSCH Avg RBs per Slot"] = 8.0
+    raw["PUSCH Avg RBs all Slots"] = 2.0
+    out = loader.normalise(raw, ds)
+    assert out["sf_usage"].tolist() == [25.0]
+    # RBs over all subframes = RBs per used subframe x usage
+    assert out["rb_occ"].iloc[0] == out["rb"].iloc[0] * out["sf_usage"].iloc[0] / 100.0
+
+
+def test_subframe_usage_is_loaded_for_both_directions(fixture_dir, cache_dir):
+    frame = loader.load(fixture_dir, ["lte_pdsch_pc", "lte_pusch_pc"], cache_dir)
+    usage = frame["sf_usage"].dropna()
+    assert set(frame.loc[usage.index, "link"].unique()) == {"DL", "UL"}
+    assert usage.between(0.0, 100.0).all() and usage.max() > 1.0

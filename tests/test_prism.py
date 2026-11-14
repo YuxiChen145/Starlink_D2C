@@ -119,7 +119,7 @@ def test_prism_only_selection_changes_metric_options(
     app.multiselect(key="f_providers").select("PRISM").run()
     _clean(app)
     options = app.selectbox(key="metric_choice").options
-    assert "Throughput (kbps)" not in options
+    assert not [o for o in options if "throughput" in o.lower()]
     assert "RSRP (dBm)" in options
 
 

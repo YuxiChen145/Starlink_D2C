@@ -185,8 +185,8 @@ with st.sidebar:
             key="f_providers",
             help="QP is the Qualipoc phone (connected-mode logs, one serving "
                  "cell); PRISM is the SDR scanner (every audible cell, signal "
-                 "only); SigCap runs on the same phone and adds app-layer "
-                 "iperf/HTTP throughput and ping RTT. Leave empty to pool all; "
+                 "only); SigCap runs on the same phone and adds ping RTT. "
+                 "Leave empty to pool all; "
                  "split CDF/Statistics by “Measurement source” to compare them.",
             placeholder=f"All ({len(providers_present)})",
         )
@@ -200,8 +200,8 @@ with st.sidebar:
         list(TECHNOLOGIES),
         horizontal=True,
         key="tech_choice",
-        help="Which radio technology to read. The matching exports are selected "
-             "automatically from the metric you pick below.",
+        help="Which radio technology to read. Each metric is read from one "
+             "fixed export per technology, named above the plots.",
     )
     tech_value = TECHNOLOGIES[tech]
 
@@ -252,11 +252,6 @@ with st.sidebar:
         d.key for d in sigcap_datasets_for(metric, tech_value, available=sigcap_in_tech)
     ]
     reading = qp_source_keys + prism_source_keys + sigcap_source_keys
-    st.caption(
-        "Reading "
-        + ", ".join(f"**{ALL_DATASETS_BY_KEY[k].label}**" for k in reading)
-        + ". Narrow this with the Direction and Data source filters below."
-    )
 
 _parts = []
 if qp_source_keys:
@@ -307,18 +302,6 @@ with st.sidebar:
         placeholder=f"All ({len(traffic_options)})",
     )
     step0 = flt.apply_filters(step0, flt.Filters(traffic=traffic))
-
-    source_options = [k for k in reading if k in set(step0["source"].dropna())]
-    sources = st.multiselect(
-        "Data source",
-        options=source_options,
-        default=[],
-        format_func=lambda k: ALL_DATASETS_BY_KEY[k].label,
-        key="f_sources",
-        help="Leave empty to include all of the exports listed above.",
-        placeholder=f"All ({len(source_options)})",
-    )
-    step0 = flt.apply_filters(step0, flt.Filters(sources=sources))
 
     collections = multiselect_all(
         "Collections", loader.options(step0, "collection"), "f_collections"
@@ -402,7 +385,7 @@ with st.sidebar:
     _time_scope = flt.apply_filters(
         frame,
         flt.Filters(
-            links=links, sources=sources, collections=collections, traffic=traffic,
+            links=links, collections=collections, traffic=traffic,
             bands=bands, freqs=freqs, pcis=effective_pcis,
             regions=st.session_state["regions"],
             require=("pci", "freq") if drop_unknown else (),
@@ -624,7 +607,6 @@ unregioned = flt.apply_filters(
     frame,
     flt.Filters(
         links=links,
-        sources=sources,
         collections=collections,
         traffic=traffic,
         bands=bands,
@@ -701,6 +683,16 @@ if show_sat_kpi:
 if active.empty:
     st.info("No samples match the current filters.")
     st.stop()
+
+# Which export the numbers on screen come from - fixed per metric, so it is
+# stated with the plots rather than offered as a filter.
+_shown = set(active["source"].dropna().unique())
+reading_note = (
+    f"{metric_meta.label} is read from "
+    + ", ".join(f"**{ALL_DATASETS_BY_KEY[k].label}**" for k in reading if k in _shown)
+    + "."
+)
+st.caption(reading_note)
 
 tab_labels = ["🗺️ Map", "📈 CDF curves", "🛰️ Cell identity", "📊 Statistics", "🧾 Data"]
 if sat_enable:

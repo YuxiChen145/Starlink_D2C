@@ -31,14 +31,63 @@ def test_qp_exports_carry_gps():
 def test_datasets_with_metric_filters_by_tech():
     nr = schema.datasets_with_metric("rsrp", tech="NR")
     assert [d.key for d in nr] == ["nr_radio"]
-    assert {d.key for d in schema.datasets_with_metric("throughput")} == {
+    assert {d.key for d in schema.datasets_with_metric("mcs")} == {
         "lte_pdsch_pc",
-        "lte_pdsch_agg",
         "lte_pusch_pc",
         "nr_pdsch_pc",
-        "nr_pdsch_agg",
         "nr_pusch_pc",
     }
+
+
+#: metric -> the one Qualipoc export per technology it is read from
+FIXED_EXPORTS = {
+    "rsrp": {"lte_radio", "nr_radio"},
+    "rsrq": {"lte_radio", "nr_radio"},
+    "rssi": {"lte_radio"},
+    "sinr": {"lte_radio", "nr_radio"},
+    "n_factor": {"lte_radio"},
+    "tput_dl": {"lte_pdsch_agg", "nr_pdsch_agg"},
+    "tput_dl_cc": {"lte_pdsch_pc", "nr_pdsch_pc"},
+    "tput_ul": {"lte_pusch_pc", "nr_pusch_pc"},
+    "tput_ul_cc": {"lte_pusch_pc", "nr_pusch_pc"},
+    "bler": {"lte_pdsch_pc", "nr_pdsch_pc"},
+}
+#: metrics that exist in both directions: one export per technology and link
+BOTH_DIRECTIONS = ("mcs", "spec_eff", "sf_usage", "rb", "rb_occ")
+
+
+@pytest.mark.parametrize("metric", sorted(FIXED_EXPORTS))
+def test_each_metric_reads_one_fixed_qualipoc_export(metric):
+    got = schema.datasets_with_metric(metric)
+    assert {d.key for d in got} == FIXED_EXPORTS[metric]
+    # never two exports of the same technology pooled into one metric
+    assert len({d.tech for d in got}) == len(got)
+
+
+@pytest.mark.parametrize("metric", BOTH_DIRECTIONS)
+def test_two_way_metrics_read_the_per_carrier_export_of_each_direction(metric):
+    got = schema.datasets_with_metric(metric)
+    assert {d.key for d in got} == {
+        "lte_pdsch_pc", "lte_pusch_pc", "nr_pdsch_pc", "nr_pusch_pc"
+    }
+    assert len({(d.tech, d.link) for d in got}) == len(got)
+
+
+def test_the_neighbour_export_is_not_read():
+    # signal metrics describe the serving cell only (Radio [connected])
+    assert "lte_neighbor" not in schema.DATASETS_BY_KEY
+    assert not [d for d in schema.DATASETS if "Neighbor" in d.filename]
+
+
+def test_the_single_throughput_metric_is_split_in_four():
+    assert "throughput" not in schema.METRICS
+    assert [schema.METRICS[m].label for m in schema.THROUGHPUT_METRICS] == [
+        "DL throughput, all carriers",
+        "DL throughput, per carrier",
+        "UL throughput, all carriers",
+        "UL throughput, per carrier",
+    ]
+    assert {schema.METRICS[m].unit for m in schema.THROUGHPUT_METRICS} == {"Mbps"}
 
 
 def test_every_registered_metric_is_offered():
@@ -65,7 +114,7 @@ def test_cut_metrics_are_gone_from_the_registry_and_every_dataset(metric):
 def test_metrics_available_is_in_display_order():
     got = schema.metrics_available(["lte_radio", "lte_pusch_pc"])
     assert got == [m for m in schema.METRIC_ORDER if m in got]
-    assert "rsrp" in got and "throughput" in got
+    assert "rsrp" in got and "tput_ul" in got and "tput_dl" not in got
 
 
 def test_metrics_available_ignores_unknown_keys():
@@ -77,17 +126,13 @@ def test_technologies_map_to_dataset_tech_values():
 
 
 def test_datasets_for_resolves_metric_and_technology():
-    # RSRP for "All" pools the LTE serving + neighbour and the NR radio exports
-    assert {d.key for d in schema.datasets_for("rsrp")} == {
-        "lte_radio",
-        "lte_neighbor",
-        "nr_radio",
-    }
+    # RSRP for "All" reads the serving-cell export of each technology
+    assert {d.key for d in schema.datasets_for("rsrp")} == {"lte_radio", "nr_radio"}
     assert {d.key for d in schema.datasets_for("rsrp", "NR")} == {"nr_radio"}
 
 
 def test_datasets_for_spans_both_directions_where_the_metric_does():
-    resolved = schema.datasets_for("throughput", "LTE")
+    resolved = schema.datasets_for("mcs", "LTE")
     assert {d.link for d in resolved} == {"DL", "UL"}
 
 
@@ -103,8 +148,8 @@ def test_rb_metrics_map_scheduled_vs_all_sf():
     exports, and never crossed."""
     from qpviz.schema import METRICS, DATASETS_BY_KEY
 
-    assert METRICS["rb"].label == "RBs per subframe (scheduled)"
-    assert METRICS["rb_occ"].label == "RBs per subframe (all SF)"
+    assert METRICS["rb"].label == "RBs per used subframe"
+    assert METRICS["rb_occ"].label == "RBs per subframe, all subframes"
 
     checks = {
         "lte_pdsch_pc": ("PDSCH Avg RBs per SF", "PDSCH Avg RBs all SF"),
