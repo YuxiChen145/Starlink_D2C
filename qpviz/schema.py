@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -174,6 +175,9 @@ def _name_apps(name) -> tuple:
     if name is None:
         return (), ""
     raw = str(name).lower().replace(" ", "")
+    # one session is named "PingiperULDL": read the misspelt "iper" as iperf,
+    # or the session counts as ping only and its transfers are never labelled
+    raw = re.sub(r"iper(?=ul|dl)", "iperf", raw)
     return tuple(a for a in _TRAFFIC_APPS if a in raw), raw
 
 
