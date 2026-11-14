@@ -3,14 +3,10 @@
 An interactive Streamlit app for exploring Starlink Direct-to-Cell measurement
 data from three instruments side by side — **Qualipoc (QP)** connected-mode
 drive/walk logs, **PRISM** SDR sweeps, and **SigCap** (an Android logger that
-captures the serving cell together with the *application-layer* result of an
-iperf / HTTP run and ping RTT). Pick a technology and metric, filter down to the
+captures the serving cell and ping RTT, and runs the iperf / HTTP tests). Pick a technology and metric, filter down to the
 cells, region, and minutes you care about, and compare them on a map, as CDF/PDF
-curves, by which cells were serving and for how long, against how many D2C
-satellites were overhead, **correlate the QP PHY layer against what the
-application actually got** when both were recorded on the same phone, and — when
-several phones logged the same spot at once — **compare throughput as one phone
-vs two contend for D2C** on a shared timeline.
+curves, by which cells were serving and for how long, and against how many D2C
+satellites were overhead.
 
 ![The CDF tab](docs/screenshot-cdf.png)
 
