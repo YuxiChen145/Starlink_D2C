@@ -203,7 +203,7 @@ def test_cell_identity_opens_on_the_hierarchy(fixture_dir, monkeypatch, tmp_path
 
     # the node tree leads, the counts behind it come second
     view = app.radio(key="identity_view")
-    assert view.options[:2] == ["Hierarchy", "Structure"]
+    assert view.options == ["Hierarchy", "Structure"]
     assert view.value == "Hierarchy"
 
     # D2C and terrestrial are separate trees, D2C first
@@ -315,36 +315,22 @@ def test_cell_identity_survives_a_metric_with_no_identity_columns(
     assert app.selectbox(key="identity_focus_D2C").options
 
 
-def test_cell_identity_time_views_follow_the_tree_views(
-    fixture_dir, monkeypatch, tmp_path
-):
+def test_cell_identity_has_no_time_views(fixture_dir, monkeypatch, tmp_path):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
     open_tab(app, "Cell identity")
     _assert_clean(app)
-    view = app.radio(key="identity_view")
-    assert view.options == ["Hierarchy", "Structure", "Timeline", "Change timeline"]
-
-    view.set_value("Timeline").run()
-    _assert_clean(app)
-    assert any("Distinct" in m.label for m in app.metric)
-    # the NR-only SSB index is no longer a level
-    assert app.selectbox(key="identity_level").options == ["eNB ID", "Sector ID", "PCI"]
-    # one download per tab: the time views carry no table of their own
-    assert not app.get("download_button")
-
-    app.radio(key="identity_view").set_value("Change timeline").run()
-    _assert_clean(app)
-    # no second collection picker: the sidebar selection is used
-    assert not [m for m in app.multiselect if "Collections" in m.label
-                and m.key != "f_collections"]
+    # Timeline and Change timeline followed one session, not the network
+    assert app.radio(key="identity_view").options == ["Hierarchy", "Structure"]
+    assert not [m for m in app.metric if m.label == "Dwell runs"]
+    # the NR-only SSB index is no longer a level anywhere in the tab
+    assert not [b for b in app.selectbox if "SSB Index" in b.options]
 
 
 def test_cell_identity_shows_prism_decoded_identity(prism_dir, monkeypatch, tmp_path):
     # PRISM decodes eNB/sector/PCI on some scan rows; with no QP present the
-    # Cell identity tab must still open on those, offering the relationship views
-    # (Hierarchy / Structure) but not the serving-cell time views.
+    # Cell identity tab must still open on those.
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     empty_qp = tmp_path / "no_qp"
     empty_qp.mkdir()
@@ -355,7 +341,7 @@ def test_cell_identity_shows_prism_decoded_identity(prism_dir, monkeypatch, tmp_
     open_tab(app, "Cell identity")
     _assert_clean(app)
     view = app.radio(key="identity_view")
-    assert set(view.options) == {"Hierarchy", "Structure"}   # no serving-cell timelines
+    assert view.options == ["Hierarchy", "Structure"]
     # PRISM's decoded eNB / sector / PCI drive the hierarchy
     summary = next(
         d.value for d in app.dataframe if "Sectors seen" in list(d.value.columns)
@@ -368,15 +354,15 @@ def test_cell_identity_shows_prism_decoded_identity(prism_dir, monkeypatch, tmp_
 def test_cell_identity_pools_qp_serving_and_prism_scans(
     fixture_dir, prism_dir, monkeypatch, tmp_path
 ):
-    # with both sources, the serving-cell views come back (QP) and PRISM rows
-    # still join the relationship views
+    # with both sources, the QP serving cells and the PRISM scans feed one tree
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir, prism_dir=prism_dir)
     _assert_clean(app)
     open_tab(app, "Cell identity")
     _assert_clean(app)
-    view = app.radio(key="identity_view")
-    assert {"Timeline", "Change timeline", "Hierarchy", "Structure"} <= set(view.options)
+    source = next(c.value for c in app.caption if c.value.startswith("Cell identity from"))
+    assert "QP serving cell" in source and "PRISM decoded scans" in source
+    assert "SigCap" not in source   # PCI only: it cannot be placed in the tree
 
 
 def test_metric_picker_offers_only_the_metrics_in_metric_order(

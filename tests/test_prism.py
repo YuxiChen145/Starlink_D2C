@@ -143,7 +143,7 @@ def test_identity_tab_opens_on_prism_decoded_cells(fixture_dir, prism_dir, tmp_p
     open_tab(app, "Cell identity")
     _clean(app)
     # PRISM-only now opens the Cell identity tab on its decoded eNB/sector/PCI,
-    # offering the relationship views (no serving-cell timelines, no QP prompt)
+    # with no QP prompt
     view = app.radio(key="identity_view")
     assert set(view.options) == {"Hierarchy", "Structure"}
     assert not any("connected-mode" in i.value for i in app.info)

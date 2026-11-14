@@ -195,62 +195,6 @@ def test_real_curves_render(fixture_dir, cache_dir):
 # --------------------------------------------------------------------------- #
 
 
-def _runs():
-    import pandas as pd
-    from qpviz import identity
-
-    times = pd.date_range("2026-07-22 14:00:00", periods=12, freq="1s")
-    frame = pd.DataFrame(
-        {
-            "time": list(times) + list(times),
-            "collection": ["A"] * 12 + ["B"] * 12,
-            "pci": pd.array([1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4] * 2, dtype="Int32"),
-        }
-    )
-    return identity.dwell_runs(frame, "pci")
-
-
-def test_timeline_draws_one_trace_per_collection():
-    runs = _runs()
-    fig = charts.timeline_figure(runs, [1, 2, 3, 4], "PCI")
-    assert len(fig.data) == 2
-    assert {t.name for t in fig.data} == {"A", "B"}
-    assert all(t.orientation == "h" for t in fig.data)
-    assert fig.layout.showlegend is True
-
-
-def test_timeline_row_order_and_reversed_axis():
-    fig = charts.timeline_figure(_runs(), [3, 1, 4], "PCI")
-    assert list(fig.layout.yaxis.categoryarray) == ["3", "1", "4"]
-    # first identity at the top, so the staircase reads downward
-    assert fig.layout.yaxis.autorange == "reversed"
-    # identities not in the list are not drawn
-    assert all("2" not in list(t.y) for t in fig.data)
-
-
-def test_timeline_elapsed_and_absolute_axes():
-    runs = _runs()
-    elapsed = charts.timeline_figure(runs, [1, 2, 3, 4], "PCI", x_axis="elapsed")
-    assert "Elapsed" in elapsed.layout.xaxis.title.text
-    assert max(elapsed.data[0].x) == pytest.approx(4 / 60)  # 4 s in minutes
-    absolute = charts.timeline_figure(runs, [1, 2, 3, 4], "PCI", x_axis="absolute")
-    assert absolute.layout.xaxis.title.text == "Time"
-
-
-def test_timeline_height_grows_with_the_number_of_rows():
-    runs = _runs()
-    short = charts.timeline_figure(runs, [1, 2], "PCI").layout.height
-    tall = charts.timeline_figure(runs, list(range(1, 60)), "PCI").layout.height
-    assert tall > short
-
-
-def test_timeline_handles_no_runs():
-    import pandas as pd
-
-    fig = charts.timeline_figure(pd.DataFrame(columns=["collection", "value"]), [], "PCI")
-    assert len(fig.data) == 0
-
-
 def _hierarchy():
     import pandas as pd
 
@@ -452,35 +396,6 @@ def test_categorical_legend_lists_every_slot_and_the_other_bucket():
     assert charts.OTHER_COLOR in html
 
 
-def test_timeline_folds_collections_past_the_eight_categorical_slots():
-    import pandas as pd
-    from qpviz import identity
-
-    times = pd.date_range("2026-07-22 14:00:00", periods=6, freq="1s")
-    frames = []
-    for n in range(11):
-        frames.append(
-            pd.DataFrame(
-                {
-                    "time": times,
-                    # more runs for the low-numbered collections, so ranking is stable
-                    "collection": f"C{n:02d}",
-                    "pci": pd.array([1, 2, 1, 2, 1, 2][: 6 - (n > 0)] + [3] * (n > 0), dtype="Int32"),
-                }
-            )
-        )
-    runs = identity.dwell_runs(pd.concat(frames, ignore_index=True), "pci")
-    fig = charts.timeline_figure(runs, [1, 2, 3], "PCI")
-    names = [t.name for t in fig.data]
-    assert len(names) == 9  # eight named collections plus one folded trace
-    assert names[-1] == "Other (3 collections)"
-    folded = fig.data[-1]
-    assert folded.marker.color == charts.OTHER_COLOR
-    # no colour is ever reused between two named collections
-    colors = [t.marker.color for t in fig.data[:8]]
-    assert len(set(colors)) == 8
-
-
 # --------------------------------------------------------------------------- #
 # Fan-out figure
 # --------------------------------------------------------------------------- #
@@ -540,62 +455,3 @@ def test_fan_out_ignores_other_relationships_and_empty_input():
 
     assert len(charts.fan_out_figure(_dist(), "PCIs seen per sector").data) == 0
     assert len(charts.fan_out_figure(pd.DataFrame(), "anything").data) == 0
-
-
-# --------------------------------------------------------------------------- #
-# Serving-cell change timeline (eNB Id on y, one segment per Cell Id)
-# --------------------------------------------------------------------------- #
-
-
-def _segments(collections=("A",)):
-    import pandas as pd
-    from qpviz import identity
-    frames = []
-    for i, c in enumerate(collections):
-        n = 5
-        times = pd.date_range("2026-08-14 14:00:00", periods=n,
-                              freq=pd.Timedelta(seconds=1)) + pd.Timedelta(hours=i)
-        frames.append(pd.DataFrame({
-            "time": times,
-            "collection": c,
-            "enb": pd.array([1, 1, 1, 2, 2], dtype="Int64"),   # start, cell, enb
-            "cell_id": pd.array([10, 10, 11, 20, 20], dtype="Int64"),
-            "sector": pd.array([0, 0, 1, 0, 0], dtype="Int32"),
-            "pci": pd.array([100, 100, 101, 200, 200], dtype="Int32"),
-            "cell_type": "MCG PCell",
-        }))
-    return identity.serving_segments(pd.concat(frames, ignore_index=True))
-
-
-def test_serving_timeline_one_panel_per_collection():
-    segs = _segments(("A", "B"))
-    fig = charts.serving_timeline_figure(segs, collections=["A", "B"])
-    yaxes = [k for k in fig.layout if k.startswith("yaxis")]
-    assert len(yaxes) == 2                          # two stacked panels
-    # the two legend entries name the orange/blue meaning
-    names = {t.name for t in fig.data}
-    assert any("new eNB" in (n or "") for n in names)
-    assert any("new Cell Id" in (n or "") for n in names)
-
-
-def test_serving_timeline_colours_segments_orange_and_blue():
-    fig = charts.serving_timeline_figure(_segments(("A",)), collections=["A"])
-    seg_colours = {
-        t.line.color for t in fig.data
-        if t.mode == "lines" and t.line.width == 7   # segments, not the width-6 swatches
-    }
-    # this data has both an eNB change (orange) and a cell-only change (blue)
-    assert seg_colours == {charts.CHANGE_ENB_COLOR, charts.CHANGE_CELL_COLOR}
-
-
-def test_serving_timeline_labels_pci_above_and_sector_below():
-    fig = charts.serving_timeline_figure(_segments(("A",)), collections=["A"])
-    texts = {a.text for a in fig.layout.annotations}
-    assert {"100", "101", "200"} <= texts     # PCI above each segment
-    assert {"s0", "s1"} <= texts              # sector id below each segment
-
-
-def test_serving_timeline_empty_is_blank():
-    import pandas as pd
-    fig = charts.serving_timeline_figure(pd.DataFrame(columns=["collection", "enb"]), [])
-    assert len(fig.data) == 0

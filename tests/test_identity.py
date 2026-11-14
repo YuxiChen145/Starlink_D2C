@@ -55,76 +55,6 @@ def test_label_for():
 
 
 # --------------------------------------------------------------------------- #
-# Dwell runs
-# --------------------------------------------------------------------------- #
-
-
-def test_runs_collapse_consecutive_samples_on_one_cell():
-    runs = identity.dwell_runs(_frame([7, 7, 7, 9, 9, 7]), "pci")
-    assert runs["value"].tolist() == [7, 9, 7]
-    assert runs["samples"].tolist() == [3, 2, 1]
-    assert runs["order"].tolist() == [0, 1, 2]
-
-
-def test_run_duration_covers_the_gap_to_the_next_run():
-    # 1 s sampling: three samples on cell 7 own 3 s, not 2
-    runs = identity.dwell_runs(_frame([7, 7, 7, 9]), "pci")
-    assert runs.loc[0, "duration_s"] == pytest.approx(3.0)
-    assert runs["duration_s"].sum() == pytest.approx(4.0)
-
-
-def test_elapsed_is_measured_from_each_collections_first_sample():
-    a = _frame([1, 1, 2], collection="A", start="2026-07-22 14:00:00")
-    b = _frame([5, 6], collection="B", start="2026-08-01 09:30:00")
-    runs = identity.dwell_runs(pd.concat([a, b], ignore_index=True), "pci")
-    for _, group in runs.groupby("collection"):
-        assert group["elapsed_start"].min() == pytest.approx(0.0)
-    assert set(runs["collection"]) == {"A", "B"}
-
-
-def test_a_logging_pause_splits_a_run_rather_than_stretching_it():
-    times = pd.to_datetime(
-        [
-            "2026-07-22 14:00:00",
-            "2026-07-22 14:00:01",
-            "2026-07-22 16:00:00",  # two-hour pause, same cell
-            "2026-07-22 16:00:01",
-        ]
-    )
-    frame = pd.DataFrame(
-        {"time": times, "collection": "C", "pci": pd.array([7, 7, 7, 7], dtype="Int32")}
-    )
-    runs = identity.dwell_runs(frame, "pci", gap_seconds=60)
-    assert len(runs) == 2
-    assert runs["duration_s"].max() < 10  # neither run swallows the pause
-
-
-def test_runs_ignore_null_identities_and_empty_input():
-    frame = _frame([1, None, 1])
-    runs = identity.dwell_runs(frame, "pci")
-    assert runs["samples"].sum() == 2
-    assert identity.dwell_runs(pd.DataFrame(), "pci").empty
-    assert identity.dwell_runs(frame, "not_a_column").empty
-
-
-def test_order_identities_by_first_seen_dwell_and_value():
-    frame = _frame([9, 9, 9, 9, 3, 3, 7])
-    runs = identity.dwell_runs(frame, "pci")
-    assert identity.order_identities(runs, "first seen") == [9, 3, 7]
-    assert identity.order_identities(runs, "dwell") == [9, 3, 7]
-    assert identity.order_identities(runs, "value") == [3, 7, 9]
-
-
-def test_order_identities_limit_keeps_the_longest_held_in_requested_order():
-    frame = _frame([1, 2, 2, 2, 3, 3])
-    runs = identity.dwell_runs(frame, "pci")
-    # 1 is seen first but held shortest, so a limit of 2 drops it
-    assert identity.order_identities(runs, "first seen", limit=2) == [2, 3]
-    assert identity.order_identities(runs, "first seen") == [1, 2, 3]
-    assert identity.order_identities(pd.DataFrame(), "dwell") == []
-
-
-# --------------------------------------------------------------------------- #
 # Hierarchy
 # --------------------------------------------------------------------------- #
 
@@ -192,14 +122,7 @@ def test_scell_rows_are_excluded_from_identity_analysis(fixture_dir, cache_dir):
     assert set(serving["cell_type"].dropna().unique()) == {"MCG PCell"}
 
 
-def test_dwell_and_hierarchy_agree_on_total_time(fixture_dir, cache_dir):
-    frame = identity.serving_only(load(fixture_dir, ["lte_radio"], cache_dir))
-    runs = identity.dwell_runs(frame, "pci")
-    table = identity.hierarchy(frame, ["enb", "sector", "pci"])
-    assert runs["duration_s"].sum() == pytest.approx(table["dwell_s"].sum(), rel=1e-6)
-
-
-def test_elapsed_excludes_logging_pauses():
+def test_time_held_excludes_logging_pauses():
     # two minutes of samples either side of a two-hour pause
     first = pd.date_range("2026-07-22 14:00:00", periods=60, freq="1s")
     second = pd.date_range("2026-07-22 16:00:00", periods=60, freq="1s")
@@ -210,33 +133,22 @@ def test_elapsed_excludes_logging_pauses():
             "pci": pd.array([1] * 60 + [2] * 60, dtype="Int32"),
         }
     )
-    runs = identity.dwell_runs(frame, "pci")
+    table = identity.hierarchy(frame, ["pci"])
     wall = (frame["time"].max() - frame["time"].min()).total_seconds()
     assert wall == pytest.approx(7259.0)
-    # active time is the 120 s actually logged, not the two-hour span
-    assert runs["elapsed_end"].max() == pytest.approx(120.0)
-    assert runs["duration_s"].sum() == pytest.approx(120.0)
-
-
-def test_duration_is_the_time_the_cell_owned_not_the_wall_clock_span():
-    frame = _frame([1, 1, 2], step_s=2.0)
-    runs = identity.dwell_runs(frame, "pci")
-    assert runs.loc[0, "duration_s"] == pytest.approx(4.0)
-    assert runs.loc[0, "end"] - runs.loc[0, "start"] == pd.Timedelta(seconds=4)
-    assert runs["elapsed_start"].tolist() == pytest.approx([0.0, 4.0])
+    # the time held is the 120 s actually logged, not the two-hour span
+    assert table["dwell_s"].sum() == pytest.approx(120.0)
+    assert table["dwell_s"].tolist() == pytest.approx([60.0, 60.0])
 
 
 @pytest.mark.parametrize("unit", ["ns", "us", "ms", "s"])
-def test_dwell_is_independent_of_the_datetime_resolution(unit):
+def test_time_held_is_independent_of_the_datetime_resolution(unit):
     """pandas 2 stores datetimes as ns and pandas 3 as us - durations must not
     change by a factor of a thousand between them."""
     frame = _frame([1, 1, 1, 2, 2], step_s=2.0)
     frame["time"] = frame["time"].astype(f"datetime64[{unit}]")
-    runs = identity.dwell_runs(frame, "pci")
-    assert runs["duration_s"].tolist() == pytest.approx([6.0, 4.0])
-    assert runs["elapsed_end"].max() == pytest.approx(10.0)
-    table = identity.hierarchy(frame, ["pci"])
-    assert table["dwell_s"].sum() == pytest.approx(10.0)
+    table = identity.hierarchy(frame, ["pci"]).set_index("pci")["dwell_s"]
+    assert table[1] == pytest.approx(6.0) and table[2] == pytest.approx(4.0)
 
 
 def test_loader_pins_the_time_resolution(fixture_dir, cache_dir):
@@ -450,62 +362,3 @@ def test_fan_out_counts_split_by_network_from_the_paths_table():
     sectors = counts[counts["relationship"] == "Sectors seen per eNB"]
     assert sorted(sectors.loc[sectors["group"] == "D2C", "children"]) == [1, 3]
     assert sorted(sectors.loc[sectors["group"] == "Terrestrial", "children"]) == [2]
-
-
-# --------------------------------------------------------------------------- #
-# Serving-cell change timeline: segments per Cell Id, coloured by eNB change
-# --------------------------------------------------------------------------- #
-
-
-def _sframe(enb, cell_id, pci=None, sector=None, collection="C",
-            start="2026-07-22 14:00:00", step_s=1.0):
-    n = len(enb)
-    times = pd.date_range(start, periods=n, freq=pd.Timedelta(seconds=step_s))
-    data = {
-        "time": times,
-        "collection": collection,
-        "enb": pd.array(enb, dtype="Int64"),
-        "cell_id": pd.array(cell_id, dtype="Int64"),
-        "cell_type": "MCG PCell",
-    }
-    data["pci"] = pd.array(pci if pci is not None else [1] * n, dtype="Int32")
-    if sector is not None:
-        data["sector"] = pd.array(sector, dtype="Int32")
-    return pd.DataFrame(data)
-
-
-def test_segments_break_on_cell_id_and_classify_the_change():
-    # eNB/cell: (1,10)(1,10) -> (1,11) -> (2,20) -> (2,20)
-    #   seg1 start, seg2 same eNB new cell = "cell", seg3 new eNB = "enb"
-    frame = _sframe([1, 1, 1, 2, 2], [10, 10, 11, 20, 20])
-    segs = identity.serving_segments(frame)
-    assert segs["cell_id"].tolist() == [10, 11, 20]
-    assert segs["enb"].tolist() == [1, 1, 2]
-    assert segs["change"].tolist() == ["start", "cell", "enb"]
-    assert segs["samples"].tolist() == [2, 1, 2]
-
-
-def test_segment_summary_counts_changes_and_rates():
-    frame = _sframe([1, 1, 1, 2, 2], [10, 10, 11, 20, 20],
-                    pci=[100, 100, 101, 200, 200])
-    summ = identity.segment_summary(identity.serving_segments(frame))
-    row = summ.iloc[0]
-    assert row["segments"] == 3
-    assert row["cell_changes"] == 2       # two new Cell Ids after the first
-    assert row["enb_changes"] == 1        # one of them was also a new eNB
-    assert row["n_enb"] == 2 and row["n_cell"] == 3 and row["n_pci"] == 3
-
-
-def test_segments_are_per_collection():
-    a = _sframe([1, 1, 2], [10, 10, 20], collection="A")
-    b = _sframe([5, 6], [50, 60], collection="B", start="2026-07-22 15:00:00")
-    segs = identity.serving_segments(pd.concat([a, b], ignore_index=True))
-    # each collection starts its own segment chain at elapsed 0
-    for _, g in segs.groupby("collection"):
-        assert g["elapsed_start"].min() == pytest.approx(0.0)
-        assert g["change"].iloc[0] == "start"
-
-
-def test_serving_segments_and_summary_empty_on_empty_input():
-    assert identity.serving_segments(pd.DataFrame()).empty
-    assert identity.segment_summary(pd.DataFrame()).empty

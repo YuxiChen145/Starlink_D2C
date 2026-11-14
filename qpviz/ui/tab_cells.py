@@ -10,24 +10,14 @@ from qpviz.schema import (
     DATASETS_BY_KEY,
     NETWORKS,
     PRISM_DATASETS_BY_KEY,
-    SIGCAP_DATASETS_BY_KEY,
 )
-from qpviz.ui.common import (
-    align_qp_d2c,
-    load_frame,
-    load_prism_frame,
-    load_sigcap_frame,
-)
+from qpviz.ui.common import align_qp_d2c, load_frame, load_prism_frame
 from qpviz.ui.context import Ctx
 
 
 #: the tree is always eNB, then sector, then PCI
 LEVELS = identity.TREE_LEVELS
 LEVEL_LABELS = [identity.label_for(level) for level in LEVELS]
-
-#: the time views draw at most this many collections (the largest ones)
-MAX_TIMELINE_PANELS = 4
-
 
 def _networks(table: pd.DataFrame) -> list:
     """Networks in ``table``: D2C first, then terrestrial, then anything else."""
@@ -167,172 +157,44 @@ def _download(table: pd.DataFrame) -> None:
     )
 
 
-def _change_timeline_view(serving: pd.DataFrame, mode: str) -> None:
-    st.caption(
-        "**Serving-cell timeline** with **eNB ID on the y-axis** and one "
-        "segment per Cell Id. A segment is **orange** when the **eNB** "
-        "changed (a site/satellite change) and **blue** when only the "
-        "**Cell Id** changed under the same eNB (a beam/sector change). Each "
-        "segment is labelled with its **PCI above** and **sector below** "
-        "(`s#`), and dotted lines connect consecutive cells so an eNB jump "
-        "is visible. One panel per collection."
-    )
-    if "enb" not in identity.available_levels(serving):
-        st.info(
-            "This needs the connected radio to carry an eNB ID. It is not "
-            "decoded in the current selection."
-        )
-        return
-    segments = identity.serving_segments(serving)
-    summary = identity.segment_summary(segments)
-    if segments.empty:
-        st.info("Not enough serving-cell samples to build segments.")
-        return
-    by_size = serving.groupby("collection", observed=True).size()
-    all_colls = by_size.sort_values(ascending=False).index.tolist()
-    chosen = all_colls[:MAX_TIMELINE_PANELS]
-    if len(all_colls) > len(chosen):
-        st.caption(
-            f"Showing the {len(chosen)} largest of {len(all_colls)} collections. "
-            "Pick collections in the sidebar to see others."
-        )
-    srow = {r["collection"]: r for _, r in summary.iterrows()}
-
-    def _subtitle(coll):
-        r = srow.get(coll)
-        if r is None:
-            return str(coll)
-        return (
-            f"{coll}<br>{r['n_enb']} eNB Ids · {r['n_cell']} "
-            f"Cell Ids · {r['n_pci']} PCIs in {r['span_min']:.0f} min"
-            f"   |   {r['cell_changes']} cell changes "
-            f"({r['cell_per_min']:.1f}/min), {r['enb_changes']} "
-            f"eNB changes ({r['enb_per_min']:.1f}/min), median "
-            f"dwell {r['median_dwell_s']:.0f} s"
-        )
-
-    st.plotly_chart(
-        charts.serving_timeline_figure(
-            segments[segments["collection"].isin(chosen)],
-            collections=chosen,
-            subtitles=[_subtitle(c) for c in chosen],
-            mode=mode,
-        ),
-        width="stretch",
-    )
-
-
-def _timeline_view(serving: pd.DataFrame, mode: str) -> None:
-    serving_levels = identity.available_levels(serving)
-    row = st.columns([2, 2, 2, 2])
-    level = row[0].selectbox(
-        "Identity", serving_levels, format_func=identity.label_for,
-        key="identity_level",
-    )
-    order_by = row[1].selectbox(
-        "Row order", ["first seen", "dwell", "value"], key="identity_order",
-        help="First seen draws the staircase a moving constellation makes; "
-             "dwell puts the cells you spent longest on at the top.",
-    )
-    max_rows = row[2].number_input(
-        "Max rows", min_value=5, max_value=400, value=60, step=5,
-        help="Largest total dwell wins when there are more.",
-    )
-    x_axis = row[3].selectbox(
-        "X axis", ["elapsed", "absolute"], key="identity_x",
-        help="Elapsed is active minutes within each collection (time "
-             "the log was paused is excluded), so several collections "
-             "share one axis.",
-    )
-
-    runs = identity.dwell_runs(serving, level)
-    if runs.empty:
-        st.info("Not enough samples to build dwell runs.")
-        return
-    shown = identity.order_identities(runs, order_by, limit=int(max_rows))
-    span_min = max(runs["elapsed_end"].max() / 60.0, 1e-9)
-    handovers = len(runs) - runs["collection"].nunique()
-    summary = st.columns(4)
-    summary[0].metric(f"Distinct {identity.label_for(level)}", f"{runs['value'].nunique():,}")
-    summary[1].metric("Dwell runs", f"{len(runs):,}")
-    summary[2].metric("Median dwell", f"{runs['duration_s'].median():.1f} s")
-    summary[3].metric("Changes / min", f"{handovers / span_min:.2f}")
-
-    st.plotly_chart(
-        charts.timeline_figure(
-            runs, shown, identity.label_for(level), mode=mode, x_axis=x_axis
-        ),
-        width="stretch",
-    )
-    if len(shown) < runs["value"].nunique():
-        st.caption(
-            f"Showing the {len(shown)} longest-held of "
-            f"{runs['value'].nunique()} identities."
-        )
-
-
 def render(ctx: Ctx) -> None:
     """Render the Cell identity tab. Returns early (instead of st.stop(),
     which would also blank every tab after this one) when no source carries
     cell identity for the current selection."""
-    MODE = ctx.mode
-    bands = ctx.bands
-    collections = ctx.collections
-    effective_pcis = ctx.effective_pcis
-    freqs = ctx.freqs
-    prism_dir = ctx.prism_dir
-    prism_present = ctx.prism_present
     providers_active = ctx.providers_active
-    qp_dir = ctx.qp_dir
-    qp_present = ctx.qp_present
-    sigcap_dir = ctx.sigcap_dir
-    sigcap_present = ctx.sigcap_present
     tech_value = ctx.tech_value
-    time_range = ctx.time_range
-    traffic = ctx.traffic
 
-    # Cell identity from whichever active sources carry it. QP connected-mode
-    # Radio exports give a *serving* cell over time (dwell, hand-overs). PRISM is
-    # an SDR scanner: its decoded eNB / sector / PCI are identity observations
-    # (every audible cell), not a serving sequence — so they feed the relationship
-    # views (Hierarchy, Structure), not the serving-cell timelines.
+    # Cell identity from the sources that decode the whole eNB / sector / PCI
+    # path. The QP connected-mode Radio exports give the serving cell; PRISM is
+    # an SDR scanner whose decoded identities are every audible cell. SigCap
+    # reports the PCI only, which cannot be placed in the tree.
     qp_radio_keys = tuple(
         k
-        for k in sorted(qp_present)
+        for k in sorted(ctx.qp_present)
         if k in ("lte_radio", "nr_radio")
         and (tech_value is None or DATASETS_BY_KEY[k].tech == tech_value)
     ) if "QP" in providers_active else ()
     prism_id_keys = tuple(
         k
-        for k in sorted(prism_present)
+        for k in sorted(ctx.prism_present)
         if tech_value is None or PRISM_DATASETS_BY_KEY[k].tech == tech_value
     ) if "PRISM" in providers_active else ()
-    # SigCap logs the serving cell too (its "primary" cell), so it feeds the
-    # serving-cell timelines alongside QP — it just carries PCI/Cell Id, not the
-    # eNB/sector split, so it adds to the PCI view rather than the eNB hierarchy.
-    sigcap_id_keys = tuple(
-        k
-        for k in sorted(sigcap_present)
-        if tech_value is None or SIGCAP_DATASETS_BY_KEY[k].tech == tech_value
-    ) if "SIGCAP" in providers_active else ()
 
-    if not qp_radio_keys and not prism_id_keys and not sigcap_id_keys:
+    if not qp_radio_keys and not prism_id_keys:
         st.info(
-            "Cell identity needs the QP Radio [connected] export, a PRISM scan "
-            "that decodes eNB / PCI, or a SigCap session — none is available for "
-            "this selection."
+            "Cell identity needs the QP Radio [connected] export or a PRISM "
+            "scan that decodes eNB / PCI. Neither is available for this "
+            "selection."
         )
         return
 
-    _id_parts = []
+    parts = []
     if qp_radio_keys:
-        _id_parts.append(load_frame(qp_dir, qp_radio_keys))
+        parts.append(load_frame(ctx.qp_dir, qp_radio_keys))
     if prism_id_keys:
-        _id_parts.append(load_prism_frame(prism_dir, prism_id_keys))
-    if sigcap_id_keys:
-        _id_parts.append(load_sigcap_frame(sigcap_dir, sigcap_id_keys))
-    radio = loader.concat_frames(_id_parts)
-    radio = align_qp_d2c(radio, sigcap_dir, sigcap_present)
+        parts.append(load_prism_frame(ctx.prism_dir, prism_id_keys))
+    radio = loader.concat_frames(parts)
+    radio = align_qp_d2c(radio, ctx.sigcap_dir, ctx.sigcap_present)
 
     def _intersecting(values, column):
         """Only carry a filter across if it means anything in the identity frame."""
@@ -344,62 +206,46 @@ def render(ctx: Ctx) -> None:
     ident = flt.apply_filters(
         radio,
         flt.Filters(
-            collections=collections,
-            traffic=traffic,
-            bands=_intersecting(bands, "band"),
-            freqs=_intersecting(freqs, "freq"),
-            pcis=_intersecting(effective_pcis, "pci"),
+            collections=ctx.collections,
+            traffic=ctx.traffic,
+            bands=_intersecting(ctx.bands, "band"),
+            freqs=_intersecting(ctx.freqs, "freq"),
+            pcis=_intersecting(ctx.effective_pcis, "pci"),
             regions=st.session_state["regions"],
-            time_range=time_range,
+            time_range=ctx.time_range,
             require=("pci",),
         ),
     )
-    # QP rows: keep only the serving cell (PCell / PSCell). PRISM rows have no
-    # serving concept, so keep every decoded identity row.
+    # QP marks the serving cell with a cell_type: keep only those rows (an
+    # aggregated carrier comes and goes on its own). PRISM scans have no
+    # serving concept, so every decoded row is kept.
     if "provider" in ident.columns:
-        prov = ident["provider"].astype("string")
-        is_prism = (prov == "PRISM").to_numpy()
-        is_sigcap = (prov == "SIGCAP").to_numpy()
-        # QP marks the serving cell with a cell_type; keep only those. SigCap's
-        # primary cell is already the serving one (no cell_type to filter on), so
-        # keep it as-is. PRISM scans have no serving concept — keep every row.
+        is_prism = (ident["provider"].astype("string") == "PRISM").to_numpy()
         cells = pd.concat(
-            [
-                identity.serving_only(ident.loc[~is_prism & ~is_sigcap]),
-                ident.loc[is_sigcap],
-                ident.loc[is_prism],
-            ],
+            [identity.serving_only(ident.loc[~is_prism]), ident.loc[is_prism]],
             ignore_index=True,
         )
     else:
+        is_prism = None
         cells = identity.serving_only(ident)
-    # a cell needs at least a PCI to place it; drop identity-less rows
-    if "pci" in cells.columns:
-        cells = cells[cells["pci"].notna()]
 
-    # the QP serving-cell subset drives the time views; everything (QP + PRISM)
-    # drives the relationship views
-    if "provider" in cells.columns:
-        serving = cells[cells["provider"].isin(["QP", "SIGCAP"])]
-    else:
-        serving = cells
-    if cells.empty or not identity.available_levels(cells):
-        st.info("No cell-identity rows match the current filters.")
+    table = identity.paths(cells)
+    if table.empty:
+        st.info(
+            "No cell with an eNB ID, a sector ID and a PCI matches the current "
+            "filters."
+        )
         return
+    if "network" not in table.columns:
+        table["network"] = "All"
 
-    has_prov = "provider" in cells.columns
-    n_prism = int((cells["provider"] == "PRISM").sum()) if has_prov else 0
-    n_qp = int((serving["provider"] == "QP").sum()) if has_prov else len(serving)
-    n_sigcap = int((serving["provider"] == "SIGCAP").sum()) if has_prov else 0
+    n_prism = int((cells["provider"] == "PRISM").sum()) if is_prism is not None else 0
+    n_qp = len(cells) - n_prism
     src_parts = []
     if n_qp and qp_radio_keys:
         src_parts.append(
             f"QP serving cell ({n_qp:,} samples, "
             + ", ".join(DATASETS_BY_KEY[k].label for k in qp_radio_keys) + ")"
-        )
-    if n_sigcap:
-        src_parts.append(
-            f"SigCap serving cell ({n_sigcap:,} samples — PCI / Cell Id only)"
         )
     if n_prism:
         src_parts.append(
@@ -407,30 +253,11 @@ def render(ctx: Ctx) -> None:
         )
     st.caption("Cell identity from " + " + ".join(src_parts) + ".")
 
-    # the tree views need the whole eNB / sector / PCI path; the serving-cell
-    # time views need QP or SigCap rows
-    table = identity.paths(cells)
-    if not table.empty and "network" not in table.columns:
-        table["network"] = "All"
-    view_options = ["Hierarchy", "Structure"] + (
-        ["Timeline", "Change timeline"] if not serving.empty else []
+    view = st.radio(
+        "View", ["Hierarchy", "Structure"], horizontal=True, key="identity_view"
     )
-    _keep_choice("identity_view", view_options)
-    view = st.radio("View", view_options, horizontal=True, key="identity_view")
-
-    if view in ("Hierarchy", "Structure"):
-        if table.empty:
-            st.info(
-                "The tree needs cells with an eNB ID, a sector ID and a PCI. "
-                "None match the current filters (SigCap reports the PCI only)."
-            )
-        elif view == "Hierarchy":
-            _hierarchy_view(table, MODE)
-            _download(table)
-        else:
-            _structure_view(table, MODE)
-            _download(table)
-    elif view == "Change timeline":
-        _change_timeline_view(serving, MODE)
+    if view == "Hierarchy":
+        _hierarchy_view(table, ctx.mode)
     else:
-        _timeline_view(serving, MODE)
+        _structure_view(table, ctx.mode)
+    _download(table)

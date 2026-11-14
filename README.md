@@ -296,7 +296,7 @@ grant size times the usage.
 | 🗺️ Map | Each sample coloured by the metric on a fixed colour range per metric (so two maps can be compared), by serving eNB / gNB (the 10 busiest, the rest “Other”), or by D2C satellites overhead. Draw a region here to limit every tab to it. |
 | 🛰️ D2C visibility | How many Starlink Direct-to-Cell satellites were above the mask at each QP sample — distinct-in-window vs eNB counts, over time, distribution. Needs TLEs. |
 | 📈 CDF curves | One ECDF per group on one canvas. Split by Network (D2C against terrestrial, the default), Collection, Measurement source or eNB / gNB. |
-| 🛰️ Cell identity | **Hierarchy**: D2C and terrestrial apart, a table of every eNB (sectors seen, PCIs seen, minutes), ordered by number of sectors or by eNB ID, and the eNB → sector → PCI tree of one eNB. **Structure**: sectors seen per eNB and PCIs seen per sector, the two networks side by side. **Timeline** and **Change timeline**: the serving cell over time. One CSV download of every cell seen. |
+| 🛰️ Cell identity | **Hierarchy**: D2C and terrestrial apart, a table of every eNB (sectors seen, PCIs seen, minutes), ordered by number of sectors or by eNB ID, and the eNB → sector → PCI tree of one eNB. **Structure**: sectors seen per eNB and PCIs seen per sector, the two networks side by side. One CSV download of every cell seen. |
 | 📊 Statistics | Per-group n / mean / std / percentiles, downloadable. |
 | 🧾 Data | The filtered rows, downloadable as CSV. |
 
@@ -317,9 +317,9 @@ qpviz/
   schema.py          the exports and their column maps; metric registry
   loader.py          CSV -> canonical frame (QP + PRISM + SigCap), derived metrics, cache
   filters.py         filter set, point-in-polygon region test, data windows
-  identity.py        serving-cell scope, dwell runs, hierarchy, fan-out
+  identity.py        serving-cell scope, eNB / sector / PCI paths, per-eNB and per-network summaries, fan-out
   stats.py           ECDF + grouped summary statistics
-  charts.py          plotly figures: CDF, timeline, tree, fan-out, satellites
+  charts.py          plotly figures: CDF, tree, fan-out, satellites
   mapview.py         folium map, draw control, categorical colouring
   satellites.py      TLE ingest, SGP4 propagation, D2C visibility
   theme.py           colour tokens
