@@ -244,17 +244,32 @@ where empty means *all*. SigCap rows also carry a **device identity** (the phone
 UUID + codename), so sessions logged by different phones at the same time stay
 distinct.
 
-**Filters** — Measurement source, Direction (DL/UL), **Traffic** (the generated
-traffic — iperf DL / iperf UL, Ookla, Ping, HTTP, Idle; read **per row from the
-data**: SigCap from its iperf/HTTP/ping columns, QP from its `Test Name` column
-and per-channel throughput, so a combined session splits into its active phases;
-`Mixed` = a combined session's rows that carry no bulk transfer). In the **D2C**
-campaign QP records idle (PHY only) while SigCap generates the traffic, so those
-QP rows are relabelled from the time-aligned SigCap traffic rather than QP's own
-idle columns or the (sometimes mistyped) collection name), Collection, Band,
-EARFCN/NR-ARFCN, PCI (union or intersection across collections), a **region drawn
-on the map**, and a **time window** (with a per-session jump so
+**D2C or terrestrial** is decided by the carrier a row was measured on, not by
+what its collection is called: D2C is LTE Band 25, downlink EARFCN 8665 (the
+uplink exports record the paired uplink EARFCN 26665). Sessions named D2C also
+hold rows on the terrestrial carriers the phone fell back to; those count as
+terrestrial. Every row carries this as its **Network**.
+
+**Filters** — Measurement source, Direction (DL/UL), **Traffic**, Collection,
+Band, EARFCN/NR-ARFCN, PCI (union or intersection across collections), a
+**region drawn on the map**, and a **time window** (with a per-session jump so
 you can isolate a few minutes at a spot).
+
+**Traffic** has six values: Idle, HTTP UL, HTTP DL, iperf DL, iperf UL and
+Mixed. It is read **per row from the data**, not only from the session name:
+
+- SigCap rows from their own test columns: the iperf direction, and for HTTP the
+  target (a POST endpoint is an upload, anything else a download).
+- QP rows from the session name when it names one test in one direction
+  (`..._iperfDL`). A session that ran several tests or both directions
+  (`PingiperfULDL`, `PinghttpULDL`, `_http`) is split per row: a row whose
+  channel carried a transfer is that test in that direction, the rest are
+  `Mixed`.
+- On the D2C carrier QP only listens while SigCap generates the traffic, so
+  those QP rows take the SigCap traffic active at the same time instead.
+
+Ping-only, Ookla and unlabelled sessions are not offered as Traffic values;
+their rows are included whenever no traffic is picked.
 
 **Metrics** — each one is read from one fixed Qualipoc export, named above the
 plots, so there is no export to pick and no sample is counted twice:

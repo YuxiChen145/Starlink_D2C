@@ -244,7 +244,7 @@ _SIGCAP_COLUMNS = [
     "timestamp", "latitude", "longitude", "operator", "network_type*",
     "uuid", "device_name",
     "iperf_tput_mean_mbps", "iperf_direction", "iperf_protocol",
-    "http_tput_mean_mbps", "ping_rtt_mean_ms",
+    "http_tput_mean_mbps", "http_target", "ping_rtt_mean_ms",
     "lte_primary_pci", "lte_primary_ci", "lte_primary_earfcn",
     "lte_primary_band*", "lte_primary_rsrp_dbm", "lte_primary_rsrq_db",
     "lte_primary_rssi_dbm", "lte_primary_rssnr_db", "lte_primary_cqi",
@@ -315,6 +315,11 @@ def _write_sigcap(directory, filename, workload, rows=60, seed=11, tech="LTE",
                 row["iperf_protocol"] = "TCP"
             else:
                 row["http_tput_mean_mbps"] = f"{rng.uniform(0, 3):.3f}"
+                # like the real runs: mostly POSTs (an upload), some downloads
+                row["http_target"] = (
+                    "https://example.org/releases/download/free/large"
+                    if i % 4 == 1 else "https://httpbin.org/post"
+                )
             writer.writerow(row)
     return path
 

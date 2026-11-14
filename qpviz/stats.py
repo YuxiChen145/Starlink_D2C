@@ -10,6 +10,7 @@ import pandas as pd
 
 #: dimensions the CDF curves may be split by
 GROUP_DIMENSIONS: Dict[str, str] = {
+    "network": "Network",
     "collection": "Collection",
     "provider": "Measurement source",
     "pci": "PCI",

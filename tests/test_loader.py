@@ -202,6 +202,45 @@ def test_qp_traffic_splits_only_mixed_sessions_by_throughput():
     assert traffic.iloc[3] == "Mixed"
 
 
+@pytest.mark.parametrize(
+    "key, direction", [("lte_pdsch_pc", "DL"), ("lte_pusch_pc", "UL")]
+)
+def test_qp_traffic_names_http_transfers_http_with_their_direction(key, direction):
+    """The active rows of an HTTP session are HTTP DL / HTTP UL by the channel
+    that carried the transfer - not iperf, which the session never ran."""
+    ds = DATASETS_BY_KEY[key]
+    out = pd.DataFrame({
+        "collection": [
+            "D2C_Sta_Gate1011_PinghttpULDL",        # combined: ping + HTTP
+            "D2C_Sta_Gate1011_PinghttpULDL",
+            "D2C_OpenField_Static_onephone1_http",  # HTTP, no direction named
+            "D2C_OpenField_Static_onephone1_http",
+        ],
+        "link": [direction] * 4,
+        ds.tput_metric: [3.0, 0.1, 4.0, 0.02],   # Mbps
+    })
+    raw = pd.DataFrame({"Test Name": ["-"] * 4})
+    traffic = loader._qp_traffic(out, raw, ds)
+    assert traffic.tolist() == [f"HTTP {direction}", "Mixed", f"HTTP {direction}", "Mixed"]
+
+
+def test_qp_traffic_never_produces_a_label_outside_the_known_set():
+    from qpviz.schema import TRAFFIC_ORDER, TRAFFIC_UNLISTED
+
+    ds = DATASETS_BY_KEY["lte_pdsch_pc"]
+    names = ["a_iperfDL", "a_iperfULDL", "a_iperf", "a_http", "a_Ping", "a_Ookla",
+             "a_IDLE", "a_plain", "a_iperf_http", "a_PingiperfULDL"]
+    out = pd.DataFrame({
+        "collection": names * 2,
+        "link": ["DL"] * len(names) * 2,
+        "tput_dl_cc": [5.0] * len(names) + [0.0] * len(names),
+    })
+    raw = pd.DataFrame({"Test Name": ["iperf"] * len(out)})
+    got = set(loader._qp_traffic(out, raw, ds))
+    assert got <= set(TRAFFIC_ORDER) | set(TRAFFIC_UNLISTED)
+    assert "iperf" not in got and "HTTP" not in got and "iperf DL+UL" not in got
+
+
 def test_qp_traffic_uses_test_name_for_unnamed_sessions():
     import pandas as pd
     from qpviz import loader
@@ -231,18 +270,58 @@ def test_align_d2c_traffic_relabels_from_sigcap():
         "time": [t0, t0 + pd.Timedelta("2s"), t0 + pd.Timedelta("30s")],
         "collection": ["D2C_..._twoPhone1_PingiperULDL"] * 2 + ["NoForcing_Static_Ookla"],
         "provider": ["QP", "QP", "QP"],
+        "network": ["D2C", "D2C", "Terrestrial"],
         "traffic": pd.Series(["Ping", "Ping", "Ookla"], dtype="category"),
     })
     ref = pd.DataFrame({
         "time": [t0, t0 + pd.Timedelta("2s")],
-        "traffic": ["iperf DL", "iperf UL"],
+        "traffic": ["iperf DL", "HTTP UL"],
     })
     out = loader.align_d2c_traffic(qp, ref, tolerance="6s")
     # the two D2C rows are relabelled to the aligned SigCap traffic
     assert out.loc[0, "traffic"] == "iperf DL"
-    assert out.loc[1, "traffic"] == "iperf UL"
+    assert out.loc[1, "traffic"] == "HTTP UL"
     # the non-D2C Ookla row (and any far-from-ref row) keeps its own label
     assert out.loc[2, "traffic"] == "Ookla"
+
+
+def test_align_d2c_traffic_goes_by_the_carrier_not_the_collection_name():
+    """A session named D2C also holds rows on terrestrial carriers the phone
+    fell back to; only the rows on the D2C carrier take the SigCap label."""
+    t0 = pd.Timestamp("2026-09-14 19:47:00")
+    qp = pd.DataFrame({
+        "time": [t0, t0, t0],
+        "collection": ["D2C_Static_x", "D2C_Static_x", "Campus_walk"],
+        "provider": ["QP", "QP", "QP"],
+        "network": ["D2C", "Terrestrial", "D2C"],
+        "traffic": pd.Series(["Mixed", "Mixed", "Other"], dtype="category"),
+    })
+    ref = pd.DataFrame({"time": [t0], "traffic": ["iperf DL"]})
+    out = loader.align_d2c_traffic(qp, ref, tolerance="6s")
+    assert out["traffic"].tolist() == ["iperf DL", "Mixed", "iperf DL"]
+
+
+@pytest.mark.parametrize(
+    "key, freq, expected",
+    [
+        ("lte_radio", 8665, "D2C"),          # the D2C downlink carrier
+        ("lte_pusch_pc", 26665, "D2C"),      # its paired uplink carrier
+        ("lte_radio", 2175, "Terrestrial"),
+        ("nr_radio", 8665, "Terrestrial"),   # the same number as an NR-ARFCN
+        ("lte_radio", None, None),           # carrier never decoded
+    ],
+)
+def test_network_is_set_from_the_carrier(key, freq, expected):
+    ds = DATASETS_BY_KEY[key]
+    raw = pd.DataFrame({
+        "Time": ["2026-09-14 19:47:00.000"],
+        "Collection": ["D2C_named_or_not"],
+        ds.dims["freq"]: [freq],
+        next(iter(v for v in ds.metrics.values() if v != "@derived")): [1.0],
+    })
+    out = loader.normalise(raw, ds)
+    got = out["network"].iloc[0]
+    assert (got == expected) if expected else pd.isna(got)
 
 
 def test_align_d2c_traffic_keeps_unmatched_and_nonqp_rows():
@@ -252,6 +331,7 @@ def test_align_d2c_traffic_keeps_unmatched_and_nonqp_rows():
     frame = pd.DataFrame({
         "time": [t0, t0],
         "collection": ["D2C_x", "D2C_x"],
+        "network": ["D2C", "D2C"],
         "provider": ["QP", "SIGCAP"],   # SigCap D2C row must not be overwritten
         "traffic": pd.Series(["Mixed", "iperf DL"], dtype="category"),
     })

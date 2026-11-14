@@ -77,7 +77,7 @@ def sigcap_traffic_ref(sigcap_dir: str, dataset_keys: Tuple[str, ...]) -> pd.Dat
     sc = loader.load_sigcap(sigcap_dir, list(dataset_keys))
     if sc.empty or "traffic" not in sc.columns:
         return sc.iloc[0:0][["time"]].assign(traffic=[])
-    keep = sc["traffic"].isin(["iperf DL", "iperf UL", "HTTP", "Ping"])
+    keep = sc["traffic"].isin(["iperf DL", "iperf UL", "HTTP DL", "HTTP UL", "Ping"])
     return sc.loc[keep, ["time", "traffic"]].reset_index(drop=True)
 
 

@@ -171,9 +171,42 @@ def test_traffic_label_classifies_session_names():
     assert traffic_label("PingiperfULDL") == "Mixed"
     assert traffic_label("NoForcing_Static_Ookla_Field") == "Ookla"
     assert traffic_label("D2C_FitzWalking_Ping_Coverage") == "Ping"
-    assert traffic_label("1011 http") == "HTTP"
     assert traffic_label("D2C_CampusWalking_IDLE_EARFCN8665") == "Idle"
-    assert traffic_label("910 iperf") == "iperf"          # no direction in name
-    assert traffic_label("iperfULDL") == "iperf DL+UL"
+    assert traffic_label("Campus_httpDL") == "HTTP DL"
+    assert traffic_label("Campus_httpUL") == "HTTP UL"
+    # no single test and direction in the name: a combined session, which the
+    # loader splits per row by the channel carrying the transfer
+    assert traffic_label("1011 http") == "Mixed"
+    assert traffic_label("910 iperf") == "Mixed"
+    assert traffic_label("iperfULDL") == "Mixed"
+    assert traffic_label("D2C_Sta_Gate1011_PinghttpULDL") == "Mixed"
     assert traffic_label("D2C_Boulder_MostStatic_EARFCN8665") == "Other"
     assert traffic_label(None) == "Other"
+
+
+def test_the_traffic_filter_offers_six_values():
+    assert schema.TRAFFIC_ORDER == [
+        "Idle", "HTTP UL", "HTTP DL", "iperf DL", "iperf UL", "Mixed",
+    ]
+    # every label a session name can produce is either offered or unlisted
+    names = ["x_iperfDL", "x_iperfUL", "x_httpDL", "x_httpUL", "x_IDLE", "x_http",
+             "x_Ping", "x_Ookla", "x", "x_PingiperfULDL"]
+    produced = {schema.traffic_label(n) for n in names}
+    assert produced == set(schema.TRAFFIC_ORDER) | set(schema.TRAFFIC_UNLISTED)
+
+
+def test_traffic_app_names_the_one_transfer_test_in_a_session_name():
+    from qpviz.schema import traffic_app
+    assert traffic_app("D2C_Sta_Gate1011_PinghttpULDL") == "HTTP"
+    assert traffic_app("D2C_Sta_Gate1011_PingiperfULDL") == "iperf"
+    assert traffic_app("D2C_OpenField_Static_onephone1_http") == "HTTP"
+    assert traffic_app("x_iperf_http") is None   # two transfer tests: cannot tell
+    assert traffic_app("x_Ping") is None
+    assert traffic_app(None) is None
+
+
+def test_d2c_is_defined_by_its_carrier():
+    # LTE Band 25: downlink EARFCN 8665, paired uplink EARFCN 26665
+    assert schema.D2C_CARRIERS == {"LTE": (8665, 26665)}
+    assert schema.NETWORKS == ["D2C", "Terrestrial"]
+    assert "network" in schema.DIMENSION_COLUMNS

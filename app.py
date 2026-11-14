@@ -286,20 +286,19 @@ with st.sidebar:
     )
     step0 = flt.apply_filters(frame, flt.Filters(links=links))
 
-    _traffic_present = loader.options(step0, "traffic")
-    traffic_options = (
-        [t for t in TRAFFIC_ORDER if t in _traffic_present]
-        + [t for t in _traffic_present if t not in TRAFFIC_ORDER]
-    )
+    _traffic_present = set(loader.options(step0, "traffic"))
+    traffic_options = [t for t in TRAFFIC_ORDER if t in _traffic_present]
     traffic = st.multiselect(
         "Traffic",
         options=traffic_options,
         default=[],
         key="f_traffic",
-        help="Traffic type read from the session name (iperf DL/UL, Ookla, Ping, "
-             "HTTP, Idle). 'Mixed' = several traffic types in one session; a bare "
-             "'iperf' has no direction in its name (use Direction). Empty = all.",
-        placeholder=f"All ({len(traffic_options)})",
+        help="The traffic the phone was carrying: idle, an HTTP or iperf "
+             "transfer in one direction, or Mixed, which is a row of a session "
+             "that ran several tests and cannot be put down to one of them. "
+             "Leave empty for everything, which also includes ping-only, "
+             "Ookla and unlabelled sessions.",
+        placeholder="All",
     )
     step0 = flt.apply_filters(step0, flt.Filters(traffic=traffic))
 

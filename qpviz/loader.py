@@ -14,14 +14,18 @@ import pandas as pd
 
 from .schema import (
     CARRIER_GROUP,
+    D2C_CARRIERS,
     DATASETS,
     DATASETS_BY_KEY,
     DERIVED_METRIC,
     DIMENSION_COLUMNS,
     METRICS,
+    NETWORK_D2C,
+    NETWORK_TERRESTRIAL,
     PRISM_DATASETS,
     PRISM_DATASETS_BY_KEY,
     SIGCAP_DEVICE_COL,
+    traffic_app,
     traffic_label,
     PRISM_GPS_TIME_COL,
     QP_TEST_NAME_COL,
@@ -35,7 +39,7 @@ DEFAULT_CACHE_DIR = os.environ.get("QP_CACHE_DIR", ".cache/qpviz")
 log = logging.getLogger(__name__)
 
 #: bump whenever normalisation changes, so stale parquet caches are ignored
-CACHE_VERSION = 19
+CACHE_VERSION = 20
 
 #: one LTE/NR resource block spans 12 subcarriers
 _SUBCARRIERS_PER_RB = 12
@@ -70,6 +74,7 @@ _CATEGORICAL = (
     "provider",
     "test_type",
     "traffic",
+    "network",
 )
 
 #: free-text dimensions, always stored as pandas ``string``
@@ -226,6 +231,21 @@ def _add_carrier_sum(out: pd.DataFrame, ds: Dataset) -> None:
     out.loc[anchor, "tput_ul"] = total.loc[anchor]
 
 
+def _network(out: pd.DataFrame, ds: Dataset) -> pd.Series:
+    """``D2C`` for a row measured on the Direct-to-Cell carrier, ``Terrestrial``
+    for any other known carrier, empty when the carrier never decoded.
+
+    The carrier decides it (:data:`~qpviz.schema.D2C_CARRIERS`), never the
+    collection name.
+    """
+    freq = (pd.to_numeric(out["freq"], errors="coerce") if "freq" in out.columns
+            else pd.Series(np.nan, index=out.index))
+    on_d2c = freq.isin(D2C_CARRIERS.get(ds.tech, ())).to_numpy()
+    network = np.where(on_d2c, NETWORK_D2C, NETWORK_TERRESTRIAL).astype("object")
+    network[freq.isna().to_numpy()] = None
+    return pd.Series(network, index=out.index, dtype="object")
+
+
 def _add_n_factor(out: pd.DataFrame, ds: Dataset) -> None:
     """Fill the derived ``n_factor`` from the 3GPP RSRQ identity.
 
@@ -263,11 +283,13 @@ def _qp_traffic(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> pd.Series:
     Direction-specific sessions (``...iperfDL`` / ``...iperfUL`` / ``Ookla`` /
     ``Ping`` / ``IDLE``) already name their traffic, so every row takes that
     label. Only a **combined** session (name maps to ``Mixed`` - e.g.
-    ``PingiperfULDL``) is split per row: a channel actively transferring
-    (> ``_QP_BULK_MBPS``, so ACKs on the reverse channel don't count) is that
-    direction's iperf traffic; an idle row stays ``Mixed`` because QP can't tell
-    a ping from a gap. ``Test Name`` (Qualipoc's active-test column) fills in the
-    rows whose name carried no traffic keyword at all (``Other``).
+    ``PingiperfULDL``, ``PinghttpULDL``, or a bare ``_http``) is split per row:
+    a channel actively transferring (> ``_QP_BULK_MBPS``, so ACKs on the reverse
+    channel don't count) is that direction's traffic of the test the name
+    mentions (``iperf DL`` / ``HTTP UL`` ...); an idle row stays ``Mixed``
+    because QP can't tell a ping from a gap. ``Test Name`` (Qualipoc's
+    active-test column) fills in the rows whose name carried no traffic keyword
+    at all (``Other``).
     """
     idx = out.index
     coll_label = (
@@ -284,18 +306,30 @@ def _qp_traffic(out: pd.DataFrame, raw: pd.DataFrame, ds: Dataset) -> pd.Series:
             if tput_col in out.columns else pd.Series(np.nan, index=idx))
     bulk = tput.fillna(0.0) > _QP_BULK_MBPS
 
-    # split only the ambiguous combined ("Mixed") sessions, by active direction
-    mixed = coll_label.eq("Mixed").to_numpy()
-    res[mixed & (bulk & link.eq("DL")).to_numpy()] = "iperf DL"
-    res[mixed & (bulk & link.eq("UL")).to_numpy()] = "iperf UL"
+    # which transfer test the session ran, when the name mentions exactly one
+    if "collection" in out.columns:
+        names = out["collection"].astype("string")
+        lookup = {n: traffic_app(n) for n in names.dropna().unique()}
+        app = names.astype("object").map(lookup).astype("object")
+    else:
+        app = pd.Series(None, index=idx, dtype="object")
 
-    # enrich rows whose session name had no traffic keyword, using Test Name
+    # enrich rows whose session name had no traffic keyword, using Test Name;
+    # an iperf test with no direction in sight is a combined session, split below
     if QP_TEST_NAME_COL in raw.columns:
         tn = raw[QP_TEST_NAME_COL].astype("string").str.strip().str.lower().reindex(idx)
         other = (pd.Series(res, index=idx) == "Other").to_numpy()
         res[other & tn.str.contains("ping", na=False).to_numpy()] = "Ping"
         res[other & tn.str.contains("ookla", na=False).to_numpy()] = "Ookla"
-        res[other & tn.str.contains("iperf", na=False).to_numpy()] = "iperf"
+        iperf_test = other & tn.str.contains("iperf", na=False).to_numpy()
+        res[iperf_test] = "Mixed"
+        app[iperf_test] = "iperf"
+
+    # split only the ambiguous combined ("Mixed") sessions, by active direction
+    mixed = (pd.Series(res, index=idx) == "Mixed").to_numpy() & app.notna().to_numpy()
+    for direction in ("DL", "UL"):
+        active = mixed & (bulk & link.eq(direction)).to_numpy()
+        res[active] = app[active].astype(str) + f" {direction}"
 
     return pd.Series(res, index=idx).astype("string")
 
@@ -374,6 +408,7 @@ def normalise(
         out["sector"] = local.astype("Int32")
 
     out["tech"] = ds.tech
+    out["network"] = _network(out, ds)
     out["link"] = link if link is not None else ds.link
     out["source"] = ds.key
     out["source_label"] = ds.label
@@ -826,7 +861,8 @@ def _sigcap_serving_tech(raw: pd.DataFrame) -> pd.Series:
 
 
 def _sigcap_link(raw: pd.DataFrame) -> pd.Series:
-    """Per-row DL/UL direction from ``iperf_direction`` (HTTP is a download)."""
+    """Per-row DL/UL direction from ``iperf_direction``; an HTTP test is an
+    upload when its target is a POST endpoint, otherwise a download."""
     idx = raw.index
     d = (
         raw["iperf_direction"].astype("string").str.lower()
@@ -841,8 +877,26 @@ def _sigcap_link(raw: pd.DataFrame) -> pd.Series:
     link = pd.Series("-", index=idx, dtype="object")
     link[d.eq("download")] = "DL"
     link[d.eq("upload")] = "UL"
-    link[(link == "-") & http.notna()] = "DL"
+    is_http = (link == "-") & http.notna()
+    upload = _sigcap_http_upload(raw)
+    link[is_http & ~upload] = "DL"
+    link[is_http & upload] = "UL"
     return link
+
+
+#: an HTTP test whose target URL has one of these path words sends data up
+_HTTP_UPLOAD_RE = re.compile(r"(?:^|[/._?=-])(?:post|put|upload)(?:$|[/._?=-])", re.IGNORECASE)
+
+
+def _sigcap_http_upload(raw: pd.DataFrame) -> pd.Series:
+    """Per row: True when the HTTP test on it uploads (``http_target`` is a
+    POST / upload endpoint, e.g. ``https://httpbin.org/post``). SigCap has no
+    direction column for HTTP; the target URL is what tells the two apart. A
+    row without a target counts as a download."""
+    if "http_target" not in raw.columns:
+        return pd.Series(False, index=raw.index)
+    target = raw["http_target"].astype("string")
+    return target.str.contains(_HTTP_UPLOAD_RE, na=False).astype(bool)
 
 
 def _sigcap_traffic(raw: pd.DataFrame) -> pd.Series:
@@ -852,8 +906,9 @@ def _sigcap_traffic(raw: pd.DataFrame) -> pd.Series:
     iperf downlink and iperf uplink phases - and each row records which one was
     running (``iperf_tput_mean_mbps`` + ``iperf_direction``, ``http_tput_...``,
     ``ping_rtt_mean_ms``). So the label is read per row, not from the file name:
-    iperf DL/UL first, then HTTP, then Ping; a radio-only row (no app sample) is
-    ``Other``.
+    iperf DL/UL first, then HTTP DL/UL (by its target, see
+    :func:`_sigcap_http_upload`), then Ping; a radio-only row (no app sample)
+    is ``Other``. An iperf row with no direction logged is ``Mixed``.
     """
     idx = raw.index
 
@@ -872,8 +927,11 @@ def _sigcap_traffic(raw: pd.DataFrame) -> pd.Series:
     has_iperf = iperf.notna()
     out[has_iperf & direction.eq("download")] = "iperf DL"
     out[has_iperf & direction.eq("upload")] = "iperf UL"
-    out[has_iperf & ~direction.isin(["download", "upload"])] = "iperf"
-    out[(out == "Other") & http.notna()] = "HTTP"
+    out[has_iperf & ~direction.isin(["download", "upload"])] = "Mixed"
+    is_http = (out == "Other") & http.notna()
+    upload = _sigcap_http_upload(raw)
+    out[is_http & ~upload] = "HTTP DL"
+    out[is_http & upload] = "HTTP UL"
     out[(out == "Other") & ping.notna()] = "Ping"
     return out
 
@@ -1111,18 +1169,16 @@ def align_d2c_traffic(
     even carries typos like ``PingiperULDL``) are not a reliable traffic label.
     ``ref`` is a ``time`` + ``traffic`` table taken from the SigCap rows (the
     ground truth); each QP D2C row inherits the SigCap traffic active within
-    ``tolerance`` of its timestamp. Rows with no SigCap match, and every non-D2C
-    or non-QP row, keep the label they already had.
+    ``tolerance`` of its timestamp. A D2C row is one measured on the D2C carrier
+    (the ``network`` column), whatever its collection is called. Rows with no
+    SigCap match, and every non-D2C or non-QP row, keep the label they had.
     """
     if (frame is None or frame.empty or ref is None or getattr(ref, "empty", True)
-            or "collection" not in frame.columns or "traffic" not in frame.columns):
+            or "network" not in frame.columns or "traffic" not in frame.columns):
         return frame
     prov = frame["provider"].astype("string") if "provider" in frame.columns else None
     is_qp = prov.eq("QP").to_numpy() if prov is not None else np.ones(len(frame), bool)
-    is_d2c = (
-        frame["collection"].astype("string").str.contains("D2C", case=False, na=False).to_numpy()
-        & is_qp
-    )
+    is_d2c = frame["network"].astype("string").eq(NETWORK_D2C).fillna(False).to_numpy() & is_qp
     if not is_d2c.any():
         return frame
 

@@ -150,50 +150,91 @@ DIMENSION_COLUMNS: List[str] = [
     "provider",
     "test_type",
     "traffic",
+    "network",
 ]
+
+#: The traffic types the platform shows, in the order of the Traffic filter.
+#: ``Mixed`` is a row of a session that ran several tests (or both directions of
+#: one) and that cannot be put down to a single one of them.
+TRAFFIC_ORDER: List[str] = [
+    "Idle", "HTTP UL", "HTTP DL", "iperf DL", "iperf UL", "Mixed",
+]
+
+#: Labels a row can also carry but the Traffic filter does not offer: a ping-
+#: or Ookla-only test, and a session whose name says nothing about its traffic.
+#: Those rows are in the data whenever no traffic type is picked.
+TRAFFIC_UNLISTED: List[str] = ["Ping", "Ookla", "Other"]
+
+_TRAFFIC_APPS = ("iperf", "http", "ping", "ookla", "idle")
+_APP_LABEL = {"iperf": "iperf", "http": "HTTP"}
+
+
+def _name_apps(name) -> tuple:
+    """``(apps, raw)``: the traffic keywords in a session name, lower-cased."""
+    if name is None:
+        return (), ""
+    raw = str(name).lower().replace(" ", "")
+    return tuple(a for a in _TRAFFIC_APPS if a in raw), raw
+
 
 def traffic_label(name) -> str:
     """Classify a collection / session name into a single traffic type.
 
     The measurement campaign encodes the generated traffic in the collection
-    name - ``iperfDL`` / ``iperfUL`` / ``Ookla`` / ``Ping`` / ``http`` / ``IDLE``
-    - so we read it back into one canonical label per row:
+    name - ``iperfDL`` / ``iperfUL`` / ``httpDL`` / ``httpUL`` / ``Ookla`` /
+    ``Ping`` / ``IDLE`` - so we read it back into one label per row:
 
-    * one application only -> that type, with direction for iperf
-      (``iperf DL`` / ``iperf UL`` / ``iperf DL+UL`` / ``iperf``),
-    * several applications in one session (e.g. ``PingiperfULDL``) -> ``Mixed``,
-    * no recognisable traffic keyword -> ``Other``.
-
-    Direction for a bare ``iperf`` session (no DL/UL in the name) is not known
-    from the name - use the Direction filter to split those.
+    * one test in one direction -> ``iperf DL`` / ``iperf UL`` / ``HTTP DL`` /
+      ``HTTP UL``; an idle session -> ``Idle``;
+    * several tests in one session (``PingiperfULDL``), both directions of one
+      (``iperfULDL``), or an iperf / HTTP session whose name gives no direction
+      (``_http``) -> ``Mixed``. The loader then splits those per row by which
+      channel was carrying the transfer (see :func:`traffic_app`);
+    * a ping- or Ookla-only session -> ``Ping`` / ``Ookla``; no recognisable
+      keyword -> ``Other``.
     """
-    if name is None:
-        return "Other"
-    raw = str(name).lower().replace(" ", "")
-    apps = [a for a in ("iperf", "http", "ping", "ookla", "idle") if a in raw]
+    apps, raw = _name_apps(name)
     if not apps:
         return "Other"
     if len(apps) > 1:
         return "Mixed"
     app = apps[0]
-    if app == "iperf":
-        seg = raw.split("iperf", 1)[1][:6]
+    if app in _APP_LABEL:
+        seg = raw.split(app, 1)[1][:6]
         dl, ul = "dl" in seg, "ul" in seg
-        if dl and ul:
-            return "iperf DL+UL"
-        if dl:
-            return "iperf DL"
-        if ul:
-            return "iperf UL"
-        return "iperf"
-    return {"http": "HTTP", "ping": "Ping", "ookla": "Ookla", "idle": "Idle"}[app]
+        if dl == ul:  # both directions, or none named
+            return "Mixed"
+        return f"{_APP_LABEL[app]} {'DL' if dl else 'UL'}"
+    return {"ping": "Ping", "ookla": "Ookla", "idle": "Idle"}[app]
 
 
-#: fixed display order for the Traffic filter
-TRAFFIC_ORDER: List[str] = [
-    "iperf DL", "iperf UL", "iperf DL+UL", "iperf",
-    "HTTP", "Ping", "Ookla", "Idle", "Mixed", "Other",
-]
+def traffic_app(name) -> Optional[str]:
+    """The one transfer test a session name mentions: ``"iperf"`` or ``"HTTP"``.
+
+    Used to name the active rows of a ``Mixed`` session: in ``PinghttpULDL`` a
+    row carrying a downlink transfer is ``HTTP DL``, not iperf. ``None`` when
+    the name mentions neither or both, so the transfer cannot be named.
+    """
+    apps, _ = _name_apps(name)
+    found = [a for a in apps if a in _APP_LABEL]
+    return _APP_LABEL[found[0]] if len(found) == 1 else None
+
+
+# --------------------------------------------------------------------------- #
+# D2C vs terrestrial
+# --------------------------------------------------------------------------- #
+
+#: The Starlink Direct-to-Cell carrier, per technology: LTE Band 25, downlink
+#: EARFCN 8665; the uplink exports record its paired uplink EARFCN, 26665. A
+#: row is D2C because of the carrier it was measured on, not because of what
+#: its collection is called: sessions named D2C also hold rows on terrestrial
+#: carriers the phone fell back to.
+D2C_CARRIERS: Dict[str, tuple] = {"LTE": (8665, 26665)}
+
+NETWORK_D2C = "D2C"
+NETWORK_TERRESTRIAL = "Terrestrial"
+#: display order
+NETWORKS: List[str] = [NETWORK_D2C, NETWORK_TERRESTRIAL]
 
 
 @dataclass(frozen=True)
@@ -667,6 +708,7 @@ _SIGCAP_EXTRA = [
     "network_type*",
     "iperf_tput_mean_mbps",
     "http_tput_mean_mbps",
+    "http_target",
     "iperf_direction",
     "lte_primary_rsrp_dbm",
     "nr_first_ss_rsrp_dbm",
