@@ -6,6 +6,9 @@ it lives under ``qpviz.ui`` rather than in the pure-pandas ``qpviz`` modules.
 
 from __future__ import annotations
 
+import ctypes
+import gc
+import sys
 from typing import List, Sequence, Tuple
 
 import pandas as pd
@@ -14,9 +17,47 @@ import streamlit as st
 from qpviz import loader, satellites
 
 
-@st.cache_data(show_spinner="Loading measurement data…")
+def release_memory() -> None:
+    """Hand memory freed by the previous rerun back to the operating system.
+
+    Each rerun builds and drops frames of a few hundred MB. On Linux, glibc and
+    Arrow keep that freed memory reserved for the process, so its footprint
+    ratchets up with every rerun even though little of it is in use; on a host
+    with a memory cap (Streamlit Community Cloud) that alone ends the app.
+    The previous run's script namespace holds reference cycles, hence the
+    ``gc.collect()`` first. Every step is best-effort.
+    """
+    gc.collect()
+    try:
+        import pyarrow as pa
+
+        pa.default_memory_pool().release_unused()
+    except Exception:  # pragma: no cover - pyarrow missing or too old
+        pass
+    if sys.platform.startswith("linux"):
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:  # pragma: no cover - not glibc (e.g. musl)
+            pass
+
+
+@st.cache_resource(show_spinner="Loading measurement data…")
+def _qp_dataset(data_dir: str, key: str) -> pd.DataFrame:
+    """One QP export, held in memory once for every tab and every visitor.
+
+    ``cache_resource`` hands back the same object on each call, where
+    ``cache_data`` would keep a pickled copy and unpickle a fresh one per call.
+    The tabs ask for overlapping sets of exports (Timeline reads all nine), so
+    caching per set held the same rows several times over and pushed the hosted
+    app past its memory limit. Never mutate the result: ``load_frame`` always
+    returns a new frame built from it.
+    """
+    return loader.load(data_dir, [key])
+
+
 def load_frame(data_dir: str, dataset_keys: Tuple[str, ...]) -> pd.DataFrame:
-    return loader.load(data_dir, list(dataset_keys))
+    """The QP exports in ``dataset_keys``, pooled into a new frame."""
+    return loader.concat_frames([_qp_dataset(data_dir, k) for k in dataset_keys])
 
 
 @st.cache_data(show_spinner="Loading PRISM data…")

@@ -10,6 +10,8 @@ import pytest
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+from tests.conftest import open_tab  # noqa: E402
+
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
@@ -42,6 +44,53 @@ def test_app_starts_and_renders_every_tab(fixture_dir, monkeypatch, tmp_path):
     assert not [m for m in app.multiselect if m.label == "Datasets"]
     # header metrics + at least one plotly chart rendered
     assert len(app.metric) >= 4
+
+
+def test_only_the_open_tab_runs(fixture_dir, monkeypatch, tmp_path):
+    """Tabs are lazy: the Map is open on arrival and the others stay unbuilt
+    until opened, so a first visit does not load every tab's data."""
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    assert app.session_state["main_tab"] == "🗺️ Map"
+    assert not [w for w in app.multiselect if w.key == "stat_group"]
+
+    open_tab(app, "Statistics")
+    _assert_clean(app)
+    assert app.multiselect(key="stat_group") is not None
+    # a sidebar change keeps the same tab open
+    app.multiselect(key="f_collections").select("Collection_A").run()
+    _assert_clean(app)
+    assert app.session_state["main_tab"] == "📊 Statistics"
+    assert app.multiselect(key="stat_group") is not None
+
+
+def test_load_frame_pools_one_shared_copy_per_export(fixture_dir, tmp_path):
+    import pandas as pd
+
+    from qpviz import loader
+    from qpviz.ui import common
+
+    common._qp_dataset.clear()
+    keys = ("lte_radio", "nr_radio")
+    pooled = common.load_frame(str(fixture_dir), keys)
+    pd.testing.assert_frame_equal(
+        pooled, loader.load(fixture_dir, list(keys), cache_dir=tmp_path / "cache")
+    )
+    # each export is held once and shared by every caller...
+    first = common._qp_dataset(str(fixture_dir), "lte_radio")
+    assert common._qp_dataset(str(fixture_dir), "lte_radio") is first
+    # ...while each caller gets a frame of its own to work on
+    assert common.load_frame(str(fixture_dir), keys) is not pooled
+
+
+def test_every_tab_opens_cleanly(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    for label in [t.label for t in app.tabs]:
+        open_tab(app, label)
+        _assert_clean(app)
 
 
 def test_app_reacts_to_filter_changes(fixture_dir, monkeypatch, tmp_path):
@@ -130,6 +179,8 @@ def test_cell_identity_tab_renders_both_views(fixture_dir, monkeypatch, tmp_path
 
     labels = [t.label for t in app.tabs]
     assert any("Cell identity" in l for l in labels)
+    open_tab(app, "Cell identity")
+    _assert_clean(app)
 
     # timeline is the default view, with its four summary metrics
     view = app.radio(key="identity_view")
@@ -161,6 +212,8 @@ def test_cell_identity_has_no_collection_picker_of_its_own(
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
+    open_tab(app, "Cell identity")
+    _assert_clean(app)
     assert not [m for m in app.multiselect if m.label == "Collections to draw"]
 
     runs_before = int(next(m for m in app.metric if m.label == "Dwell runs").value)
@@ -175,6 +228,8 @@ def test_cell_identity_survives_a_metric_with_no_identity_columns(
 ):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
+    _assert_clean(app)
+    open_tab(app, "Cell identity")
     _assert_clean(app)
     # throughput comes from the PDSCH/PUSCH exports, which carry no eNB-Id -
     # the tab must still work, reading the Radio exports underneath
@@ -199,6 +254,8 @@ def test_cell_identity_shows_prism_decoded_identity(prism_dir, monkeypatch, tmp_
     _assert_clean(app)
 
     assert any("Cell identity" in t.label for t in app.tabs)
+    open_tab(app, "Cell identity")
+    _assert_clean(app)
     view = app.radio(key="identity_view")
     assert set(view.options) == {"Hierarchy", "Structure"}   # no serving-cell timelines
     # PRISM's decoded eNB / sector / PCI drive the hierarchy
@@ -215,6 +272,8 @@ def test_cell_identity_pools_qp_serving_and_prism_scans(
     # still join the relationship views
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir, prism_dir=prism_dir)
+    _assert_clean(app)
+    open_tab(app, "Cell identity")
     _assert_clean(app)
     view = app.radio(key="identity_view")
     assert {"Timeline", "Change timeline", "Hierarchy", "Structure"} <= set(view.options)
@@ -283,6 +342,8 @@ def test_structure_view_renders_summary_and_chart(fixture_dir, monkeypatch, tmp_
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
+    open_tab(app, "Cell identity")
+    _assert_clean(app)
 
     app.radio(key="identity_view").set_value("Structure").run()
     _assert_clean(app)
@@ -298,6 +359,8 @@ def test_structure_view_needs_two_levels(fixture_dir, monkeypatch, tmp_path):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
+    open_tab(app, "Cell identity")
+    _assert_clean(app)
     app.radio(key="identity_view").set_value("Structure").run()
     _assert_clean(app)
     app.multiselect(key="structure_levels").set_value(["enb"]).run()
@@ -308,6 +371,8 @@ def test_structure_view_needs_two_levels(fixture_dir, monkeypatch, tmp_path):
 def test_hierarchy_can_focus_one_branch(fixture_dir, monkeypatch, tmp_path):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
+    _assert_clean(app)
+    open_tab(app, "Cell identity")
     _assert_clean(app)
     app.radio(key="identity_view").set_value("Hierarchy").run()
     _assert_clean(app)
@@ -354,8 +419,12 @@ def test_later_tabs_survive_a_missing_identity_source(tmp_path, monkeypatch):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(d)
     _assert_clean(app)
+    open_tab(app, "Cell identity")
+    _assert_clean(app)
     assert any("Cell identity needs" in i.value for i in app.info)
-    # the Statistics tab (after Cell identity) still rendered its controls
+    # the Statistics tab (after Cell identity) still renders its controls
+    open_tab(app, "Statistics")
+    _assert_clean(app)
     assert app.multiselect(key="stat_group") is not None
 
 

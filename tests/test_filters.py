@@ -39,6 +39,16 @@ def test_no_filters_is_identity(frame):
     assert len(flt.apply_filters(frame, flt.Filters())) == len(frame)
 
 
+def test_a_filter_that_keeps_every_row_returns_the_frame_itself(frame):
+    # no copy when nothing is dropped: the sidebar applies one filter per step,
+    # and a copy per step held several copies of the full frame at once
+    assert flt.apply_filters(frame, flt.Filters()) is frame
+    every = sorted(frame["collection"].dropna().unique())
+    assert flt.apply_filters(frame, flt.Filters(collections=every)) is frame
+    narrowed = flt.apply_filters(frame, flt.Filters(collections=every[:1]))
+    assert narrowed is not frame and len(narrowed) < len(frame)
+
+
 def test_filters_compose(frame):
     out = flt.apply_filters(
         frame,

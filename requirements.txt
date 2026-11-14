@@ -1,5 +1,5 @@
 # Runtime dependencies for the Starlink D2C measurement explorer.
-streamlit>=1.50
+streamlit>=1.66  # lazy tabs: st.tabs(on_change=...) that keeps the open tab across reruns
 streamlit-folium>=0.20
 folium>=0.15
 plotly>=5.20

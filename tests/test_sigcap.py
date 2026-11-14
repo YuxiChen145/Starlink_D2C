@@ -14,6 +14,8 @@ from qpviz.schema import SIGCAP_APP_TPUT_COL
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+from tests.conftest import open_tab  # noqa: E402
+
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
@@ -37,6 +39,44 @@ def test_sigcap_files_dedupes_macos_copies(sigcap_dir):
     # the " 2" duplicate of the OpenField session is dropped
     assert not any(n.endswith(" 2.csv") for n in names)
     assert len(files) == 3
+
+
+def test_sigcap_files_reads_subfolders(sigcap_dir, tmp_path):
+    import shutil
+    root = tmp_path / "Sigcap CSV"
+    shutil.copytree(sigcap_dir, root)
+    top = sorted(p.name for p in loader.sigcap_files(root))
+    # move every session into a campaign subfolder (one nested a level deeper)
+    (root / "campaign_a").mkdir()
+    (root / "campaign_b" / "day2").mkdir(parents=True)
+    # a macOS " 2" copy stays next to its original, so it is still deduped
+    for f in sorted(root.glob("*.csv")):
+        nested = "twoPhone" in f.name or "_YC_" in f.name
+        f.rename(root / ("campaign_b/day2" if nested else "campaign_a") / f.name)
+    assert any((root / "campaign_b" / "day2").iterdir())
+    # junk that must be ignored
+    (root / ".hidden").mkdir()
+    (root / "__MACOSX").mkdir()
+    shutil.copy(next((root / "campaign_a").glob("*.csv")), root / ".hidden" / "x.csv")
+    shutil.copy(next((root / "campaign_a").glob("*.csv")), root / "__MACOSX" / "y.csv")
+    found = loader.sigcap_files(root)
+    assert sorted(p.name for p in found) == top
+    assert all(".hidden" not in p.parts and "__MACOSX" not in p.parts for p in found)
+    assert loader.sigcap_available(root) == ["sigcap_lte"]
+    assert not loader.load_sigcap(root, ["sigcap_lte"], cache_dir=None).empty
+
+
+def test_sigcap_files_skip_debug_cellular_exports(sigcap_dir, tmp_path):
+    import shutil
+    root = tmp_path / "Sigcap CSV"
+    shutil.copytree(sigcap_dir, root)
+    before = loader.sigcap_files(root)
+    (root / "Stadium").mkdir()
+    (root / "Stadium" / "2026_09_S12_1611_E12_1620Z-0400_x_D2C_Sta_YC_910_8665.debug_cellular.csv").write_text(
+        "timestamp,network_type*,lte/nr,pci,rsrp_dbm,primary/other*\n"
+        "2026-09-12T16:12:05.940-0400,LTE,lte,485,-105,primary\n"
+    )
+    assert loader.sigcap_files(root) == before
 
 
 def test_sigcap_meta_parses_both_naming_conventions():
@@ -176,6 +216,8 @@ def test_correlation_tab_present_only_with_both_sources(
     app = _run(fixture_dir, sigcap_dir)
     assert not app.exception, [str(e.value) for e in app.exception]
     assert any("Correlation" in t.label for t in app.tabs)
+    open_tab(app, "Correlation")
+    assert not app.exception, [str(e.value) for e in app.exception]
     assert app.selectbox(key="corr_phy") is not None
     assert app.selectbox(key="corr_app") is not None
 
