@@ -27,10 +27,8 @@ def render(ctx: Ctx) -> None:
     MODE = ctx.mode
     bands = ctx.bands
     collections = ctx.collections
-    drop_unknown = ctx.drop_unknown
     effective_pcis = ctx.effective_pcis
     freqs = ctx.freqs
-    keep_ungeo = ctx.keep_ungeo
     prism_dir = ctx.prism_dir
     prism_present = ctx.prism_present
     providers_active = ctx.providers_active
@@ -102,8 +100,7 @@ def render(ctx: Ctx) -> None:
             pcis=_intersecting(effective_pcis, "pci"),
             regions=st.session_state["regions"],
             time_range=time_range,
-            keep_ungeolocated=keep_ungeo,
-            require=("pci",) if drop_unknown else (),
+            require=("pci",),
         ),
     )
     # QP rows: keep only the serving cell (PCell / PSCell). PRISM rows have no

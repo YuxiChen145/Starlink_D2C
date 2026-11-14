@@ -42,8 +42,6 @@ class Ctx:
     bands: Sequence[Any]
     freqs: Sequence[Any]
     effective_pcis: Sequence[Any]
-    drop_unknown: bool
-    keep_ungeo: bool
     time_range: Optional[Tuple[pd.Timestamp, pd.Timestamp]]
 
     # -- filtered data --------------------------------------------------------
@@ -53,12 +51,8 @@ class Ctx:
     unregioned: pd.DataFrame
 
     # -- display options ------------------------------------------------------
+    #: groups with fewer samples are left out of the curves and the statistics
     min_samples: int
-    max_curve_points: int
-    max_map_points: int
-    map_scale: str
-    tiles: str
-    carto_key: Optional[str]
 
     # -- D2C satellite visibility ---------------------------------------------
     tle_dir: str

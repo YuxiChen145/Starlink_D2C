@@ -1,9 +1,8 @@
 """Colour tokens for the app.
 
 Values come from the validated reference palette: categorical hues are used in
-fixed slot order (never cycled by rank), sequential encoding is a single blue
-hue light -> dark, and diverging encoding is blue <-> red with a neutral grey
-midpoint.
+fixed slot order (never cycled by rank) and sequential encoding is a single
+blue hue light -> dark.
 """
 
 from __future__ import annotations
@@ -45,18 +44,6 @@ SEQUENTIAL_BLUE: List[str] = [
     "#256abf",
     "#1c5cab",
     "#184f95",
-    "#0d366b",
-]
-
-DIVERGING_RED_BLUE: List[str] = [
-    "#8f1f1f",
-    "#b32e2e",
-    "#d03b3b",
-    "#e57070",
-    "#c3c2b7",  # neutral midpoint
-    "#86b6ef",
-    "#3987e5",
-    "#256abf",
     "#0d366b",
 ]
 

@@ -4,7 +4,7 @@ An interactive Streamlit app for exploring Starlink Direct-to-Cell measurement
 data from three instruments side by side — **Qualipoc (QP)** connected-mode
 drive/walk logs, **PRISM** SDR sweeps, and **SigCap** (an Android logger that
 captures the serving cell and ping RTT, and runs the iperf / HTTP tests). Pick a technology and metric, filter down to the
-cells, region, and minutes you care about, and compare them on a map, as CDF/PDF
+cells, region, and minutes you care about, and compare them on a map, as CDF
 curves, by which cells were serving and for how long, and against how many D2C
 satellites were overhead.
 
@@ -140,7 +140,7 @@ Point the app at data elsewhere with environment variables (all optional):
 | `SIGCAP_DATA_DIR` | `Sigcap CSV` | Folder of SigCap session CSVs |
 | `TLE_DATA_DIR` | `TLE` | Folder of Starlink TLE files |
 | `QP_CACHE_DIR` | `.cache/qpviz` | Parquet cache location |
-| `CARTO_API_KEY` | *(unset)* | Free key for the CARTO Light/Dark basemaps (see below) |
+| `CARTO_API_KEY` | *(unset)* | Free key for the CARTO Light basemap (see below) |
 
 ```bash
 QP_DATA_DIR="/data/QP CSV" PRISM_DATA_DIR="/data/PRISM CSV" streamlit run app.py
@@ -151,9 +151,8 @@ these at runtime too.
 
 **Map basemaps.** Since 25 Sept 2026 CARTO serves its Light (Positron) and Dark
 (Dark Matter) basemaps only with an API key; without one they render as blank
-"API KEY REQUIRED" tiles. The app therefore offers those two styles only when a
-key is configured, and otherwise defaults to OpenStreetMap (Esri satellite also
-works without a key). To enable them:
+"API KEY REQUIRED" tiles. The map is therefore drawn on the Light style when a
+key is configured, and on OpenStreetMap otherwise. To set a key:
 
 1. Request a free key at <https://carto.com/basemaps/apikey/> (no account needed;
    pick non-commercial for research use — 5M tile requests/month).
@@ -252,8 +251,10 @@ terrestrial. Every row carries this as its **Network**.
 
 **Filters** — Measurement source, Direction (DL/UL), **Traffic**, Collection,
 Band, EARFCN/NR-ARFCN, PCI (union or intersection across collections), a
-**region drawn on the map**, and a **time window** (with a per-session jump so
-you can isolate a few minutes at a spot).
+**region drawn on the map** (draw more shapes to add to it; *Clear region*
+beside the map removes it), and a **time window** (with a per-session jump so
+you can isolate a few minutes at a spot). Rows whose PCI or carrier never
+decoded are always left out.
 
 **Traffic** has six values: Idle, HTTP UL, HTTP DL, iperf DL, iperf UL and
 Mixed. It is read **per row from the data**, not only from the session name:
@@ -292,9 +293,9 @@ grant size times the usage.
 
 | Tab | What it shows |
 |---|---|
-| 🗺️ Map | Each sample coloured by the metric, by serving PCI / eNB-gNB / sector (every cell its own colour), by how many distinct sector ids the serving eNB carries, or by D2C satellites overhead. |
+| 🗺️ Map | Each sample coloured by the metric on a fixed colour range per metric (so two maps can be compared), by serving eNB / gNB (the 10 busiest, the rest “Other”), or by D2C satellites overhead. Draw a region here to limit every tab to it. |
 | 🛰️ D2C visibility | How many Starlink Direct-to-Cell satellites were above the mask at each QP sample — distinct-in-window vs eNB counts, over time, distribution. Needs TLEs. |
-| 📈 CDF curves | One ECDF per group on one canvas — or the same groups as a **PDF** (overlaid histograms). CDF / CCDF / PDF toggle. |
+| 📈 CDF curves | One ECDF per group on one canvas. Split by Network (D2C against terrestrial, the default), Collection, Measurement source or eNB / gNB. |
 | 🛰️ Cell identity | Who is serving you and for how long: dwell timeline, eNB→sector→PCI tree, fan-out statistics. |
 | 📊 Statistics | Per-group n / mean / std / percentiles, downloadable. |
 | 🧾 Data | The filtered rows, downloadable as CSV. |
@@ -318,7 +319,7 @@ qpviz/
   filters.py         filter set, point-in-polygon region test, data windows
   identity.py        serving-cell scope, dwell runs, hierarchy, fan-out
   stats.py           ECDF + grouped summary statistics
-  charts.py          plotly figures: CDF/PDF, timeline, tree, fan-out, satellites
+  charts.py          plotly figures: CDF, timeline, tree, fan-out, satellites
   mapview.py         folium map, draw control, categorical colouring
   satellites.py      TLE ingest, SGP4 propagation, D2C visibility
   theme.py           colour tokens
@@ -348,7 +349,7 @@ headlessly; if a real `QP CSV/` folder is present it also smoke-tests against it
 | Stale numbers after replacing a CSV | Click **Reload data**; the parquet cache re-keys on file size/mtime, or delete `.cache/`. |
 | Port already in use | `streamlit run app.py --server.port 8502`. |
 | `zsh: command not found: streamlit` (venv active) | Streamlit isn't installed in this venv: `pip install -r requirements.txt`, then `python -m streamlit run app.py`. |
-| Map tiles say *API KEY REQUIRED* or are blank | Set `CARTO_API_KEY` (see [Configuration](#5-configuration)) or pick the OpenStreetMap basemap. |
+| Map tiles say *API KEY REQUIRED* or are blank | Set `CARTO_API_KEY` (see [Configuration](#5-configuration)); without a key the map uses OpenStreetMap. |
 
 More: **[docs/FETCHING_TLE.md](docs/FETCHING_TLE.md)** — getting Starlink TLEs
 (daily + historical) for the satellite-visibility tab.

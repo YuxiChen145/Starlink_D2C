@@ -9,9 +9,9 @@ from qpviz.loader import load
 VALUES = np.linspace(-120, -70, 500)
 
 
-@pytest.mark.parametrize("scale", ["sequential", "diverging"])
-def test_color_bins_edges_are_sorted_and_one_longer(scale):
-    edges, colors = charts.color_bins(VALUES, scale=scale)
+@pytest.mark.parametrize("value_range", [None, (-140.0, -80.0)])
+def test_color_bins_edges_are_sorted_and_one_longer(value_range):
+    edges, colors = charts.color_bins(VALUES, value_range=value_range)
     assert len(edges) == len(colors) + 1
     assert all(edges[i] <= edges[i + 1] for i in range(len(edges) - 1))
 
@@ -24,16 +24,29 @@ def test_color_bins_handles_constant_and_empty_input():
 
 
 def test_color_for_clamps_and_handles_nan():
-    edges, colors = charts.color_bins(VALUES, scale="sequential")
+    edges, colors = charts.color_bins(VALUES)
     assert charts.color_for(-1000, edges, colors) == colors[0]
     assert charts.color_for(1000, edges, colors) == colors[-1]
     assert charts.color_for(np.nan, edges, colors) == "#898781"
 
 
-def test_diverging_midpoint_splits_red_and_blue():
-    edges, colors = charts.color_bins(VALUES, scale="diverging", midpoint=-95.0)
-    assert charts.color_for(-115, edges, colors) in theme.DIVERGING_RED_BLUE[:4]
-    assert charts.color_for(-75, edges, colors) in theme.DIVERGING_RED_BLUE[5:]
+def test_a_fixed_range_gives_the_same_colours_whatever_the_data():
+    """With a fixed range a colour means the same value on every map; the data
+    only decides the colours when no range is given."""
+    fixed = (-140.0, -80.0)
+    weak, strong = np.linspace(-135, -120, 50), np.linspace(-95, -85, 50)
+    edges_weak, colors = charts.color_bins(weak, value_range=fixed)
+    edges_strong, _ = charts.color_bins(strong, value_range=fixed)
+    assert edges_weak == edges_strong
+    assert edges_weak[0] == -140.0 and edges_weak[-1] == -80.0
+    assert charts.color_for(-110.0, edges_weak, colors) == charts.color_for(
+        -110.0, edges_strong, colors
+    )
+    # values outside the range take the end colours
+    assert charts.color_for(-150.0, edges_weak, colors) == colors[0]
+    assert charts.color_for(-60.0, edges_weak, colors) == colors[-1]
+    # without a range the scale follows the data
+    assert charts.color_bins(weak)[0] != charts.color_bins(strong)[0]
 
 
 def test_series_style_uses_fixed_slots_then_changes_dash():
@@ -53,7 +66,7 @@ def test_downsample_thins_but_never_grows():
 
 
 def test_legend_is_a_colour_bar_with_one_stop_per_bin():
-    edges, colors = charts.color_bins(VALUES, scale="sequential")
+    edges, colors = charts.color_bins(VALUES)
     html = charts.legend_html(edges, colors, "RSRP (dBm)")
     assert "linear-gradient(to top," in html
     for color in colors:
@@ -64,7 +77,7 @@ def test_legend_is_a_colour_bar_with_one_stop_per_bin():
 
 
 def test_legend_bands_are_proportional_to_their_value_range():
-    edges, colors = charts.color_bins(VALUES, scale="diverging", midpoint=-95.0)
+    edges, colors = charts.color_bins(VALUES, value_range=(-140.0, -80.0))
     html = charts.legend_html(edges, colors, "RSRP")
     gradient = html.split("linear-gradient(to top,")[1].split(")")[0]
     stops = [s.strip().split() for s in gradient.split(",")]
@@ -82,7 +95,7 @@ def test_legend_bands_are_proportional_to_their_value_range():
 
 
 def test_legend_ticks_are_round_numbers_inside_the_range():
-    edges, colors = charts.color_bins(VALUES, scale="sequential")
+    edges, colors = charts.color_bins(VALUES)
     html = charts.legend_html(edges, colors, "RSRP")
     assert 2 <= html.count("translateY(50%)") <= 7
     # VALUES spans -120..-70, so the bar lands on a step of 10
@@ -162,13 +175,6 @@ def test_cdf_figure_hides_legend_for_a_single_series():
 def test_cdf_figure_direct_labels_only_for_small_series_counts():
     assert len(charts.cdf_figure(_curves(3), "x").layout.annotations) == 3
     assert len(charts.cdf_figure(_curves(9), "x").layout.annotations) == 0
-
-
-def test_ccdf_inverts_the_y_axis_values():
-    normal = charts.cdf_figure(_curves(1), "x")
-    inverted = charts.cdf_figure(_curves(1), "x", complementary=True)
-    assert np.allclose(inverted.data[0].y, 1 - np.asarray(normal.data[0].y))
-    assert "P(X > x)" in inverted.layout.yaxis.title.text
 
 
 def test_figure_uses_theme_surfaces():
@@ -608,40 +614,6 @@ def test_columns_capped_at_the_branch_count():
         include_root=False, columns=3,
     )
     assert {n["col"] for n in nodes} == {0, 1}
-
-
-def test_pdf_figure_overlays_normalised_histograms():
-    import numpy as np
-    from qpviz.stats import Curve
-    curves = [
-        Curve(key=("a",), name="B25", x=np.full(300, 25.0), y=np.linspace(0, 1, 300), n=300),
-        Curve(key=("b",), name="B50", x=np.full(200, 50.0), y=np.linspace(0, 1, 200), n=200),
-    ]
-    fig = charts.pdf_figure(curves, "RSRQ N-factor (RB)", bins=40)
-    assert len(fig.data) == 2
-    assert all(t.type == "bar" for t in fig.data)
-    # each group is a probability mass: bars sum to 1, shared bin grid
-    for t in fig.data:
-        assert abs(sum(t.y) - 1.0) < 1e-9
-    assert list(fig.data[0].x) == list(fig.data[1].x)
-    assert fig.layout.barmode == "overlay"
-    # empty input is handled
-    assert len(charts.pdf_figure([], "x").data) == 0
-
-
-def test_pdf_figure_bins_raw_values_and_keeps_minor_modes():
-    import numpy as np
-    from qpviz.stats import cdf_curves
-    import pandas as pd
-    # 10,000 samples at 25 plus a 1% minor mode at 100
-    vals = np.concatenate([np.full(9900, 25.0), np.full(100, 100.0)])
-    frame = pd.DataFrame({"n_factor": vals, "pci": 1})
-    raw = cdf_curves(frame, "n_factor", group_by=("pci",), max_points=None)
-    assert len(raw) == 1 and raw[0].x.size == 10_000
-    fig = charts.pdf_figure(raw, "N", bins=75)
-    y = np.asarray(fig.data[0].y)
-    assert abs(y[-1] - 0.01) < 1e-6          # the minor mode survives, at 1%
-    assert "n=10,000" in fig.data[0].name
 
 
 # --------------------------------------------------------------------------- #

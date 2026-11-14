@@ -13,6 +13,7 @@ GROUP_DIMENSIONS: Dict[str, str] = {
     "network": "Network",
     "collection": "Collection",
     "provider": "Measurement source",
+    "enb": "eNB / gNB",
     "pci": "PCI",
     "freq": "EARFCN / NR-ARFCN",
     "band": "Band",
@@ -63,6 +64,8 @@ def _format_value(dimension: str, value, freq_prefix: str = "ARFCN") -> str:
         return f"{GROUP_DIMENSIONS.get(dimension, dimension)} n/a"
     if dimension == "pci":
         return f"PCI {int(value)}"
+    if dimension == "enb":
+        return f"eNB {int(value)}"
     if dimension == "freq":
         return f"{freq_prefix} {int(value)}"
     if dimension == "band":

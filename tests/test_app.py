@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 pytest.importorskip("streamlit")
@@ -464,3 +465,143 @@ def test_filter_selection_is_pruned_when_options_cascade(fixture_dir, monkeypatc
     value = app.multiselect(key="f_pcis").value
     # invariant the fix guarantees: whatever is selected is in the options
     assert all(v in opts for v in value)
+
+
+# --------------------------------------------------------------------------- #
+# The trimmed sidebar and in-tab controls
+# --------------------------------------------------------------------------- #
+
+
+def _labels(widgets):
+    return [w.label for w in widgets]
+
+
+def test_sidebar_keeps_min_samples_and_drops_the_cut_options(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+
+    assert "Min samples per curve" in _labels(app.sidebar.number_input)
+    for gone in ("Max points per curve", "Max points on map"):
+        assert gone not in _labels(app.sidebar.number_input)
+    for gone in ("Map colour scale", "Basemap"):
+        assert gone not in _labels(app.sidebar.selectbox)
+    for gone in ("Require a known PCI and carrier", "Keep rows without GPS"):
+        assert gone not in _labels(app.sidebar.checkbox)
+    # the region is cleared from beside the map, not from the sidebar
+    assert "Clear" not in _labels(app.sidebar.button)
+
+
+def test_rows_without_a_pci_or_carrier_are_always_left_out(
+    fixture_dir, monkeypatch, tmp_path
+):
+    from qpviz import loader
+
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    blank = tmp_path / "qp"
+    blank.mkdir()
+    for path in Path(fixture_dir).iterdir():
+        frame = pd.read_csv(path)
+        if path.name.startswith("LTE Radio"):
+            frame.loc[frame.index[:30], "PCI LTE"] = None   # PCI never decoded
+            frame.loc[frame.index[30:50], "DL EARFCN"] = None  # nor the carrier
+        frame.to_csv(blank / path.name, index=False)
+
+    app = _run(blank)
+    _assert_clean(app)
+    app.radio(key="tech_choice").set_value("LTE").run()
+    _assert_clean(app)
+    radio = loader.read_dataset(blank, schema.DATASETS_BY_KEY["lte_radio"], None)
+    known = radio[radio["rsrp"].notna() & radio["pci"].notna() & radio["freq"].notna()]
+    assert 0 < len(known) < int(radio["rsrp"].notna().sum())
+    assert int(app.metric[0].value.replace(",", "")) == len(known)
+
+
+def test_map_controls_are_colour_by_and_clear_region(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+
+    colour_by = next(s for s in app.selectbox if s.label == "Colour by")
+    assert colour_by.options == ["Metric", "eNB / gNB-Id"]
+    assert "Colour scheme" not in _labels(app.radio)
+    assert not {"Marker size", "Coloured cells"} & set(_labels(app.slider))
+    assert "Diverging midpoint" not in _labels(app.number_input)
+    assert "Apply region to map" not in _labels(app.checkbox)
+    # the fixed colour range is stated next to the map
+    assert any("always span -140 to -80 dBm" in c.value for c in app.caption)
+
+    # with nothing drawn there is nothing to clear
+    clear = next(b for b in app.button if b.label == "Clear region")
+    assert clear.disabled
+    everything = int(app.metric[0].value.replace(",", ""))
+
+    # A region stays put while the Map tab is open (the map reporting no shapes
+    # must not remove it), and "Clear region" brings all the data back.
+    app.session_state["regions"] = [[(41.699, -86.2405), (41.699, -86.235),
+                                     (41.705, -86.235), (41.705, -86.2405)]]
+    app.run()
+    _assert_clean(app)
+    inside = int(app.metric[0].value.replace(",", ""))
+    assert 0 < inside < everything
+    app.run()
+    assert int(app.metric[0].value.replace(",", "")) == inside
+    clear = next(b for b in app.button if b.label == "Clear region")
+    assert not clear.disabled
+    clear.click().run()
+    _assert_clean(app)
+    assert app.session_state["regions"] == []
+    assert int(app.metric[0].value.replace(",", "")) == everything
+    assert next(b for b in app.button if b.label == "Clear region").disabled
+
+
+def test_a_drawn_region_narrows_the_other_tabs(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    open_tab(app, "Data")
+    _assert_clean(app)
+    everything = int(app.metric[0].value.replace(",", ""))
+    app.session_state["regions"] = [[(41.699, -86.2405), (41.699, -86.235),
+                                     (41.705, -86.235), (41.705, -86.2405)]]
+    app.run()
+    _assert_clean(app)
+    assert 0 < int(app.metric[0].value.replace(",", "")) < everything
+
+
+def test_map_colours_by_enb_only_when_the_metric_carries_it(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    app.radio(key="tech_choice").set_value("LTE").run()
+    app.selectbox(key="metric_choice").set_value("tput_dl").run()
+    _assert_clean(app)
+    colour_by = next(s for s in app.selectbox if s.label == "Colour by")
+    assert colour_by.options == ["Metric"]   # the PDSCH export has no eNB-Id
+
+
+def test_cdf_splits_by_network_first_and_plots_cdf_only(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    open_tab(app, "CDF")
+    _assert_clean(app)
+
+    split = next(m for m in app.multiselect if m.label == "Split curves by")
+    assert split.options == ["Network", "Collection", "Measurement source", "eNB / gNB"]
+    assert split.value == ["network"]
+    assert "Plot as" not in _labels(app.radio)
+    assert "Histogram bins" not in _labels(app.slider)
+    # D2C (EARFCN 8665) against terrestrial: two curves
+    assert any("2 group(s)" in c.value for c in app.caption)
+
+    # a metric whose export has no eNB-Id does not offer the eNB split
+    app.radio(key="tech_choice").set_value("LTE").run()
+    app.selectbox(key="metric_choice").set_value("tput_dl").run()
+    _assert_clean(app)
+    split = next(m for m in app.multiselect if m.label == "Split curves by")
+    assert split.options == ["Network", "Collection", "Measurement source"]
+    assert split.value == ["network"]

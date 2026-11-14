@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from qpviz import filters as flt, loader, mapview, satellites
+from qpviz import filters as flt, loader, satellites
 from qpviz.schema import (
     ALL_DATASETS_BY_KEY,
     DATASETS_BY_KEY,
@@ -172,7 +172,7 @@ with st.sidebar:
         st.stop()
 
     st.divider()
-    st.markdown("#### 1 · Data source")
+    st.markdown("#### 1 · Data and metric")
 
     # QP (Qualipoc phone) vs PRISM (SDR scanner) are genuinely different
     # measurements, so they get their own top-level filter. Empty means pool all
@@ -345,32 +345,9 @@ with st.sidebar:
     # empty shared set has to show no data, not all of it.
     _NO_PCI = [-1]
     effective_pcis = pcis or (shared_pcis or _NO_PCI if shared_mode else [])
-
-    drop_unknown = st.checkbox(
-        "Require a known PCI and carrier",
-        value=True,
-        key="f_drop_unknown",
-        help=(
-            "Some exports (notably LTE Radio Neighbor) leave PCI and the "
-            "carrier blank; those rows would otherwise collapse into one "
-            "large “n/a” curve."
-        ),
-    )
-
-    st.markdown("**Region**")
-    n_regions = len(st.session_state["regions"])
-    cols = st.columns([3, 2])
-    cols[0].caption(
-        f"{n_regions} shape(s) drawn" if n_regions else "Draw on the map tab to limit by area"
-    )
-    if cols[1].button("Clear", disabled=not n_regions, width="stretch"):
-        st.session_state["regions"] = []
-        st.rerun()
-    keep_ungeo = st.checkbox(
-        "Keep rows without GPS",
-        value=False,
-        help="LTE PUCCH has no GPS columns; enable to keep such rows when a region is drawn.",
-    )
+    # Rows whose PCI or carrier never decoded are always left out: they cannot
+    # be put down to a cell, and would collapse into one large "n/a" curve.
+    _REQUIRE = ("pci", "freq")
 
     # ------------------------------------------------------------------- #
     # Time window
@@ -387,8 +364,7 @@ with st.sidebar:
             links=links, collections=collections, traffic=traffic,
             bands=bands, freqs=freqs, pcis=effective_pcis,
             regions=st.session_state["regions"],
-            require=("pci", "freq") if drop_unknown else (),
-            keep_ungeolocated=keep_ungeo,
+            require=_REQUIRE,
         ),
     )
     _tt = pd.to_datetime(_time_scope["time"], errors="coerce").dropna()
@@ -482,30 +458,11 @@ with st.sidebar:
     st.session_state["_last_time_range"] = _wr
 
     st.divider()
-    with st.expander("Display options"):
-        min_samples = st.number_input(
-            "Min samples per curve", min_value=1, max_value=100000, value=30, step=10
-        )
-        max_curve_points = st.number_input(
-            "Max points per curve", min_value=100, max_value=100000, value=2000, step=500
-        )
-        max_map_points = st.number_input(
-            "Max points on map", min_value=200, max_value=20000, value=3000, step=500
-        )
-        map_scale = st.selectbox(
-            "Map colour scale", ["diverging", "sequential"], index=0
-        )
-        carto_key = mapview.carto_api_key(st.secrets)
-        tiles = st.selectbox(
-            "Basemap",
-            mapview.tile_choices(carto_key),
-            # Light CARTO when a key is configured, otherwise OpenStreetMap.
-            index=1 if carto_key else 0,
-            help=None if carto_key else (
-                "The CARTO Light/Dark basemaps need a free API key: set "
-                "CARTO_API_KEY in .streamlit/secrets.toml or the environment."
-            ),
-        )
+    min_samples = st.number_input(
+        "Min samples per curve", min_value=1, max_value=100000, value=30, step=10,
+        help="Groups with fewer samples than this are left out of the CDF "
+             "curves and the Statistics table.",
+    )
 
     st.divider()
     with st.expander("🛰️ Satellite visibility (D2C)"):
@@ -613,14 +570,14 @@ unregioned = flt.apply_filters(
         pcis=effective_pcis,
         time_range=time_range,
         metric=metric,
-        require=("pci", "freq") if drop_unknown else (),
+        require=_REQUIRE,
     ),
 )
 # ...and the region on top. With no region drawn this is `unregioned` itself,
 # not a second copy of it.
 active = flt.apply_filters(
     unregioned,
-    flt.Filters(regions=st.session_state["regions"], keep_ungeolocated=keep_ungeo),
+    flt.Filters(regions=st.session_state["regions"]),
 )
 del frame  # everything below reads `active` / `unregioned`
 
@@ -722,17 +679,10 @@ ctx = Ctx(
     bands=bands,
     freqs=freqs,
     effective_pcis=effective_pcis,
-    drop_unknown=drop_unknown,
-    keep_ungeo=keep_ungeo,
     time_range=time_range,
     active=active,
     unregioned=unregioned,
     min_samples=min_samples,
-    max_curve_points=max_curve_points,
-    max_map_points=max_map_points,
-    map_scale=map_scale,
-    tiles=tiles,
-    carto_key=carto_key,
     tle_dir=tle_dir,
     tle_fp=tle_fp,
     sat_mask=sat_mask,

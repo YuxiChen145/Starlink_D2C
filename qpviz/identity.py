@@ -440,48 +440,6 @@ def fan_out_counts(
     return out
 
 
-#: column name used for the per-sample "how many sectors does this eNB have"
-#: count that the map colours by
-SECTORS_PER_ENB_COL = "sectors_per_enb"
-SECTORS_PER_ENB_LABEL = "Sector Ids per eNB / gNB-Id"
-
-
-def sectors_per_enb(frame: pd.DataFrame) -> pd.Series:
-    """Distinct sector ids seen per eNB, indexed by eNB.
-
-    Counted over whatever rows are handed in, so the numbers describe the
-    current selection rather than the whole capture.  Rows missing either
-    half of the pair are ignored; an eNB whose sector id never decoded is
-    absent from the result rather than counted as zero.
-    """
-    if frame.empty or "enb" not in frame.columns or "sector" not in frame.columns:
-        return pd.Series(dtype="int64")
-    work = frame[["enb", "sector"]].dropna()
-    if work.empty:
-        return pd.Series(dtype="int64")
-    return work.groupby("enb", observed=True)["sector"].nunique().astype("int64")
-
-
-def with_sectors_per_enb(
-    frame: pd.DataFrame, counts: Optional[pd.Series] = None
-) -> pd.DataFrame:
-    """``frame`` plus a :data:`SECTORS_PER_ENB_COL` column.
-
-    ``counts`` lets the caller compute the lookup over one population (the
-    filtered set) and paint it onto another (the unregioned points drawn on
-    the map), so the same eNB keeps the same colour either way.
-    """
-    if frame.empty or "enb" not in frame.columns:
-        return frame
-    if counts is None:
-        counts = sectors_per_enb(frame)
-    out = frame.copy()
-    out[SECTORS_PER_ENB_COL] = (
-        out["enb"].map(counts).astype("Float64").astype("float64")
-    )
-    return out
-
-
 def fan_out_summary(counts: pd.DataFrame) -> pd.DataFrame:
     """Descriptive statistics per relationship (and group)."""
     if counts.empty:

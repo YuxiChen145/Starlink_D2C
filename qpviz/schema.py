@@ -40,20 +40,26 @@ class Metric:
     unit: str
     #: True when a *higher* value is better (used only for wording in the UI).
     higher_is_better: bool = True
+    #: the fixed value range the map colours span for this metric, so the same
+    #: colour means the same value whatever is filtered and two maps can be
+    #: compared. Values outside it take the end colours.
+    map_range: Optional[tuple] = None
 
     @property
     def axis_label(self) -> str:
         return f"{self.label} ({self.unit})" if self.unit else self.label
 
 
+# The map ranges are set for the D2C carrier (5 MHz, 25 RBs, a few Mbps):
+# a terrestrial cell that does better takes the top colour.
 METRICS: Dict[str, Metric] = {
     m.key: m
     for m in [
-        Metric("rsrp", "RSRP", "dBm"),
-        Metric("rsrq", "RSRQ", "dB"),
-        Metric("rssi", "RSSI", "dBm"),
-        Metric("sinr", "SINR", "dB"),
-        Metric("mcs", "MCS", "index"),
+        Metric("rsrp", "RSRP", "dBm", map_range=(-140.0, -80.0)),
+        Metric("rsrq", "RSRQ", "dB", map_range=(-25.0, -5.0)),
+        Metric("rssi", "RSSI", "dBm", map_range=(-110.0, -60.0)),
+        Metric("sinr", "SINR", "dB", map_range=(-15.0, 25.0)),
+        Metric("mcs", "MCS", "index", map_range=(0.0, 28.0)),
         # Throughput is four metrics, not one: downlink and uplink, each as the
         # total over every carrier the phone used and as one carrier's share.
         # Each reads one fixed export (see Dataset.metrics):
@@ -62,14 +68,14 @@ METRICS: Dict[str, Metric] = {
         #   tput_ul_cc  PUSCH [per-carrier]  - one row per carrier
         #   tput_ul     PUSCH [per-carrier], summed over the carriers of each
         #               timestamp (Qualipoc has no aggregated uplink export)
-        Metric("tput_dl", "DL throughput, all carriers", "Mbps"),
-        Metric("tput_dl_cc", "DL throughput, per carrier", "Mbps"),
-        Metric("tput_ul", "UL throughput, all carriers", "Mbps"),
-        Metric("tput_ul_cc", "UL throughput, per carrier", "Mbps"),
+        Metric("tput_dl", "DL throughput, all carriers", "Mbps", map_range=(0.0, 5.0)),
+        Metric("tput_dl_cc", "DL throughput, per carrier", "Mbps", map_range=(0.0, 5.0)),
+        Metric("tput_ul", "UL throughput, all carriers", "Mbps", map_range=(0.0, 3.0)),
+        Metric("tput_ul_cc", "UL throughput, per carrier", "Mbps", map_range=(0.0, 3.0)),
         # Ping round-trip time, logged by SigCap (the only source that pings):
-        Metric("rtt", "Ping RTT", "ms", higher_is_better=False),
+        Metric("rtt", "Ping RTT", "ms", higher_is_better=False, map_range=(100.0, 800.0)),
         # Derived (computed in the loader from throughput + allocated RBs + SCS):
-        Metric("spec_eff", "Spectral efficiency", "bps/Hz"),
+        Metric("spec_eff", "Spectral efficiency", "bps/Hz", map_range=(0.0, 4.0)),
         # PHY resource allocation, from the per-carrier exports:
         #   sf_usage = share of the available sub-frames (NR: slots) in which
         #              the phone was scheduled at all ("SF Utilization").
@@ -78,13 +84,13 @@ METRICS: Dict[str, Metric] = {
         #   rb_occ   = Avg RBs *all SF* - averaged over ALL sub-frames incl.
         #              idle ones, so rb_occ = rb x sf_usage.
         # A shared cell splitting its RBs between two UEs should show fewer RBs.
-        Metric("sf_usage", "Subframe usage", "%"),
-        Metric("rb", "RBs per used subframe", "RB"),
-        Metric("rb_occ", "RBs per subframe, all subframes", "RB"),
+        Metric("sf_usage", "Subframe usage", "%", map_range=(0.0, 100.0)),
+        Metric("rb", "RBs per used subframe", "RB", map_range=(0.0, 25.0)),
+        Metric("rb_occ", "RBs per subframe, all subframes", "RB", map_range=(0.0, 15.0)),
         # Derived from the RSRQ = N·RSRP/RSSI identity: N should be the RSSI
         # measurement bandwidth in RBs (25/50/100), but empirically it drifts.
-        Metric("n_factor", "RSRQ N-factor", "RB"),
-        Metric("bler", "BLER", "%", higher_is_better=False),
+        Metric("n_factor", "RSRQ N-factor", "RB", map_range=(0.0, 120.0)),
+        Metric("bler", "BLER", "%", higher_is_better=False, map_range=(0.0, 30.0)),
     ]
 }
 

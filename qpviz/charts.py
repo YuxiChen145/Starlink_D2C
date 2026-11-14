@@ -13,7 +13,6 @@ from .stats import Curve
 from .theme import (
     CATEGORICAL,
     CHROME,
-    DIVERGING_RED_BLUE,
     FONT_FAMILY,
     SEQUENTIAL_BLUE,
     series_style,
@@ -28,7 +27,6 @@ def cdf_figure(
     curves: Sequence[Curve],
     axis_label: str,
     mode: str = "light",
-    complementary: bool = False,
     show_direct_labels: bool = True,
     height: int = 560,
 ) -> go.Figure:
@@ -36,11 +34,11 @@ def cdf_figure(
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
 
-    y_title = "P(X > x)" if complementary else "P(X ≤ x)"
+    y_title = "P(X ≤ x)"
 
     for i, curve in enumerate(curves):
         color, dash = series_style(i, mode)
-        y = 1.0 - curve.y if complementary else curve.y
+        y = curve.y
         fig.add_trace(
             go.Scatter(
                 x=curve.x,
@@ -59,7 +57,7 @@ def cdf_figure(
     if show_direct_labels and 2 <= len(curves) <= 4:
         for i, curve in enumerate(curves):
             color, _ = series_style(i, mode)
-            y = 1.0 - curve.y if complementary else curve.y
+            y = curve.y
             fig.add_annotation(
                 x=float(curve.x[-1]),
                 y=float(y[-1]),
@@ -109,91 +107,6 @@ def cdf_figure(
     return fig
 
 
-def pdf_figure(
-    curves: Sequence[Curve],
-    axis_label: str,
-    mode: str = "light",
-    bins: int = 60,
-    height: int = 560,
-) -> go.Figure:
-    """Overlaid histograms (a PDF per group) sharing one set of bins.
-
-    Each group is normalised to a probability (its bars sum to 1), so groups of
-    different sizes are comparable and the mass piling up at particular values
-    (e.g. the RSRQ N-factor at 25 / 50 / 100 RBs) is easy to read.
-
-    ``curves`` must carry the *raw* sample values in ``x`` (build them with
-    ``cdf_curves(..., max_points=None)``): a histogram of a quantile-thinned
-    ECDF loses minor modes and misreports ``n``. The bins are computed here
-    with numpy so only ``bins`` bars per group reach the browser.
-    """
-    chrome = CHROME.get(mode, CHROME["light"])
-    fig = go.Figure()
-
-    allx = np.concatenate(
-        [np.asarray(c.x, dtype="float64") for c in curves if len(c.x)]
-    ) if curves else np.array([])
-    allx = allx[np.isfinite(allx)]
-    if allx.size:
-        lo, hi = float(allx.min()), float(allx.max())
-        if hi <= lo:
-            hi = lo + 1.0
-        edges = np.linspace(lo, hi, max(1, int(bins)) + 1)
-    else:
-        edges = np.array([0.0, 1.0])
-    centers = (edges[:-1] + edges[1:]) / 2.0
-    width = float(edges[1] - edges[0])
-
-    for i, curve in enumerate(curves):
-        color, _ = series_style(i, mode)
-        vals = np.asarray(curve.x, dtype="float64")
-        vals = vals[np.isfinite(vals)]
-        counts, _ = np.histogram(vals, bins=edges)
-        prob = counts / counts.sum() if counts.sum() else counts.astype("float64")
-        fig.add_trace(
-            go.Bar(
-                x=centers, y=prob, width=width,
-                name=f"{curve.name}  (n={vals.size:,})",
-                marker=dict(color=color, line=dict(width=0)),
-                opacity=0.55 if len(curves) > 1 else 0.85,
-                customdata=np.stack([edges[:-1], edges[1:]], axis=1),
-                hovertemplate=(
-                    f"<b>{curve.name}</b><br>{axis_label}: "
-                    "%{customdata[0]:.3g} – %{customdata[1]:.3g}"
-                    "<br>%{y:.1%} of samples<extra></extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        height=height,
-        barmode="overlay",
-        bargap=0.02,
-        paper_bgcolor=chrome["surface"],
-        plot_bgcolor=chrome["surface"],
-        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=64, r=24, t=16, b=56),
-        hovermode="closest",
-        hoverlabel=dict(font_family=FONT_FAMILY),
-        showlegend=len(curves) >= 2,
-        legend=dict(
-            orientation="v", yanchor="top", y=1, xanchor="left", x=1.01,
-            font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
-        ),
-    )
-    fig.update_xaxes(
-        title=dict(text=axis_label, font=dict(color=chrome["text_secondary"], size=12)),
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11),
-    )
-    fig.update_yaxes(
-        title=dict(text="Fraction of samples", font=dict(color=chrome["text_secondary"], size=12)),
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11), tickformat=".0%",
-    )
-    return fig
-
-
 # --------------------------------------------------------------------------- #
 # Map colouring
 # --------------------------------------------------------------------------- #
@@ -206,16 +119,21 @@ def _clean(values: Sequence[float]) -> np.ndarray:
 
 def color_bins(
     values: Sequence[float],
-    scale: str = "diverging",
-    midpoint: Optional[float] = None,
+    value_range: Optional[Tuple[float, float]] = None,
     n_bins: int = 9,
 ) -> Tuple[List[float], List[str]]:
     """Return ``(edges, colors)`` where ``len(edges) == len(colors) + 1``.
 
-    ``sequential`` uses a single blue hue light -> dark over the 2nd-98th
-    percentile range (so a few outliers do not wash out the scale).  ``diverging`` uses red <-> blue with a neutral grey
-    midpoint and an equal number of steps per arm.
+    A single blue hue, light -> dark, in equal steps. With ``value_range`` the
+    steps span that fixed range, so a colour means the same value on every map;
+    values outside it take the end colours. Without it they span the 2nd-98th
+    percentile of ``values`` (so a few outliers do not wash out the scale).
     """
+    colors = SEQUENTIAL_BLUE[:n_bins]
+    if value_range is not None:
+        lo, hi = float(value_range[0]), float(value_range[1])
+        return list(np.linspace(lo, hi, len(colors) + 1)), colors
+
     arr = _clean(values)
     if arr.size == 0:
         return [0.0, 1.0], [SEQUENTIAL_BLUE[-1]]
@@ -225,22 +143,7 @@ def color_bins(
         lo, hi = float(arr.min()), float(arr.max())
     if hi <= lo:
         hi = lo + 1.0
-
-    if scale == "sequential":
-        colors = SEQUENTIAL_BLUE[:n_bins]
-        edges = list(np.linspace(lo, hi, len(colors) + 1))
-        return edges, colors
-
-    mid = float(np.median(arr)) if midpoint is None else float(midpoint)
-    mid = min(max(mid, lo + 1e-9), hi - 1e-9)
-    colors = list(DIVERGING_RED_BLUE)  # 4 red + neutral + 4 blue
-    arm = (len(colors) - 1) // 2
-    half = min((mid - lo) / (arm + 0.5), (hi - mid) / (arm + 0.5)) / 2.0
-    half = max(half, 1e-9)
-    lower = list(np.linspace(lo, mid - half, arm + 1))
-    upper = list(np.linspace(mid + half, hi, arm + 1))
-    edges = lower + upper  # len == len(colors) + 1
-    return edges, colors
+    return list(np.linspace(lo, hi, len(colors) + 1)), colors
 
 
 def color_for(value: float, edges: Sequence[float], colors: Sequence[str]) -> str:
