@@ -15,13 +15,25 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-#: identity columns the UI offers, in drill-down order
+#: identity columns the UI offers, in drill-down order (for a 5G NR cell the
+#: "eNB ID" is its gNB ID, and the sector its cell-local id)
 IDENTITY_LEVELS: Dict[str, str] = {
-    "enb": "eNB / gNB-Id",
-    "sector": "Sector Id",
+    "enb": "eNB ID",
+    "sector": "Sector ID",
     "pci": "PCI",
-    "ssb": "SSB Index",
 }
+
+#: the one path the Hierarchy and Structure views draw
+TREE_LEVELS: Tuple[str, ...] = ("enb", "sector", "pci")
+
+#: how the eNBs of the per-eNB summary can be ordered
+ENB_ORDERS: Dict[str, str] = {
+    "sectors": "Number of sectors",
+    "enb": "eNB ID",
+}
+
+_SINGULAR = {"enb": "eNB", "sector": "sector", "pci": "PCI"}
+_PLURAL = {"enb": "eNBs", "sector": "sectors", "pci": "PCIs"}
 
 #: the cell that is actually serving the connection; SCell rows describe
 #: aggregated carriers that come and go independently and would otherwise
@@ -363,6 +375,90 @@ def hierarchy(
     return out
 
 
+def paths(
+    frame: pd.DataFrame,
+    by: Optional[str] = "network",
+    gap_seconds: float = DEFAULT_GAP_SECONDS,
+) -> pd.DataFrame:
+    """Every eNB / sector / PCI path seen, with its time held and samples.
+
+    One row per path, split by ``by`` (the network) when the frame carries it,
+    so the same table feeds one tree per network, the per-eNB summary, the
+    Structure counts and the download.
+    """
+    levels = list(TREE_LEVELS)
+    if by and by in frame.columns:
+        levels = [by, *levels]
+    if not set(TREE_LEVELS) <= set(frame.columns):
+        # a partial path cannot be placed in the tree
+        return pd.DataFrame(columns=levels + ["dwell_s", "samples"])
+    table = hierarchy(frame, levels, gap_seconds=gap_seconds)
+    if by and by in table.columns:
+        table[by] = table[by].astype(str)
+    return table
+
+
+def enb_summary(table: pd.DataFrame, order: str = "sectors") -> pd.DataFrame:
+    """One row per eNB of a :func:`paths` table.
+
+    Columns: ``enb, sectors, pcis, minutes`` - how many sectors and PCIs were
+    seen under the eNB and for how long it was held.  ``order`` is a key of
+    :data:`ENB_ORDERS`: most sectors first (then most PCIs, then eNB ID), or
+    by eNB ID.  Never by time held: that says where the phone sat, not how the
+    network is built.
+    """
+    columns = ["enb", "sectors", "pcis", "minutes"]
+    if table.empty or not set(TREE_LEVELS) <= set(table.columns):
+        return pd.DataFrame(columns=columns)
+    out = (
+        table.groupby("enb", observed=True)
+        .agg(
+            sectors=("sector", "nunique"),
+            pcis=("pci", "nunique"),
+            minutes=("dwell_s", "sum"),
+        )
+        .reset_index()
+    )
+    out["minutes"] = out["minutes"] / 60.0
+    if order == "enb":
+        out = out.sort_values("enb")
+    else:
+        out = out.sort_values(
+            ["sectors", "pcis", "enb"], ascending=[False, False, True]
+        )
+    return out[columns].reset_index(drop=True)
+
+
+def network_summary(table: pd.DataFrame, by: str = "network") -> pd.DataFrame:
+    """One row per network of a :func:`paths` table: what was seen, and how
+    wide the tree is (median and largest count of sectors per eNB and of PCIs
+    per sector)."""
+    columns = [
+        by, "enbs", "sectors", "pcis",
+        "sectors_per_enb_median", "sectors_per_enb_max",
+        "pcis_per_sector_median", "pcis_per_sector_max",
+    ]
+    if table.empty or not {by, *TREE_LEVELS} <= set(table.columns):
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for name, group in table.groupby(by, observed=True, sort=False):
+        per_enb = group.groupby("enb", observed=True)["sector"].nunique()
+        per_sector = group.groupby(["enb", "sector"], observed=True)["pci"].nunique()
+        rows.append(
+            {
+                by: name,
+                "enbs": int(len(per_enb)),
+                "sectors": int(len(per_sector)),
+                "pcis": int(group["pci"].nunique()),
+                "sectors_per_enb_median": float(per_enb.median()),
+                "sectors_per_enb_max": int(per_enb.max()),
+                "pcis_per_sector_median": float(per_sector.median()),
+                "pcis_per_sector_max": int(per_sector.max()),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
 # --------------------------------------------------------------------------- #
 # Fan-out: how many children each parent carries
 # --------------------------------------------------------------------------- #
@@ -383,7 +479,19 @@ def relationships(levels: Sequence[str]) -> List[Tuple[Tuple[str, ...], str]]:
 
 
 def relationship_label(parent_levels: Sequence[str], child_level: str) -> str:
-    return f"{label_for(child_level)} per {label_for(parent_levels[-1])}"
+    """Plain name of a count, e.g. "Sectors seen per eNB"."""
+    parent = parent_levels[-1]
+    children = _PLURAL.get(child_level, label_for(child_level))
+    return (
+        f"{children[0].upper()}{children[1:]} seen per "
+        f"{_SINGULAR.get(parent, label_for(parent))}"
+    )
+
+
+def parents_label(parent_levels: Sequence[str]) -> str:
+    """What a bar of the fan-out chart counts, e.g. "Number of eNBs"."""
+    parent = parent_levels[-1]
+    return f"Number of {_PLURAL.get(parent, label_for(parent))}"
 
 
 def fan_out_counts(
@@ -440,35 +548,6 @@ def fan_out_counts(
     return out
 
 
-def fan_out_summary(counts: pd.DataFrame) -> pd.DataFrame:
-    """Descriptive statistics per relationship (and group)."""
-    if counts.empty:
-        return pd.DataFrame()
-    out = (
-        counts.groupby(["relationship", "group"], observed=True)["children"]
-        .agg(
-            Parents="size",
-            Children="sum",
-            Min="min",
-            Median="median",
-            Mean="mean",
-            Max="max",
-        )
-        .reset_index()
-    )
-    p90 = (
-        counts.groupby(["relationship", "group"], observed=True)["children"]
-        .quantile(0.9)
-        .reset_index(name="P90")
-    )
-    out = out.merge(p90, on=["relationship", "group"])
-    out = out.rename(columns={"relationship": "Relationship", "group": "Group"})
-    columns = ["Relationship", "Group", "Parents", "Children", "Min", "Median", "P90", "Max", "Mean"]
-    out = out.sort_values(["Relationship", "Group"]).reset_index(drop=True)
-    out["Relationship"] = out["Relationship"].astype(str)
-    return out[columns]
-
-
 def fan_out_distribution(counts: pd.DataFrame) -> pd.DataFrame:
     """How many parents carry exactly N children.
 
@@ -484,13 +563,3 @@ def fan_out_distribution(counts: pd.DataFrame) -> pd.DataFrame:
     totals = out.groupby(["relationship", "group"], observed=True)["parents"].transform("sum")
     out["share"] = out["parents"] / totals
     return out.sort_values(["relationship", "group", "children"]).reset_index(drop=True)
-
-
-def relationship_order(counts: pd.DataFrame) -> List[str]:
-    """Relationship labels in tree order (outermost pair first)."""
-    if counts.empty or "relationship" not in counts.columns:
-        return []
-    column = counts["relationship"]
-    if isinstance(column.dtype, pd.CategoricalDtype):
-        return [c for c in column.cat.categories if c in set(column)]
-    return list(dict.fromkeys(column))

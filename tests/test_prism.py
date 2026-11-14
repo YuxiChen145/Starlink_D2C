@@ -158,7 +158,7 @@ def test_map_can_colour_by_enb(fixture_dir, prism_dir, tmp_path, monkeypatch):
         if sb.label == "Colour by":
             options = sb.options
     assert options is not None
-    assert "Metric" in options and "eNB / gNB-Id" in options
+    assert "Metric" in options and "eNB ID" in options
 
 
 # --------------------------------------------------------------------------- #

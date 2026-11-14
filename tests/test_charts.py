@@ -266,21 +266,18 @@ def _hierarchy():
 
 
 def test_tree_builds_a_node_per_path_segment():
-    nodes, edges = charts.build_tree(
-        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
-    )
+    nodes, edges = charts.build_tree(_hierarchy(), ["enb", "sector", "pci"])
     # 1 root + 2 eNBs + 3 sectors + 3 PCIs
     assert len(nodes) == 9
     assert len(edges) == 8
+    # a node carries its value only; the level is named once, in the header
     labels = {n["label"] for n in nodes}
-    assert "eNB 10" in labels and "PCI 300" in labels and "All" in labels
+    assert labels == {"All", "10", "11", "1", "2", "3", "100", "200", "300"}
+    assert {n["level"] for n in nodes} == {None, "enb", "sector", "pci"}
 
 
 def test_tree_can_drop_the_synthetic_root():
-    nodes, edges = charts.build_tree(
-        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
-        include_root=False,
-    )
+    nodes, edges = charts.build_tree(_hierarchy(), ["enb", "sector", "pci"], include_root=False)
     assert len(nodes) == 8
     assert all(n["depth"] > 0 for n in nodes)
     # the two edges leaving the root go with it; row positions are unchanged
@@ -289,50 +286,46 @@ def test_tree_can_drop_the_synthetic_root():
 
 
 def test_tree_rolls_dwell_up_to_every_ancestor():
-    nodes, _ = charts.build_tree(
-        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
-    )
+    nodes, _ = charts.build_tree(_hierarchy(), ["enb", "sector", "pci"])
     by_label = {n["label"]: n for n in nodes}
     assert by_label["All"]["dwell"] == pytest.approx(60.0)
-    assert by_label["eNB 10"]["dwell"] == pytest.approx(50.0)
-    assert by_label["eNB 11"]["dwell"] == pytest.approx(10.0)
-    assert by_label["PCI 100"]["dwell"] == pytest.approx(30.0)
+    assert by_label["10"]["dwell"] == pytest.approx(50.0)
+    assert by_label["11"]["dwell"] == pytest.approx(10.0)
+    assert by_label["100"]["dwell"] == pytest.approx(30.0)
 
 
 def test_tree_gives_every_leaf_a_row_and_centres_the_parents():
-    nodes, _ = charts.build_tree(
-        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
-    )
+    nodes, _ = charts.build_tree(_hierarchy(), ["enb", "sector", "pci"])
     leaves = sorted(n["y"] for n in nodes if not n["children"])
     assert leaves == [0.0, 1.0, 2.0]
     by_label = {n["label"]: n for n in nodes}
     # eNB 10 owns the first two leaves, so it sits between them
-    assert by_label["eNB 10"]["y"] == pytest.approx(0.5)
+    assert by_label["10"]["y"] == pytest.approx(0.5)
     assert by_label["All"]["y"] == pytest.approx(1.25)
     # depth becomes the x coordinate
-    assert by_label["All"]["x"] == 0.0 and by_label["PCI 300"]["x"] == 3.0
+    assert by_label["All"]["x"] == 0.0 and by_label["300"]["x"] == 3.0
 
 
-def test_tree_orders_branches_by_dwell():
+def test_tree_orders_branches_by_identity_value_not_by_time_held():
     import pandas as pd
 
     table = pd.DataFrame(
         {
-            "enb": [10, 11],
-            "pci": [1, 2],
-            "dwell_s": [5.0, 50.0],  # the smaller branch is listed first
-            "samples": [5, 50],
+            "enb": [11, 10, 10, 10],
+            "pci": [2, 30, 4, 100],
+            "dwell_s": [50.0, 5.0, 1.0, 9.0],  # the longest-held is listed first
+            "samples": [50, 5, 1, 9],
         }
     )
-    nodes, _ = charts.build_tree(table, ["enb", "pci"], ["eNB", "PCI"])
+    nodes, _ = charts.build_tree(table, ["enb", "pci"])
     root = next(n for n in nodes if n["depth"] == 0)
-    assert [c["label"] for c in root["children"]] == ["eNB 11", "eNB 10"]
+    assert [c["label"] for c in root["children"]] == ["10", "11"]
+    # numeric order, not text order ("100" would sort before "30" as text)
+    assert [c["label"] for c in root["children"][0]["children"]] == ["4", "30", "100"]
 
 
 def test_tree_edges_are_elbows_between_parent_and_child():
-    _, edges = charts.build_tree(
-        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
-    )
+    _, edges = charts.build_tree(_hierarchy(), ["enb", "sector", "pci"])
     for path in edges:
         assert len(path) == 4
         (x0, y0), (x1, y1), (x2, y2), (x3, y3) = path
@@ -341,30 +334,47 @@ def test_tree_edges_are_elbows_between_parent_and_child():
         assert x3 > x0
 
 
-def test_tree_figure_draws_edges_and_nodes():
-    fig = charts.tree_figure(
-        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
-    )
-    assert len(fig.data) == 2
-    edges, nodes = fig.data
+_HEADERS = ["eNB ID", "Sector ID", "PCI"]
+
+
+def test_tree_figure_draws_edges_nodes_and_the_time_held_column():
+    fig = charts.tree_figure(_hierarchy(), ["enb", "sector", "pci"], _HEADERS)
+    assert len(fig.data) == 3
+    edges, nodes, held = fig.data
     assert edges.mode == "lines" and None in list(edges.x)
     assert nodes.mode == "markers+text"
     assert len(nodes.x) == 8  # the root is not drawn
-    assert fig.layout.yaxis.autorange == "reversed"
+    # one time per leaf, in a column right of the PCI column
+    assert held.mode == "text"
+    assert sorted(held.text) == ["10 s", "20 s", "30 s"]
+    assert set(held.x) == {3.9}
+    # rows run top to bottom
+    top, bottom = fig.layout.yaxis.range
+    assert top > bottom
 
 
-def test_tree_labels_carry_held_time_on_the_outer_level_and_the_leaves():
-    fig = charts.tree_figure(
-        _hierarchy(), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"]
-    )
-    labels = list(fig.data[1].text)
-    assert "eNB 10 · 50 s" in labels  # outermost grouping: rolled-up total
-    assert "PCI 100 · 30 s" in labels  # leaf: its own dwell
-    assert "Sector 1" in labels  # intermediate levels stay bare
+def test_tree_names_each_level_once_in_a_header_row():
+    fig = charts.tree_figure(_hierarchy(), ["enb", "sector", "pci"], _HEADERS)
+    # the nodes carry bare values ...
+    assert set(fig.data[1].text) == {"10", "11", "1", "2", "3", "100", "200", "300"}
+    # ... and the level names sit once on top, one per column
+    axis = fig.layout.xaxis
+    assert axis.side == "top"
+    assert list(axis.tickvals) == [1.0, 2.0, 3.0, 3.9]
+    assert list(axis.ticktext) == [
+        "<b>eNB ID</b>", "<b>Sector ID</b>", "<b>PCI</b>", "<b>Time held</b>",
+    ]
+    # the hover still says which level a value belongs to
+    assert ["eNB ID", "50 s"] in [list(c) for c in fig.data[1].customdata]
+
+
+def test_tree_markers_are_one_size():
+    fig = charts.tree_figure(_hierarchy(), ["enb", "sector", "pci"], _HEADERS)
+    assert fig.data[1].marker.size == 10
 
 
 def test_tree_shades_by_depth_never_by_cycled_hue():
-    fig = charts.tree_figure(_hierarchy(), ["enb", "pci"], ["eNB", "PCI"])
+    fig = charts.tree_figure(_hierarchy(), ["enb", "pci"], ["eNB ID", "PCI"])
     used = set(fig.data[1].marker.color)
     assert used <= set(charts._DEPTH_COLORS)
     assert not used & set(theme.CATEGORICAL["light"])
@@ -381,8 +391,22 @@ def test_tree_caps_the_number_of_leaves():
             "samples": [1] * 20,
         }
     )
-    fig = charts.tree_figure(table, ["enb", "pci"], ["eNB", "PCI"], max_leaves=5)
+    fig = charts.tree_figure(table, ["enb", "pci"], ["eNB ID", "PCI"], max_leaves=5)
     assert len(fig.data[1].x) == 5 + 5
+
+
+def test_tree_height_follows_the_leaf_count():
+    import pandas as pd
+
+    def _table(n):
+        return pd.DataFrame(
+            {"enb": [1] * n, "pci": list(range(n)), "dwell_s": [1.0] * n,
+              "samples": [1] * n}
+        )
+
+    short = charts.tree_figure(_table(2), ["enb", "pci"], ["eNB ID", "PCI"])
+    tall = charts.tree_figure(_table(40), ["enb", "pci"], ["eNB ID", "PCI"])
+    assert short.layout.height < tall.layout.height
 
 
 def test_tree_handles_empty_input():
@@ -462,6 +486,9 @@ def test_timeline_folds_collections_past_the_eight_categorical_slots():
 # --------------------------------------------------------------------------- #
 
 
+_REL = "Sectors seen per eNB"
+
+
 def _dist(groups=("All",)):
     import pandas as pd
 
@@ -469,151 +496,50 @@ def _dist(groups=("All",)):
     for g in groups:
         for children, parents in [(1, 10), (2, 6), (3, 4)]:
             rows.append(
-                {"relationship": "Sector Id per eNB / gNB-Id", "group": g,
+                {"relationship": _REL, "group": g,
                  "children": children, "parents": parents, "share": parents / 20}
             )
     return pd.DataFrame(rows)
 
 
-def test_fan_out_bars_by_default():
-    fig = charts.fan_out_figure(_dist(), "Sector Id per eNB / gNB-Id")
+def test_fan_out_bars_carry_plain_titles():
+    fig = charts.fan_out_figure(_dist(), _REL, y_title="Number of eNBs")
     assert len(fig.data) == 1
     assert fig.data[0].type == "bar"
     assert list(fig.data[0].x) == [1, 2, 3]
-    assert fig.layout.showlegend is False  # one series needs no legend
     # a single series gets its values written on the bars
     assert list(fig.data[0].text) == [10, 6, 4]
+    assert fig.layout.xaxis.title.text == "Sectors seen per eNB"
+    assert fig.layout.yaxis.title.text == "Number of eNBs"
+    assert "Number of eNBs: %{y}" in fig.data[0].hovertemplate
+    assert "Parents" not in fig.data[0].hovertemplate
 
 
-def test_fan_out_cumulative_reaches_one():
-    fig = charts.fan_out_figure(_dist(), "Sector Id per eNB / gNB-Id", cumulative=True)
-    assert fig.data[0].type == "scatter"
-    assert fig.data[0].line.shape == "hv"  # a step, these are integers
-    assert float(fig.data[0].y[-1]) == pytest.approx(1.0)
-    assert fig.layout.yaxis.range == (0, 1.02)
-
-
-def test_fan_out_legend_and_colours_for_several_groups():
-    fig = charts.fan_out_figure(_dist(("LTE", "NR")), "Sector Id per eNB / gNB-Id")
+def test_fan_out_puts_the_networks_side_by_side():
+    fig = charts.fan_out_figure(_dist(("Terrestrial", "D2C")), _REL)
     assert len(fig.data) == 2
+    assert fig.layout.barmode == "group"
     assert fig.layout.showlegend is True
     assert {t.marker.color for t in fig.data} == set(theme.CATEGORICAL["light"][:2])
     # no value labels once there is more than one series
     assert all(t.text is None for t in fig.data)
 
 
-def test_fan_out_folds_past_eight_groups():
-    fig = charts.fan_out_figure(
-        _dist(tuple(f"G{i}" for i in range(11))), "Sector Id per eNB / gNB-Id"
-    )
-    names = [t.name for t in fig.data]
-    assert len(names) == 9
-    assert names[-1] == "Other (3)"
-    assert fig.data[-1].marker.color == charts.OTHER_COLOR
+def test_fan_out_groups_keep_their_order_and_colour():
+    order = ["D2C", "Terrestrial"]
+    both = charts.fan_out_figure(_dist(("Terrestrial", "D2C")), _REL, groups=order)
+    assert [t.name for t in both.data] == order
+    # with D2C filtered out, terrestrial keeps the second colour
+    alone = charts.fan_out_figure(_dist(("Terrestrial",)), _REL, groups=order)
+    assert [t.name for t in alone.data] == ["Terrestrial"]
+    assert alone.data[0].marker.color == both.data[1].marker.color
 
 
 def test_fan_out_ignores_other_relationships_and_empty_input():
     import pandas as pd
 
-    assert len(charts.fan_out_figure(_dist(), "PCI per Sector Id").data) == 0
+    assert len(charts.fan_out_figure(_dist(), "PCIs seen per sector").data) == 0
     assert len(charts.fan_out_figure(pd.DataFrame(), "anything").data) == 0
-
-
-# --------------------------------------------------------------------------- #
-# Tree columns
-# --------------------------------------------------------------------------- #
-
-
-def _wide_hierarchy(n_enb=12):
-    import pandas as pd
-
-    rows = []
-    for e in range(n_enb):
-        for s_ in range(3):  # three sectors, one PCI each
-            rows.append(
-                {"enb": 100 + e, "sector": s_, "pci": 1000 + e * 10 + s_,
-                 "dwell_s": float(n_enb - e), "samples": 1}
-            )
-    return pd.DataFrame(rows)
-
-
-def test_balanced_columns_split_leaves_roughly_evenly():
-    nodes, _ = charts.build_tree(
-        _wide_hierarchy(12), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
-        include_root=False, columns=3,
-    )
-    leaves_per_col = {}
-    for n in nodes:
-        if not n["children"]:
-            leaves_per_col[n["col"]] = leaves_per_col.get(n["col"], 0) + 1
-    assert set(leaves_per_col) == {0, 1, 2}
-    # 12 eNBs * 3 leaves = 36, split three ways
-    assert sorted(leaves_per_col.values()) == [12, 12, 12]
-
-
-def test_columns_offset_the_x_coordinate_but_reset_the_rows():
-    nodes, _ = charts.build_tree(
-        _wide_hierarchy(8), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
-        include_root=False, columns=2,
-    )
-    col0 = [n for n in nodes if n["col"] == 0]
-    col1 = [n for n in nodes if n["col"] == 1]
-    # every column starts its rows at 0
-    assert min(n["y"] for n in col0) == 0.0
-    assert min(n["y"] for n in col1) == 0.0
-    # the second column sits entirely to the right of the first
-    assert max(n["x"] for n in col0) < min(n["x"] for n in col1)
-
-
-def test_no_edge_crosses_between_columns():
-    nodes, edges = charts.build_tree(
-        _wide_hierarchy(10), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
-        include_root=False, columns=3,
-    )
-    # map an x back to its column by the offset spacing
-    col_of = {round(n["x"], 3): n["col"] for n in nodes}
-    for path in edges:
-        cols = {col_of.get(round(x, 3)) for x, _ in path if round(x, 3) in col_of}
-        assert len(cols) == 1  # both endpoints in the same column
-
-
-def test_biggest_dwell_branches_land_in_the_first_column():
-    nodes, _ = charts.build_tree(
-        _wide_hierarchy(9), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
-        include_root=False, columns=3,
-    )
-    first_col_enbs = {
-        n["label"] for n in nodes if n["col"] == 0 and n["depth"] == 1
-    }
-    # eNB 100 has the largest dwell (n_enb - 0), so it heads column 0
-    assert "eNB 100" in first_col_enbs
-
-
-def test_one_column_is_the_old_single_strip():
-    single, _ = charts.build_tree(
-        _wide_hierarchy(6), ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
-        include_root=False, columns=1,
-    )
-    assert {n["col"] for n in single} == {0}
-
-
-def test_tree_figure_height_shrinks_with_more_columns():
-    table = _wide_hierarchy(20)
-    one = charts.tree_figure(table, ["enb", "sector", "pci"],
-                             ["eNB", "Sector", "PCI"], columns=1).layout.height
-    three = charts.tree_figure(table, ["enb", "sector", "pci"],
-                               ["eNB", "Sector", "PCI"], columns=3).layout.height
-    assert three < one
-
-
-def test_columns_capped_at_the_branch_count():
-    # only two eNBs, but three columns asked for
-    small = _wide_hierarchy(2)
-    nodes, _ = charts.build_tree(
-        small, ["enb", "sector", "pci"], ["eNB", "Sector", "PCI"],
-        include_root=False, columns=3,
-    )
-    assert {n["col"] for n in nodes} == {0, 1}
 
 
 # --------------------------------------------------------------------------- #

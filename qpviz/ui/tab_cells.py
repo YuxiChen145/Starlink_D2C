@@ -5,9 +5,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from qpviz import charts, filters as flt, identity, loader, stats
+from qpviz import charts, filters as flt, identity, loader
 from qpviz.schema import (
     DATASETS_BY_KEY,
+    NETWORKS,
     PRISM_DATASETS_BY_KEY,
     SIGCAP_DATASETS_BY_KEY,
 )
@@ -18,6 +19,256 @@ from qpviz.ui.common import (
     load_sigcap_frame,
 )
 from qpviz.ui.context import Ctx
+
+
+#: the tree is always eNB, then sector, then PCI
+LEVELS = identity.TREE_LEVELS
+LEVEL_LABELS = [identity.label_for(level) for level in LEVELS]
+
+#: the time views draw at most this many collections (the largest ones)
+MAX_TIMELINE_PANELS = 4
+
+
+def _networks(table: pd.DataFrame) -> list:
+    """Networks in ``table``: D2C first, then terrestrial, then anything else."""
+    present = list(dict.fromkeys(table["network"]))
+    return [n for n in NETWORKS if n in present] + sorted(
+        n for n in present if n not in NETWORKS
+    )
+
+
+def _keep_choice(key: str, options) -> None:
+    """Forget a stored widget choice that the current filters no longer offer."""
+    if st.session_state.get(key) not in options:
+        st.session_state.pop(key, None)
+
+
+def _hierarchy_view(table: pd.DataFrame, mode: str) -> None:
+    """A per-eNB summary of one network, and the tree of one eNB."""
+    networks = _networks(table)
+    row = st.columns([2, 3])
+    if len(networks) > 1:
+        _keep_choice("identity_network", networks)
+        network = row[0].radio(
+            "Network", networks, horizontal=True, key="identity_network",
+            help="D2C and terrestrial cells are kept apart: each network has "
+                 "its own table and its own trees.",
+        )
+    else:
+        network = networks[0]
+    order = row[1].radio(
+        "Order eNBs by", list(identity.ENB_ORDERS),
+        format_func=identity.ENB_ORDERS.get, horizontal=True,
+        key="identity_enb_order",
+        help="Most sectors first, or by eNB ID.",
+    )
+
+    part = table[table["network"] == network]
+    summary = identity.enb_summary(part, order)
+    sectors = part.groupby(["enb", "sector"], observed=True).ngroups
+    st.caption(
+        f"**{network}**: {len(summary):,} eNBs, {sectors:,} sectors and "
+        f"{part['pci'].nunique():,} PCIs seen in "
+        f"{part['dwell_s'].sum() / 60:,.0f} minutes of measurement."
+    )
+    st.dataframe(
+        summary.rename(
+            columns={
+                "enb": "eNB ID", "sectors": "Sectors seen",
+                "pcis": "PCIs seen", "minutes": "Minutes",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+        height=min(38 + 35 * len(summary), 285),
+        column_config={
+            "eNB ID": st.column_config.NumberColumn(
+                format="%d", help="For a 5G NR cell this is the gNB ID."
+            ),
+            "Minutes": st.column_config.NumberColumn(
+                format="%.1f", help="Time this eNB was held."
+            ),
+        },
+    )
+
+    enbs = [int(v) for v in summary["enb"]]
+    focus_key = f"identity_focus_{network}"
+    _keep_choice(focus_key, enbs)
+    focus = st.selectbox(
+        "Show the tree of one eNB", options=enbs, key=focus_key,
+        help="In the order of the table above. The tree shows every sector "
+             "and PCI seen under this eNB.",
+    )
+    one = part[part["enb"] == focus]
+    st.plotly_chart(
+        charts.tree_figure(one, LEVELS, LEVEL_LABELS, mode=mode),
+        width="stretch",
+        key="identity_tree",
+    )
+
+
+def _structure_view(table: pd.DataFrame, mode: str) -> None:
+    """How wide the tree is, D2C and terrestrial side by side."""
+    st.caption(
+        "How wide the tree is on each network: how many sectors an eNB "
+        "showed, and how many PCIs a sector showed."
+    )
+    networks = _networks(table)
+    summary = identity.network_summary(table).set_index("network").loc[networks]
+    st.dataframe(
+        summary.reset_index().rename(
+            columns={
+                "network": "Network",
+                "enbs": "eNBs seen",
+                "sectors": "Sectors seen",
+                "pcis": "PCIs seen",
+                "sectors_per_enb_median": "Sectors per eNB (median)",
+                "sectors_per_enb_max": "Sectors per eNB (most)",
+                "pcis_per_sector_median": "PCIs per sector (median)",
+                "pcis_per_sector_max": "PCIs per sector (most)",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    counts = identity.fan_out_counts(table, LEVELS, group_by="network")
+    dist = identity.fan_out_distribution(counts)
+    # eNB to sector, then sector to PCI
+    for parent_levels, child in identity.relationships(LEVELS)[:2]:
+        label = identity.relationship_label(parent_levels, child)
+        st.markdown(f"**{label}**")
+        st.plotly_chart(
+            charts.fan_out_figure(
+                dist, label, y_title=identity.parents_label(parent_levels),
+                groups=networks, mode=mode,
+            ),
+            width="stretch",
+            key=f"structure_{child}",
+        )
+
+
+def _download(table: pd.DataFrame) -> None:
+    """The one download of the tab: every eNB / sector / PCI path seen."""
+    pretty = (
+        table[["network", *LEVELS, "dwell_s", "samples"]]
+        .sort_values(["network", *LEVELS])
+        .rename(columns=dict(zip(LEVELS, LEVEL_LABELS)))
+        .rename(
+            columns={"network": "Network", "dwell_s": "Held (s)", "samples": "Samples"}
+        )
+    )
+    st.download_button(
+        f"Download all {len(pretty):,} cells seen (CSV)",
+        pretty.round(1).to_csv(index=False).encode(),
+        file_name="cell_identity.csv",
+        mime="text/csv",
+        key="identity_download",
+    )
+
+
+def _change_timeline_view(serving: pd.DataFrame, mode: str) -> None:
+    st.caption(
+        "**Serving-cell timeline** with **eNB ID on the y-axis** and one "
+        "segment per Cell Id. A segment is **orange** when the **eNB** "
+        "changed (a site/satellite change) and **blue** when only the "
+        "**Cell Id** changed under the same eNB (a beam/sector change). Each "
+        "segment is labelled with its **PCI above** and **sector below** "
+        "(`s#`), and dotted lines connect consecutive cells so an eNB jump "
+        "is visible. One panel per collection."
+    )
+    if "enb" not in identity.available_levels(serving):
+        st.info(
+            "This needs the connected radio to carry an eNB ID. It is not "
+            "decoded in the current selection."
+        )
+        return
+    segments = identity.serving_segments(serving)
+    summary = identity.segment_summary(segments)
+    if segments.empty:
+        st.info("Not enough serving-cell samples to build segments.")
+        return
+    by_size = serving.groupby("collection", observed=True).size()
+    all_colls = by_size.sort_values(ascending=False).index.tolist()
+    chosen = all_colls[:MAX_TIMELINE_PANELS]
+    if len(all_colls) > len(chosen):
+        st.caption(
+            f"Showing the {len(chosen)} largest of {len(all_colls)} collections. "
+            "Pick collections in the sidebar to see others."
+        )
+    srow = {r["collection"]: r for _, r in summary.iterrows()}
+
+    def _subtitle(coll):
+        r = srow.get(coll)
+        if r is None:
+            return str(coll)
+        return (
+            f"{coll}<br>{r['n_enb']} eNB Ids · {r['n_cell']} "
+            f"Cell Ids · {r['n_pci']} PCIs in {r['span_min']:.0f} min"
+            f"   |   {r['cell_changes']} cell changes "
+            f"({r['cell_per_min']:.1f}/min), {r['enb_changes']} "
+            f"eNB changes ({r['enb_per_min']:.1f}/min), median "
+            f"dwell {r['median_dwell_s']:.0f} s"
+        )
+
+    st.plotly_chart(
+        charts.serving_timeline_figure(
+            segments[segments["collection"].isin(chosen)],
+            collections=chosen,
+            subtitles=[_subtitle(c) for c in chosen],
+            mode=mode,
+        ),
+        width="stretch",
+    )
+
+
+def _timeline_view(serving: pd.DataFrame, mode: str) -> None:
+    serving_levels = identity.available_levels(serving)
+    row = st.columns([2, 2, 2, 2])
+    level = row[0].selectbox(
+        "Identity", serving_levels, format_func=identity.label_for,
+        key="identity_level",
+    )
+    order_by = row[1].selectbox(
+        "Row order", ["first seen", "dwell", "value"], key="identity_order",
+        help="First seen draws the staircase a moving constellation makes; "
+             "dwell puts the cells you spent longest on at the top.",
+    )
+    max_rows = row[2].number_input(
+        "Max rows", min_value=5, max_value=400, value=60, step=5,
+        help="Largest total dwell wins when there are more.",
+    )
+    x_axis = row[3].selectbox(
+        "X axis", ["elapsed", "absolute"], key="identity_x",
+        help="Elapsed is active minutes within each collection (time "
+             "the log was paused is excluded), so several collections "
+             "share one axis.",
+    )
+
+    runs = identity.dwell_runs(serving, level)
+    if runs.empty:
+        st.info("Not enough samples to build dwell runs.")
+        return
+    shown = identity.order_identities(runs, order_by, limit=int(max_rows))
+    span_min = max(runs["elapsed_end"].max() / 60.0, 1e-9)
+    handovers = len(runs) - runs["collection"].nunique()
+    summary = st.columns(4)
+    summary[0].metric(f"Distinct {identity.label_for(level)}", f"{runs['value'].nunique():,}")
+    summary[1].metric("Dwell runs", f"{len(runs):,}")
+    summary[2].metric("Median dwell", f"{runs['duration_s'].median():.1f} s")
+    summary[3].metric("Changes / min", f"{handovers / span_min:.2f}")
+
+    st.plotly_chart(
+        charts.timeline_figure(
+            runs, shown, identity.label_for(level), mode=mode, x_axis=x_axis
+        ),
+        width="stretch",
+    )
+    if len(shown) < runs["value"].nunique():
+        st.caption(
+            f"Showing the {len(shown)} longest-held of "
+            f"{runs['value'].nunique()} identities."
+        )
 
 
 def render(ctx: Ctx) -> None:
@@ -132,357 +383,54 @@ def render(ctx: Ctx) -> None:
         serving = cells[cells["provider"].isin(["QP", "SIGCAP"])]
     else:
         serving = cells
-    levels = identity.available_levels(cells)
-    serving_levels = identity.available_levels(serving)
-
-    if cells.empty or not levels:
+    if cells.empty or not identity.available_levels(cells):
         st.info("No cell-identity rows match the current filters.")
-    else:
-        has_prov = "provider" in cells.columns
-        n_prism = int((cells["provider"] == "PRISM").sum()) if has_prov else 0
-        n_qp = int((serving["provider"] == "QP").sum()) if has_prov else len(serving)
-        n_sigcap = int((serving["provider"] == "SIGCAP").sum()) if has_prov else 0
-        src_parts = []
-        if n_qp and qp_radio_keys:
-            src_parts.append(
-                f"QP serving cell ({n_qp:,} samples, "
-                + ", ".join(DATASETS_BY_KEY[k].label for k in qp_radio_keys) + ")"
-            )
-        if n_sigcap:
-            src_parts.append(
-                f"SigCap serving cell ({n_sigcap:,} samples — PCI / Cell Id only)"
-            )
-        if n_prism:
-            src_parts.append(
-                f"PRISM decoded scans ({n_prism:,} rows — every audible cell, "
-                "in the Hierarchy / Structure views)"
-            )
-        st.caption("Cell identity from " + " + ".join(src_parts) + ".")
+        return
 
-        # serving-cell time views need QP rows; the relationship views work for
-        # either source — that is where PRISM's decoded identity appears
-        view_options = (["Timeline", "Change timeline"] if not serving.empty else []) + [
-            "Hierarchy", "Structure",
-        ]
-        if st.session_state.get("identity_view") not in view_options:
-            st.session_state.pop("identity_view", None)
-        view = st.radio(
-            "View", view_options, horizontal=True, key="identity_view",
+    has_prov = "provider" in cells.columns
+    n_prism = int((cells["provider"] == "PRISM").sum()) if has_prov else 0
+    n_qp = int((serving["provider"] == "QP").sum()) if has_prov else len(serving)
+    n_sigcap = int((serving["provider"] == "SIGCAP").sum()) if has_prov else 0
+    src_parts = []
+    if n_qp and qp_radio_keys:
+        src_parts.append(
+            f"QP serving cell ({n_qp:,} samples, "
+            + ", ".join(DATASETS_BY_KEY[k].label for k in qp_radio_keys) + ")"
         )
+    if n_sigcap:
+        src_parts.append(
+            f"SigCap serving cell ({n_sigcap:,} samples — PCI / Cell Id only)"
+        )
+    if n_prism:
+        src_parts.append(
+            f"PRISM decoded scans ({n_prism:,} rows — every audible cell)"
+        )
+    st.caption("Cell identity from " + " + ".join(src_parts) + ".")
 
-        if view == "Change timeline":
-            st.caption(
-                "**Serving-cell timeline** with **eNB Id on the y-axis** and one "
-                "segment per Cell Id. A segment is **orange** when the **eNB** "
-                "changed (a site/satellite change) and **blue** when only the "
-                "**Cell Id** changed under the same eNB (a beam/sector change). Each "
-                "segment is labelled with its **PCI above** and **sector below** "
-                "(`s#`), and dotted lines connect consecutive cells so an eNB jump "
-                "is visible. One panel per collection."
+    # the tree views need the whole eNB / sector / PCI path; the serving-cell
+    # time views need QP or SigCap rows
+    table = identity.paths(cells)
+    if not table.empty and "network" not in table.columns:
+        table["network"] = "All"
+    view_options = ["Hierarchy", "Structure"] + (
+        ["Timeline", "Change timeline"] if not serving.empty else []
+    )
+    _keep_choice("identity_view", view_options)
+    view = st.radio("View", view_options, horizontal=True, key="identity_view")
+
+    if view in ("Hierarchy", "Structure"):
+        if table.empty:
+            st.info(
+                "The tree needs cells with an eNB ID, a sector ID and a PCI. "
+                "None match the current filters (SigCap reports the PCI only)."
             )
-            if "enb" not in serving_levels:
-                st.info(
-                    "This needs the connected radio to carry an eNB/gNB-Id. It is "
-                    "not decoded in the current selection."
-                )
-            else:
-                segments = identity.serving_segments(serving)
-                summary = identity.segment_summary(segments)
-                if segments.empty:
-                    st.info("Not enough serving-cell samples to build segments.")
-                else:
-                    by_size = serving.groupby("collection", observed=True).size()
-                    all_colls = by_size.sort_values(ascending=False).index.tolist()
-                    default = all_colls[:4]
-                    chosen = st.multiselect(
-                        "Collections (one panel each)",
-                        options=all_colls, default=default, key="chg_collections",
-                        help="Each collection is a separate session, drawn as its "
-                             "own panel from elapsed time 0.",
-                    )
-                    if not chosen:
-                        st.info("Pick at least one collection.")
-                    else:
-                        srow = {r["collection"]: r for _, r in summary.iterrows()}
-
-                        def _subtitle(coll):
-                            r = srow.get(coll)
-                            if r is None:
-                                return str(coll)
-                            return (
-                                f"{coll}<br>{r['n_enb']} eNB Ids · {r['n_cell']} "
-                                f"Cell Ids · {r['n_pci']} PCIs in {r['span_min']:.0f} min"
-                                f"   |   {r['cell_changes']} cell changes "
-                                f"({r['cell_per_min']:.1f}/min), {r['enb_changes']} "
-                                f"eNB changes ({r['enb_per_min']:.1f}/min), median "
-                                f"dwell {r['median_dwell_s']:.0f} s"
-                            )
-
-                        st.plotly_chart(
-                            charts.serving_timeline_figure(
-                                segments[segments["collection"].isin(chosen)],
-                                collections=chosen,
-                                subtitles=[_subtitle(c) for c in chosen],
-                                mode=MODE,
-                            ),
-                            width="stretch",
-                        )
-                        with st.expander("Segments as a table"):
-                            cols = [c for c in ("collection", "enb", "cell_id", "sector",
-                                                "pci", "change", "elapsed_start",
-                                                "duration_s", "samples")
-                                    if c in segments.columns]
-                            table = segments.loc[
-                                segments["collection"].isin(chosen), cols
-                            ].rename(
-                                columns={
-                                    "collection": "Collection", "enb": "eNB",
-                                    "cell_id": "Cell Id", "sector": "Sector",
-                                    "pci": "PCI", "change": "Change",
-                                    "elapsed_start": "Elapsed start (s)",
-                                    "duration_s": "Held (s)", "samples": "Samples",
-                                }
-                            )
-                            st.dataframe(table, width="stretch", hide_index=True, height=320)
-                            st.download_button(
-                                "Download segments (CSV)",
-                                table.to_csv(index=False).encode(),
-                                file_name="serving_segments.csv",
-                                mime="text/csv",
-                            )
-
-        elif view == "Timeline":
-            row = st.columns([2, 2, 2, 2])
-            level = row[0].selectbox(
-                "Identity", serving_levels, format_func=identity.label_for,
-                key="identity_level",
-            )
-            order_by = row[1].selectbox(
-                "Row order", ["first seen", "dwell", "value"], key="identity_order",
-                help="First seen draws the staircase a moving constellation makes; "
-                     "dwell puts the cells you spent longest on at the top.",
-            )
-            max_rows = row[2].number_input(
-                "Max rows", min_value=5, max_value=400, value=60, step=5,
-                help="Largest total dwell wins when there are more.",
-            )
-            x_axis = row[3].selectbox(
-                "X axis", ["elapsed", "absolute"], key="identity_x",
-                help="Elapsed is active minutes within each collection (time "
-                     "the log was paused is excluded), so several collections "
-                     "share one axis.",
-            )
-
-            runs = identity.dwell_runs(serving, level)
-            if runs.empty:
-                st.info("Not enough samples to build dwell runs.")
-            else:
-                shown = identity.order_identities(runs, order_by, limit=int(max_rows))
-                span_min = max(runs["elapsed_end"].max() / 60.0, 1e-9)
-                handovers = len(runs) - runs["collection"].nunique()
-                summary = st.columns(4)
-                summary[0].metric(f"Distinct {identity.label_for(level)}", f"{runs['value'].nunique():,}")
-                summary[1].metric("Dwell runs", f"{len(runs):,}")
-                summary[2].metric("Median dwell", f"{runs['duration_s'].median():.1f} s")
-                summary[3].metric("Changes / min", f"{handovers / span_min:.2f}")
-
-                st.plotly_chart(
-                    charts.timeline_figure(
-                        runs, shown, identity.label_for(level), mode=MODE, x_axis=x_axis
-                    ),
-                    width="stretch",
-                )
-                if len(shown) < runs["value"].nunique():
-                    st.caption(
-                        f"Showing the {len(shown)} longest-held of "
-                        f"{runs['value'].nunique()} identities."
-                    )
-                with st.expander("Dwell runs as a table"):
-                    table = runs[
-                        ["collection", "value", "start", "duration_s", "samples"]
-                    ].rename(
-                        columns={
-                            "collection": "Collection",
-                            "value": identity.label_for(level),
-                            "start": "Start",
-                            "duration_s": "Held (s)",
-                            "samples": "Samples",
-                        }
-                    )
-                    st.dataframe(table, width="stretch", hide_index=True, height=320)
-                    st.download_button(
-                        "Download dwell runs (CSV)",
-                        table.to_csv(index=False).encode(),
-                        file_name=f"{level}_dwell_runs.csv",
-                        mime="text/csv",
-                    )
         elif view == "Hierarchy":
-            default_levels = [l for l in ("enb", "sector", "pci") if l in levels]
-            chosen = st.multiselect(
-                "Levels, outer → inner",
-                options=levels,
-                default=default_levels or levels[:1],
-                format_func=identity.label_for,
-                key="identity_hierarchy",
-                help="Nodes are sized by how long that cell served; branches "
-                     "are ordered longest-held first.",
-            )
-            if not chosen:
-                st.info("Pick at least one level.")
-            else:
-                table = identity.hierarchy(cells, chosen)
-                # A tree of a thousand leaves is a wall, not a picture. Focus on
-                # one branch to read a subtree whole; the download is always the
-                # complete set either way.
-                outer = chosen[0]
-                branches = (
-                    table.groupby(outer, observed=True)["dwell_s"]
-                    .sum()
-                    .sort_values(ascending=False)
-                )
-                focus = st.selectbox(
-                    f"Focus on one {identity.label_for(outer)}",
-                    options=["All"] + [str(v) for v in branches.index],
-                    key="identity_focus_branch",
-                    help="Longest-held first. Picking one shows that branch "
-                         "complete, however many leaves it has.",
-                )
-                if focus != "All":
-                    table = table[table[outer].astype(str) == focus]
-                if table.empty:
-                    st.info(
-                        "No rows carry every level in that path — try dropping "
-                        "a level."
-                    )
-                else:
-                    counts = " · ".join(
-                        f"{table[l].nunique():,} {identity.label_for(l)}" for l in chosen
-                    )
-                    st.caption(f"{counts} · {table['dwell_s'].sum() / 60:.1f} minutes held in total.")
-                    tree_cols = st.columns([2, 2])
-                    max_leaves = tree_cols[0].number_input(
-                        "Max leaves drawn",
-                        min_value=10, max_value=5000, value=150, step=10,
-                        key="identity_leaves",
-                        help="Longest-held paths win when there are more. The "
-                             "download below is always the complete set.",
-                    )
-                    n_columns = tree_cols[1].number_input(
-                        "Columns",
-                        min_value=1, max_value=4, value=2, step=1,
-                        key="identity_columns",
-                        help="Break the eNBs across this many side-by-side "
-                             "sub-trees so each row has room to breathe. The "
-                             "columns are balanced by leaf count.",
-                    )
-                    st.plotly_chart(
-                        charts.tree_figure(
-                            table, chosen,
-                            [identity.label_for(l) for l in chosen],
-                            mode=MODE, max_leaves=int(max_leaves),
-                            columns=int(n_columns),
-                        ),
-                        width="stretch",
-                    )
-                    if len(table) > max_leaves:
-                        drawn = table.nlargest(int(max_leaves), "dwell_s")
-                        covered = drawn["dwell_s"].sum() / table["dwell_s"].sum()
-                        st.caption(
-                            f"Drawing the {int(max_leaves):,} longest-held of "
-                            f"{len(table):,} paths — {covered:.0%} of the dwell "
-                            f"time in view. The table and CSV below are complete."
-                        )
-                    with st.expander("Hierarchy as a table"):
-                        pretty = table.rename(
-                            columns={l: identity.label_for(l) for l in chosen}
-                        ).rename(columns={"dwell_s": "Held (s)", "samples": "Samples"})
-                        st.dataframe(pretty.round(1), width="stretch", hide_index=True, height=320)
-                        st.download_button(
-                            f"Download all {len(pretty):,} paths (CSV)",
-                            pretty.to_csv(index=False).encode(),
-                            file_name="cell_hierarchy.csv",
-                            mime="text/csv",
-                        )
-
-
-        if view == "Structure":
-            st.caption(
-                "How wide the identity tree is: how many sectors an eNB / gNB "
-                "carries, and how many PCIs a sector carries."
-            )
-            row = st.columns([2, 2, 2])
-            struct_levels = row[0].multiselect(
-                "Levels, outer → inner",
-                options=levels,
-                default=[l for l in ("enb", "sector", "pci") if l in levels] or levels[:2],
-                format_func=identity.label_for,
-                key="structure_levels",
-            )
-            split_by = row[1].selectbox(
-                "Split by",
-                options=["None", "tech", "link", "collection", "operator"],
-                format_func=lambda c: "Nothing" if c == "None" else stats.GROUP_DIMENSIONS.get(c, c.title()),
-                key="structure_split",
-                help="Compare populations — terrestrial and satellite fan out "
-                     "very differently.",
-            )
-            as_cdf = row[2].checkbox(
-                "Show as CDF", value=False, key="structure_cdf",
-                help="The same population read as P(children ≤ n).",
-            )
-
-            if len(struct_levels) < 2:
-                st.info("Pick at least two levels — fan-out needs a parent and a child.")
-            else:
-                counts = identity.fan_out_counts(
-                    cells,
-                    struct_levels,
-                    group_by=None if split_by == "None" else split_by,
-                )
-                summary = identity.fan_out_summary(counts)
-                if summary.empty:
-                    st.info("No rows carry two complete levels.")
-                else:
-                    st.dataframe(
-                        summary.round(2), width="stretch", hide_index=True
-                    )
-                    st.download_button(
-                        "Download fan-out summary (CSV)",
-                        summary.to_csv(index=False).encode(),
-                        file_name="cell_fan_out_summary.csv",
-                        mime="text/csv",
-                    )
-
-                    dist = identity.fan_out_distribution(counts)
-                    relationship = st.selectbox(
-                        "Chart",
-                        options=identity.relationship_order(counts),
-                        key="structure_relationship",
-                        help="Tree order: the outermost pair first, which is "
-                             "usually the one that varies.",
-                    )
-                    st.plotly_chart(
-                        charts.fan_out_figure(
-                            dist, relationship, mode=MODE, cumulative=as_cdf
-                        ),
-                        width="stretch",
-                    )
-                    with st.expander("Distribution as a table"):
-                        pretty = dist.rename(
-                            columns={
-                                "relationship": "Relationship",
-                                "group": "Group",
-                                "children": "Children",
-                                "parents": "Parents",
-                                "share": "Share",
-                            }
-                        )
-                        st.dataframe(
-                            pretty.round(4), width="stretch", hide_index=True, height=320
-                        )
-                        st.download_button(
-                            "Download distribution (CSV)",
-                            pretty.to_csv(index=False).encode(),
-                            file_name="cell_fan_out_distribution.csv",
-                            mime="text/csv",
-                        )
+            _hierarchy_view(table, MODE)
+            _download(table)
+        else:
+            _structure_view(table, MODE)
+            _download(table)
+    elif view == "Change timeline":
+        _change_timeline_view(serving, MODE)
+    else:
+        _timeline_view(serving, MODE)

@@ -705,58 +705,27 @@ def _held_text(seconds: float) -> str:
     return f"{seconds:.0f} s"
 
 
-def _balanced_columns(branches: List[dict], n: int) -> List[List[dict]]:
-    """Split dwell-ordered branches into ``n`` contiguous groups of roughly
-    equal leaf count, so the columns come out about the same height while the
-    biggest-dwell branches stay in the first column."""
-    if n <= 1 or len(branches) <= 1:
-        return [branches]
-    total = sum(b["_leaves"] for b in branches) or 1
-    groups: List[List[dict]] = []
-    current: List[dict] = []
-    acc = 0
-    for i, branch in enumerate(branches):
-        current.append(branch)
-        acc += branch["_leaves"]
-        remaining = len(branches) - i - 1
-        # close this column once it holds its share, provided enough branches
-        # are left to fill the columns still to come
-        if (
-            len(groups) < n - 1
-            and acc >= total * (len(groups) + 1) / n
-            and remaining >= (n - 1 - len(groups))
-        ):
-            groups.append(current)
-            current = []
-    groups.append(current)
-    return [g for g in groups if g]
-
-
 def build_tree(
     table: pd.DataFrame,
     levels: Sequence[str],
-    level_labels: Sequence[str],
     include_root: bool = True,
-    columns: int = 1,
 ):
-    """Lay a dwell hierarchy out as a left-to-right node-link tree.
+    """Lay an identity hierarchy out as a left-to-right node-link tree.
 
-    Returns ``(nodes, edges)``: nodes carry ``x`` (depth, offset by column),
-    ``y`` (row within the column), ``col`` (column index), label, dwell and
-    depth; edges are elbow paths from parent to child.  Children are ordered by
-    dwell, and a parent sits at the mean row of its children.
-
-    ``columns`` breaks the outermost level (the eNBs) across that many
-    side-by-side sub-trees, balanced by leaf count, so a tree of hundreds of
-    paths is a few short columns instead of one unreadable strip.  Columns only
-    apply with ``include_root=False`` (the root joins every branch, so it
-    cannot sit in one column); the root is placed at column 0 otherwise.
+    Returns ``(nodes, edges)``: nodes carry ``x`` (depth), ``y`` (row), the
+    identity value as ``label``, the level it belongs to, and the time held
+    under it (``dwell``); edges are elbow paths from parent to child.  Children
+    are ordered by identity value - never by time held, which says where the
+    phone sat rather than how the network is built - and a parent sits at the
+    mean row of its children.
 
     ``include_root`` keeps the synthetic "All" node.  Drawing leaves it out - a
-    single root just adds a column of dead space, and the running total is
-    already in the caption above the figure.
+    single root just adds a column of dead space.
     """
-    root = {"id": "", "label": "All", "depth": 0, "dwell": 0.0, "children": []}
+    root = {
+        "id": "", "label": "All", "value": None, "level": None, "depth": 0,
+        "dwell": 0.0, "children": [],
+    }
     nodes = {"": root}
 
     cols = [table[level].tolist() for level in levels]
@@ -764,14 +733,16 @@ def build_tree(
 
     for row in range(len(table)):
         path = ""
-        for depth, label in enumerate(level_labels, start=1):
+        for depth, level in enumerate(levels, start=1):
             value = cols[depth - 1][row]
             path_next = f"{path}/{depth}={value}"
             node = nodes.get(path_next)
             if node is None:
                 node = {
                     "id": path_next,
-                    "label": f"{label} {_node_text(value)}",
+                    "label": _node_text(value),
+                    "value": value,
+                    "level": level,
                     "depth": depth,
                     "dwell": 0.0,
                     "children": [],
@@ -782,61 +753,32 @@ def build_tree(
             path = path_next
         root["dwell"] += float(dwells[row])
 
-    # dwell-order every sibling list, and count the leaves under each node
-    def count_leaves(node) -> int:
-        if not node["children"]:
-            node["_leaves"] = 1
-        else:
-            node["children"].sort(key=lambda c: -c["dwell"])
-            node["_leaves"] = sum(count_leaves(c) for c in node["children"])
-        return node["_leaves"]
-
-    count_leaves(root)
-
-    n_cols = 1
-    if not include_root and root["children"]:
-        n_cols = max(1, min(int(columns), len(root["children"])))
-    groups = (
-        _balanced_columns(root["children"], n_cols)
-        if not include_root
-        else [root["children"]]
-    )
-
-    # one column occupies the depth span plus a gutter wide enough for the
-    # rightmost (leaf) labels of the column to its left
-    col_width = len(levels) + 2.6
+    def _by_value(node):
+        value = node["value"]
+        try:
+            return (0, float(value), "")
+        except (TypeError, ValueError):
+            return (1, 0.0, str(value))
 
     order: List[dict] = []
+    counter = [0]
 
-    def place(node, counter, x_offset, col_index):
+    def place(node):
         if not node["children"]:
             node["y"] = float(counter[0])
             counter[0] += 1
         else:
+            node["children"].sort(key=_by_value)
             for child in node["children"]:
-                place(child, counter, x_offset, col_index)
+                place(child)
             node["y"] = float(
                 sum(c["y"] for c in node["children"]) / len(node["children"])
             )
-        node["x"] = float(node["depth"]) + x_offset
-        node["col"] = col_index
+        node["x"] = float(node["depth"])
         order.append(node)
 
-    for col_index, group in enumerate(groups):
-        counter = [0]
-        x_offset = col_index * col_width
-        for branch in group:
-            place(branch, counter, x_offset, col_index)
-
-    if include_root:
-        top = root["children"]
-        root["x"] = 0.0
-        root["y"] = (
-            float(sum(c["y"] for c in top) / len(top)) if top else 0.0
-        )
-        root["col"] = 0
-        order.append(root)
-    else:
+    place(root)
+    if not include_root:
         order = [n for n in order if n["depth"] > 0]
 
     edges = []
@@ -854,19 +796,21 @@ def build_tree(
             )
     return order, edges
 
+
 def tree_figure(
     table: pd.DataFrame,
     levels: Sequence[str],
     level_labels: Sequence[str],
     mode: str = "light",
     max_leaves: int = 150,
-    columns: int = 1,
     height: Optional[int] = None,
 ) -> go.Figure:
-    """Node-link tree over ``levels``, with dwell time on every node.
+    """Node-link tree over ``levels``.
 
-    ``columns`` splits the eNBs across that many side-by-side sub-trees, so a
-    tall strip of hundreds of paths becomes a few short, readable columns.
+    Each level is a column, named once in a header row ("eNB ID", "Sector ID",
+    "PCI"), so a node carries only its value.  A last column gives the time
+    each leaf was held.  ``max_leaves`` is a safety cap for a table too large
+    to read: the longest-held paths are kept.
     """
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
@@ -874,27 +818,13 @@ def tree_figure(
         return fig
 
     nodes, edges = build_tree(
-        table.nlargest(max_leaves, "dwell_s"),
-        levels,
-        level_labels,
-        include_root=False,
-        columns=columns,
+        table.nlargest(max_leaves, "dwell_s"), levels, include_root=False
     )
     if not nodes:
         return fig
-
-    # Held time is worth reading off the leaves, and off the outermost grouping
-    # too when there is horizontal room for it. Split into columns the room is
-    # gone - the eNB label would run into the sector level - so drop it there
-    # and leave it to the hover; the leaves keep it either way.
-    outermost = min(n["depth"] for n in nodes)
-    show_outer_time = columns <= 1
-    labels = [
-        f"{n['label']} · {_held_text(n['dwell'])}"
-        if (not n["children"]) or (n["depth"] == outermost and show_outer_time)
-        else n["label"]
-        for n in nodes
-    ]
+    label_of = dict(zip(levels, level_labels))
+    leaves = [n for n in nodes if not n["children"]]
+    deepest = len(levels)
 
     edge_x: List[Optional[float]] = []
     edge_y: List[Optional[float]] = []
@@ -912,72 +842,84 @@ def tree_figure(
         )
     )
 
-    biggest = max((n["dwell"] for n in nodes), default=1.0) or 1.0
-    depth_of = [n["depth"] for n in nodes]
     fig.add_trace(
         go.Scatter(
             x=[n["x"] for n in nodes],
             y=[n["y"] for n in nodes],
             mode="markers+text",
-            text=labels,
-            # Leaves read best beside the marker. Inner nodes have a branch
-            # line leaving them, so their label goes above it. The outermost
-            # (eNB) node in a multi-column layout puts its label to the LEFT,
-            # into the empty gutter, so a long gNB-Id cannot run into the
-            # sector level of a narrow column.
+            text=[n["label"] for n in nodes],
+            # Leaves read best beside the marker. The outermost node has
+            # nothing to its left, so its label goes there. A node in between
+            # has a branch entering and leaving it, so its label sits above.
             textposition=[
                 "middle right"
                 if not n["children"]
-                else ("middle left"
-                      if n["depth"] == outermost and columns > 1
-                      else "top right")
+                else ("middle left" if n["depth"] == 1 else "top center")
                 for n in nodes
             ],
-            textfont=dict(family=FONT_FAMILY, size=11, color=chrome["text_primary"]),
+            textfont=dict(family=FONT_FAMILY, size=12, color=chrome["text_primary"]),
             marker=dict(
-                size=[7 + 11 * (n["dwell"] / biggest) ** 0.5 for n in nodes],
+                size=10,
                 color=[
-                    _DEPTH_COLORS[min(d, len(_DEPTH_COLORS) - 1)] for d in depth_of
+                    _DEPTH_COLORS[min(n["depth"], len(_DEPTH_COLORS) - 1)]
+                    for n in nodes
                 ],
                 line=dict(color=chrome["surface"], width=1.5),
             ),
-            customdata=[[n["dwell"]] for n in nodes],
-            hovertemplate="<b>%{text}</b><br>held %{customdata[0]:.0f}s<extra></extra>",
+            customdata=[
+                [label_of.get(n["level"], n["level"]), _held_text(n["dwell"])]
+                for n in nodes
+            ],
+            hovertemplate=(
+                "<b>%{customdata[0]} %{text}</b>"
+                "<br>held %{customdata[1]}<extra></extra>"
+            ),
+            showlegend=False,
+        )
+    )
+    # time held, once per leaf, in a column of its own
+    held_x = deepest + 0.9
+    fig.add_trace(
+        go.Scatter(
+            x=[held_x] * len(leaves),
+            y=[n["y"] for n in leaves],
+            mode="text",
+            text=[_held_text(n["dwell"]) for n in leaves],
+            textposition="middle center",
+            textfont=dict(family=FONT_FAMILY, size=12, color=chrome["text_secondary"]),
+            hoverinfo="skip",
             showlegend=False,
         )
     )
 
-    # Height follows the tallest column, not the total leaf count - that is the
-    # whole point of columns. Each leaf needs its own row plus a line for the
-    # sector label above it, so the figure GROWS with the leaf count (the page
-    # scrolls) rather than compressing rows into an unreadable smear once a
-    # column passes ~100 leaves. The ceiling is a safety limit, not a target:
-    # past it, focus on one eNB or lower the leaf cap.
-    per_column: Dict[int, int] = {}
-    for n in nodes:
-        if not n["children"]:
-            per_column[n["col"]] = per_column.get(n["col"], 0) + 1
-    tallest = max(per_column.values(), default=1)
+    # one row per leaf, plus room for the header row
     if height is None:
-        height = int(min(11000, max(320, 30 * tallest + 80)))
+        height = int(min(11000, max(170, 30 * len(leaves) + 90)))
 
     fig.update_layout(
         height=height,
         paper_bgcolor=chrome["surface"],
         plot_bgcolor=chrome["surface"],
         font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=8, r=8, t=8, b=8),
+        margin=dict(l=8, r=8, t=34, b=8),
         hoverlabel=dict(font_family=FONT_FAMILY),
     )
-    # left labels of column 0 spill left of its eNB nodes (x=1) in multi-column
-    # mode, so widen the left margin to keep them on canvas
-    right = max((n["x"] for n in nodes), default=float(len(levels)))
-    left = -1.0 if columns > 1 else 0.6
+    # the header row: the x axis, drawn on top, with one tick per column
     fig.update_xaxes(
-        visible=False, range=[left, right + 1.8], fixedrange=False
+        side="top",
+        tickmode="array",
+        tickvals=[float(d) for d in range(1, deepest + 1)] + [held_x],
+        ticktext=[f"<b>{label}</b>" for label in level_labels] + ["<b>Time held</b>"],
+        tickfont=dict(family=FONT_FAMILY, size=12, color=chrome["text_secondary"]),
+        ticks="",
+        showgrid=False,
+        zeroline=False,
+        showline=False,
+        range=[0.2, held_x + 0.6],
+        fixedrange=True,
     )
     fig.update_yaxes(
-        visible=False, autorange="reversed", range=None
+        visible=False, range=[len(leaves) - 0.4, -0.9], fixedrange=True
     )
     return fig
 
@@ -985,15 +927,17 @@ def tree_figure(
 def fan_out_figure(
     dist: pd.DataFrame,
     relationship: str,
+    y_title: str = "Count",
+    groups: Optional[Sequence[str]] = None,
     mode: str = "light",
-    cumulative: bool = False,
-    normalise: bool = False,
-    height: int = 420,
+    height: int = 380,
 ) -> go.Figure:
-    """How many parents carry N children.
+    """How many parents show exactly N children, one bar group per network.
 
-    The counts are small integers, so bars are the honest default; the
-    cumulative form is the same population read as "P(children <= n)".
+    ``relationship`` names the count on the x axis ("Sectors seen per eNB")
+    and ``y_title`` what a bar counts ("Number of eNBs").  ``groups`` fixes the
+    order and the colour of the groups (the networks), so D2C keeps its colour
+    whichever network has more eNBs; without it the largest group leads.
     """
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
@@ -1001,62 +945,35 @@ def fan_out_figure(
     if sub.empty:
         return fig
 
-    ranked = (
-        sub.groupby("group", observed=True)["parents"].sum().sort_values(ascending=False)
-    )
-    groups, folded = list(ranked.index[:8]), list(ranked.index[8:])
-    if folded:
-        sub = sub.copy()
-        sub.loc[sub["group"].isin(folded), "group"] = f"Other ({len(folded)})"
-        sub = (
-            sub.groupby(["relationship", "group", "children"], observed=True)
-            .agg(parents=("parents", "sum"))
-            .reset_index()
+    present = set(sub["group"])
+    if groups is None:
+        ranked = (
+            sub.groupby("group", observed=True)["parents"]
+            .sum()
+            .sort_values(ascending=False)
         )
-        totals = sub.groupby("group", observed=True)["parents"].transform("sum")
-        sub["share"] = sub["parents"] / totals
-        groups = groups + [f"Other ({len(folded)})"]
+        groups = list(ranked.index)
+    slots = [(i, g) for i, g in enumerate(groups) if g in present]
+    single = len(slots) == 1
 
-    single = len(groups) == 1
-    y_title = "Share of parents" if (normalise or cumulative) else "Parents"
-
-    for i, group in enumerate(groups):
+    for i, group in slots:
         part = sub[sub["group"] == group].sort_values("children")
-        if part.empty:
-            continue
-        color = OTHER_COLOR if str(group).startswith("Other (") else series_style(i, mode)[0]
-        if cumulative:
-            fig.add_trace(
-                go.Scatter(
-                    x=part["children"],
-                    y=part["share"].cumsum(),
-                    mode="lines+markers",
-                    line=dict(color=color, width=2, shape="hv"),
-                    marker=dict(size=8, color=color),
-                    name=str(group),
-                    hovertemplate=(
-                        f"<b>{group}</b><br>≤ %{{x}} children"
-                        "<br>%{y:.1%} of parents<extra></extra>"
-                    ),
-                )
+        color = series_style(i, mode)[0]
+        fig.add_trace(
+            go.Bar(
+                x=part["children"],
+                y=part["parents"],
+                name=str(group),
+                marker=dict(color=color, cornerradius=4, line=dict(width=0)),
+                text=part["parents"] if single else None,
+                textposition="outside",
+                textfont=dict(color=chrome["text_secondary"], size=11),
+                hovertemplate=(
+                    f"<b>{group}</b><br>{relationship}: %{{x}}"
+                    f"<br>{y_title}: %{{y}}<extra></extra>"
+                ),
             )
-        else:
-            values = part["share"] if normalise else part["parents"]
-            fig.add_trace(
-                go.Bar(
-                    x=part["children"],
-                    y=values,
-                    name=str(group),
-                    marker=dict(color=color, cornerradius=4, line=dict(width=0)),
-                    text=part["parents"] if single else None,
-                    textposition="outside",
-                    textfont=dict(color=chrome["text_secondary"], size=11),
-                    hovertemplate=(
-                        f"<b>{group}</b><br>%{{x}} children"
-                        "<br>%{y}<extra></extra>"
-                    ),
-                )
-            )
+        )
 
     fig.update_layout(
         height=height,
@@ -1069,7 +986,7 @@ def fan_out_figure(
         margin=dict(l=64, r=24, t=16, b=52),
         hovermode="closest",
         hoverlabel=dict(font_family=FONT_FAMILY),
-        showlegend=len(groups) >= 2,
+        showlegend=True,
         legend=dict(
             orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
             font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
@@ -1084,8 +1001,6 @@ def fan_out_figure(
         title=dict(text=y_title, font=dict(color=chrome["text_secondary"], size=12)),
         gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
         tickfont=dict(color=chrome["muted"], size=11),
-        tickformat=".0%" if (normalise or cumulative) else None,
-        range=[0, 1.02] if cumulative else None,
     )
     return fig
 

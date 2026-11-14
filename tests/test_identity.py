@@ -47,7 +47,10 @@ def test_available_levels_reports_only_populated_columns():
 
 
 def test_label_for():
-    assert identity.label_for("enb") == "eNB / gNB-Id"
+    assert identity.label_for("enb") == "eNB ID"
+    assert identity.label_for("sector") == "Sector ID"
+    # the NR-only SSB index is no longer a level
+    assert "ssb" not in identity.IDENTITY_LEVELS
     assert identity.label_for("nope") == "nope"
 
 
@@ -277,14 +280,20 @@ def test_relationships_pairs_each_level_with_its_prefix():
 
 
 def test_relationship_label_names_the_immediate_parent():
-    assert identity.relationship_label(("enb", "sector"), "pci") == "PCI per Sector Id"
+    assert identity.relationship_label(("enb", "sector"), "pci") == "PCIs seen per sector"
+    assert identity.relationship_label(("enb",), "sector") == "Sectors seen per eNB"
+
+
+def test_parents_label_says_what_a_bar_counts():
+    assert identity.parents_label(("enb",)) == "Number of eNBs"
+    assert identity.parents_label(("enb", "sector")) == "Number of sectors"
 
 
 def test_fan_out_counts_one_row_per_parent():
     counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
-    sectors = counts[counts["relationship"] == "Sector Id per eNB / gNB-Id"]
+    sectors = counts[counts["relationship"] == "Sectors seen per eNB"]
     assert sorted(sectors["children"]) == [1, 3]
-    pcis = counts[counts["relationship"] == "PCI per Sector Id"]
+    pcis = counts[counts["relationship"] == "PCIs seen per sector"]
     assert sorted(pcis["children"]) == [1, 1, 1, 2]
     assert set(counts["group"]) == {"All"}
 
@@ -299,26 +308,13 @@ def test_sector_ids_are_scoped_to_their_enb():
         }
     )
     counts = identity.fan_out_counts(frame, ["enb", "sector", "pci"])
-    pcis = counts[counts["relationship"] == "PCI per Sector Id"]
+    pcis = counts[counts["relationship"] == "PCIs seen per sector"]
     assert sorted(pcis["children"]) == [2, 2]
 
 
 def test_fan_out_counts_can_split_the_population():
     counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector"], group_by="tech")
     assert set(counts["group"]) == {"LTE", "NR"}
-
-
-def test_fan_out_summary_columns_and_values():
-    summary = identity.fan_out_summary(
-        identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
-    )
-    assert list(summary.columns) == [
-        "Relationship", "Group", "Parents", "Children", "Min", "Median", "P90", "Max", "Mean"
-    ]
-    sectors = summary[summary["Relationship"] == "Sector Id per eNB / gNB-Id"].iloc[0]
-    assert sectors["Parents"] == 2 and sectors["Children"] == 4
-    assert sectors["Min"] == 1 and sectors["Max"] == 3
-    assert sectors["Mean"] == pytest.approx(2.0)
 
 
 def test_fan_out_distribution_counts_parents_and_shares():
@@ -333,31 +329,127 @@ def test_fan_out_distribution_counts_parents_and_shares():
 def test_fan_out_handles_too_few_levels_and_empty_frames():
     assert identity.fan_out_counts(_tree_frame(), ["enb"]).empty
     assert identity.fan_out_counts(pd.DataFrame(), ["enb", "sector"]).empty
-    assert identity.fan_out_summary(pd.DataFrame()).empty
     assert identity.fan_out_distribution(pd.DataFrame()).empty
 
 
 def test_fan_out_on_the_synthetic_export(fixture_dir, cache_dir):
     frame = identity.serving_only(load(fixture_dir, ["lte_radio"], cache_dir))
-    summary = identity.fan_out_summary(
-        identity.fan_out_counts(frame, ["enb", "sector", "pci"])
-    )
-    assert not summary.empty
-    assert (summary["Min"] >= 1).all()
-    assert (summary["Median"] <= summary["Max"]).all()
+    counts = identity.fan_out_counts(frame, ["enb", "sector", "pci"])
+    assert not counts.empty
+    assert (counts["children"] >= 1).all()
 
 
 def test_relationships_keep_tree_order_not_alphabetical():
     counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
-    order = identity.relationship_order(counts)
+    order = list(counts["relationship"].cat.categories)
     assert order == [
-        "Sector Id per eNB / gNB-Id",  # the outer pair leads
-        "PCI per Sector Id",
-        "PCI per eNB / gNB-Id",
+        "Sectors seen per eNB",  # the outer pair leads
+        "PCIs seen per sector",
+        "PCIs seen per eNB",
     ]
     assert sorted(order) != order  # i.e. this is not alphabetical
-    assert identity.fan_out_summary(counts)["Relationship"].tolist() == order
-    assert identity.relationship_order(pd.DataFrame()) == []
+
+
+# --------------------------------------------------------------------------- #
+# Paths, the per-eNB summary and the per-network summary
+# --------------------------------------------------------------------------- #
+
+
+def _network_frame():
+    """D2C: eNB 10 with sectors 1, 2, 3 (sector 3 shows two PCIs) and eNB 12
+    with one sector. Terrestrial: eNB 500 with two sectors. One sample a
+    second, so every path is held for about its number of samples."""
+    rows = [
+        ("D2C", 12, 9, 900), ("D2C", 12, 9, 900), ("D2C", 12, 9, 900),
+        ("D2C", 10, 1, 100), ("D2C", 10, 2, 200),
+        ("D2C", 10, 3, 300), ("D2C", 10, 3, 301),
+        ("Terrestrial", 500, 1, 7), ("Terrestrial", 500, 2, 8),
+    ]
+    return pd.DataFrame(
+        {
+            "time": pd.date_range("2026-07-22 14:00:00", periods=len(rows), freq="1s"),
+            "collection": "C",
+            "network": pd.Categorical([r[0] for r in rows]),
+            "enb": pd.array([r[1] for r in rows], dtype="Int64"),
+            "sector": pd.array([r[2] for r in rows], dtype="Int32"),
+            "pci": pd.array([r[3] for r in rows], dtype="Int32"),
+        }
+    )
+
+
+def test_paths_lists_every_path_once_per_network():
+    table = identity.paths(_network_frame())
+    assert list(table.columns) == ["network", "enb", "sector", "pci", "dwell_s", "samples"]
+    assert len(table) == 7
+    assert set(table["network"]) == {"D2C", "Terrestrial"}
+    assert table["samples"].sum() == 9
+    held = table.set_index(["enb", "sector", "pci"])["samples"]
+    assert held[(12, 9, 900)] == 3
+
+
+def test_paths_needs_the_whole_path():
+    frame = _network_frame().drop(columns=["sector"])
+    assert identity.paths(frame).empty
+    assert identity.paths(pd.DataFrame()).empty
+    # a row with no sector cannot be placed
+    partial = _network_frame()
+    partial.loc[0:2, "sector"] = pd.NA
+    assert 12 not in set(identity.paths(partial)["enb"])
+
+
+def test_paths_works_without_a_network_column():
+    table = identity.paths(_network_frame().drop(columns=["network"]))
+    assert list(table.columns) == ["enb", "sector", "pci", "dwell_s", "samples"]
+    assert len(table) == 7
+
+
+def test_enb_summary_counts_sectors_and_pcis_per_enb():
+    table = identity.paths(_network_frame())
+    d2c = identity.enb_summary(table[table["network"] == "D2C"])
+    assert list(d2c.columns) == ["enb", "sectors", "pcis", "minutes"]
+    # most sectors first, although eNB 12 was held longest
+    assert d2c["enb"].tolist() == [10, 12]
+    assert d2c["sectors"].tolist() == [3, 1]
+    assert d2c["pcis"].tolist() == [4, 1]
+    assert d2c["minutes"].sum() == pytest.approx(
+        table.loc[table["network"] == "D2C", "dwell_s"].sum() / 60
+    )
+
+
+def test_enb_summary_can_order_by_enb_id():
+    table = identity.paths(_network_frame())
+    d2c = table[table["network"] == "D2C"]
+    assert identity.enb_summary(d2c, "enb")["enb"].tolist() == [10, 12]
+    # ties on sectors fall back to PCIs, then to the eNB ID
+    tie = pd.DataFrame(
+        {
+            "enb": [7, 5, 6, 6], "sector": [1, 1, 1, 1], "pci": [1, 1, 1, 2],
+            "dwell_s": [1.0] * 4, "samples": [1] * 4,
+        }
+    )
+    assert identity.enb_summary(tie)["enb"].tolist() == [6, 5, 7]
+    assert set(identity.ENB_ORDERS) == {"sectors", "enb"}  # never by time held
+    assert identity.enb_summary(pd.DataFrame()).empty
+
+
+def test_network_summary_compares_the_networks():
+    summary = identity.network_summary(identity.paths(_network_frame()))
+    by_net = summary.set_index("network")
+    d2c, terr = by_net.loc["D2C"], by_net.loc["Terrestrial"]
+    assert (d2c["enbs"], d2c["sectors"], d2c["pcis"]) == (2, 4, 5)
+    assert d2c["sectors_per_enb_median"] == 2.0 and d2c["sectors_per_enb_max"] == 3
+    assert d2c["pcis_per_sector_median"] == 1.0 and d2c["pcis_per_sector_max"] == 2
+    assert (terr["enbs"], terr["sectors"], terr["pcis"]) == (1, 2, 2)
+    assert terr["sectors_per_enb_max"] == 2 and terr["pcis_per_sector_max"] == 1
+    assert identity.network_summary(pd.DataFrame()).empty
+
+
+def test_fan_out_counts_split_by_network_from_the_paths_table():
+    table = identity.paths(_network_frame())
+    counts = identity.fan_out_counts(table, identity.TREE_LEVELS, group_by="network")
+    sectors = counts[counts["relationship"] == "Sectors seen per eNB"]
+    assert sorted(sectors.loc[sectors["group"] == "D2C", "children"]) == [1, 3]
+    assert sorted(sectors.loc[sectors["group"] == "Terrestrial", "children"]) == [2]
 
 
 # --------------------------------------------------------------------------- #
