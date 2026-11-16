@@ -70,14 +70,34 @@ def test_build_map_draws_the_selected_region(frame):
     assert "polygon" in fmap.get_root().render().lower()
 
 
-def test_carto_styles_hidden_without_key(monkeypatch):
+def test_basemap_is_carto_light_with_a_key_and_openstreetmap_without(monkeypatch):
     monkeypatch.delenv(mapview.CARTO_KEY_NAME, raising=False)
     assert mapview.carto_api_key() is None
     assert mapview.carto_api_key({}) is None
-    names = mapview.tile_choices(None)
-    assert names[0] == "OpenStreetMap"
-    assert not set(mapview.CARTO_TILES) & set(names)
-    assert set(mapview.CARTO_TILES) <= set(mapview.tile_choices("k"))
+    assert mapview.default_tiles(None) == "OpenStreetMap"
+    assert mapview.default_tiles("k") in mapview.CARTO_TILES
+
+
+def test_build_map_uses_the_fixed_colour_range(frame):
+    _, edges, colors = mapview.build_map(
+        frame, "rsrp", "RSRP (dBm)", max_points=50, color_range=(-140.0, -80.0)
+    )
+    assert edges[0] == -140.0 and edges[-1] == -80.0
+    assert len(edges) == len(colors) + 1
+    # a subset of the data is coloured on the very same scale
+    _, subset_edges, _ = mapview.build_map(
+        frame.head(20), "rsrp", "RSRP (dBm)", color_range=(-140.0, -80.0)
+    )
+    assert subset_edges == edges
+
+
+def test_build_map_colours_the_ten_busiest_cells_and_folds_the_rest(frame):
+    many = frame.copy()
+    many["enb"] = [20000 + (i % 25) for i in range(len(many))]
+    html = mapview.build_map(
+        many, "rsrp", "RSRP", max_points=200, color_by="enb", color_by_label="eNB / gNB-Id",
+    )[0].get_root().render()
+    assert "Other" in html
 
 
 def test_carto_key_read_from_env_then_secrets(monkeypatch):
@@ -97,3 +117,21 @@ def test_carto_tiles_carry_key_or_fall_back_to_osm(frame):
         frame, "rsrp", "RSRP", max_points=5, tiles="Dark (CartoDB dark_matter)",
     )[0].get_root().render()
     assert "cartocdn" not in no_key and "openstreetmap" in no_key.lower()
+
+
+def test_new_regions_only_returns_shapes_not_already_in_the_region():
+    a = [(41.69, -86.24), (41.69, -86.23), (41.70, -86.23)]
+    b = [(41.71, -86.24), (41.71, -86.23), (41.72, -86.23)]
+    assert mapview.new_regions([a], []) == [a]
+    # the map re-reports a shape it already gave: nothing new, so no rerun
+    assert mapview.new_regions([a], [a]) == []
+    assert mapview.new_regions([[list(p) for p in a]], [a]) == []
+    # a report with no shapes never removes the region
+    assert mapview.new_regions([], [a]) == []
+    assert mapview.new_regions([a, b, b], [a]) == [b]
+
+
+def test_the_draw_toolbar_only_adds_shapes(frame):
+    html = mapview.build_map(frame, "rsrp", "RSRP", max_points=5)[0].get_root().render()
+    compact = html.replace(" ", "").replace("\n", "")
+    assert '"edit":false' in compact and '"remove":false' in compact

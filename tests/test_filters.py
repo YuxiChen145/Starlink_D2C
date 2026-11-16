@@ -81,17 +81,14 @@ def test_region_filter_and_union(frame):
     assert len(flt.apply_filters(frame, flt.Filters(regions=[far_away]))) == 0
 
 
-def test_region_can_keep_ungeolocated_rows(fixture_dir, cache_dir):
+def test_a_region_always_drops_rows_without_gps(fixture_dir, cache_dir):
     mixed = load(fixture_dir, ["lte_radio"], cache_dir).copy()
     no_gps = mixed.index[:20]  # e.g. samples logged before the first GPS fix
     mixed.loc[no_gps, ["lat", "lon"]] = np.nan
-    far_away = flt.bbox_polygon(0, 1, 0, 1)
-    dropped = flt.apply_filters(mixed, flt.Filters(regions=[far_away]))
-    kept = flt.apply_filters(
-        mixed, flt.Filters(regions=[far_away], keep_ungeolocated=True)
-    )
-    assert len(dropped) == 0
-    assert list(kept.index) == list(no_gps)
+    everywhere = flt.bbox_polygon(-90, 90, -180, 180)
+    kept = flt.apply_filters(mixed, flt.Filters(regions=[everywhere]))
+    assert len(kept) == len(mixed) - len(no_gps)
+    assert not set(no_gps) & set(kept.index)
 
 
 def test_time_range_filter(frame):

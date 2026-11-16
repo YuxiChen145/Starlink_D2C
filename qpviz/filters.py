@@ -86,8 +86,6 @@ class Filters:
     metric: Optional[str] = None
     #: columns that must be non-null (e.g. drop rows with an unknown PCI)
     require: Sequence[str] = ()
-    #: keep rows without GPS even when a region is drawn
-    keep_ungeolocated: bool = False
 
     def describe(self) -> str:
         bits = []
@@ -150,8 +148,6 @@ def apply_filters(frame: pd.DataFrame, filters: Filters) -> pd.DataFrame:
         region_mask = np.zeros(len(frame), dtype=bool)
         for polygon in filters.regions:
             region_mask |= points_in_polygon(lat, lon, polygon)
-        if filters.keep_ungeolocated:
-            region_mask |= ~(np.isfinite(lat) & np.isfinite(lon))
         mask &= region_mask
 
     if mask.all():

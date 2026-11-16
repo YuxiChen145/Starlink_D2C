@@ -132,14 +132,37 @@ def test_sigcap_throughput_is_not_a_metric_but_still_labels_the_traffic(
     assert "app_tput" not in frame.columns
     assert "cqi" not in frame.columns
     traffic = set(frame["traffic"].dropna().astype(str).unique())
-    assert {"iperf DL", "iperf UL", "HTTP"} <= traffic
+    assert {"iperf DL", "iperf UL", "HTTP DL", "HTTP UL"} <= traffic
+    assert "HTTP" not in traffic
 
 
 def test_sigcap_direction_is_per_row_from_iperf_direction(sigcap_dir, cache_dir):
     frame = loader.load_sigcap(sigcap_dir, ["sigcap_lte"], cache_dir)
     links = set(frame["link"].dropna().astype(str).unique())
-    # iperf sessions alternate download/upload; http rows are downlink
+    # iperf sessions alternate download/upload
     assert {"DL", "UL"} <= links
+
+
+def test_sigcap_http_direction_comes_from_the_target(sigcap_dir, cache_dir):
+    """SigCap logs no direction for an HTTP test; a POST target is an upload,
+    anything else a download."""
+    frame = loader.load_sigcap(sigcap_dir, ["sigcap_lte"], cache_dir)
+    http = frame[frame["traffic"].astype(str).str.startswith("HTTP")]
+    assert set(http["traffic"].astype(str)) == {"HTTP DL", "HTTP UL"}
+    assert set(http.loc[http["traffic"] == "HTTP UL", "link"].astype(str)) == {"UL"}
+    assert set(http.loc[http["traffic"] == "HTTP DL", "link"].astype(str)) == {"DL"}
+
+    raw = pd.DataFrame({
+        "http_tput_mean_mbps": [1.0, 1.0, 1.0, None],
+        "http_target": [
+            "https://httpbin.org/post",
+            "https://github.com/x/large/releases/download/free/large",
+            None,                      # no target logged: counted as a download
+            "https://httpbin.org/post",  # no HTTP sample on this row
+        ],
+    })
+    assert loader._sigcap_traffic(raw).tolist() == ["HTTP UL", "HTTP DL", "HTTP DL", "Other"]
+    assert loader._sigcap_link(raw).tolist() == ["UL", "DL", "DL", "-"]
 
 
 def test_sigcap_timestamp_is_naive_local_wall_clock(sigcap_dir, cache_dir):
@@ -161,7 +184,9 @@ def test_sigcap_app_only_rows_are_kept(sigcap_dir, cache_dir):
     # rows from a running test but with no serving-cell fix must survive
     # (routed to LTE), so the traffic reference keeps every test phase
     frame = loader.load_sigcap(sigcap_dir, ["sigcap_lte"], cache_dir)
-    in_test = frame["traffic"].astype(str).isin(["iperf DL", "iperf UL", "HTTP"])
+    in_test = frame["traffic"].astype(str).isin(
+        ["iperf DL", "iperf UL", "HTTP DL", "HTTP UL"]
+    )
     app_no_radio = frame[in_test & frame["rsrp"].isna()]
     assert len(app_no_radio) > 0
 
@@ -229,4 +254,23 @@ def test_sigcap_traffic_is_per_row_not_from_the_name(sigcap_dir, cache_dir):
     # http session -> HTTP rows
     http_sess = frame[frame["collection"].astype(str).str.contains("http", na=False)]
     if not http_sess.empty:
-        assert "HTTP" in set(http_sess["traffic"].dropna().unique())
+        assert {"HTTP DL", "HTTP UL"} & set(http_sess["traffic"].dropna().unique())
+
+
+def test_traffic_filter_offers_only_the_six_values(sigcap_dir, monkeypatch, tmp_path):
+    """Ping-only and unlabelled rows are in the data but are not Traffic values."""
+    from qpviz.schema import TRAFFIC_ORDER
+
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(None, sigcap_dir)
+    assert not app.exception, [str(e.value) for e in app.exception]
+    options = app.multiselect(key="f_traffic").options
+    # in the filter's order, and nothing outside the six
+    assert options == [t for t in TRAFFIC_ORDER if t in options]
+    assert {"HTTP UL", "HTTP DL", "iperf DL", "iperf UL"} <= set(options)
+    assert not {"Ping", "Other", "HTTP", "iperf"} & set(options)
+
+    everything = int(app.metric[0].value.replace(",", ""))
+    app.multiselect(key="f_traffic").set_value(["HTTP UL"]).run()
+    assert not app.exception, [str(e.value) for e in app.exception]
+    assert 0 < int(app.metric[0].value.replace(",", "")) < everything
