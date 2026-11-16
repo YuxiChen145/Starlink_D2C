@@ -1,3 +1,5 @@
+import pytest
+
 from qpviz import schema
 
 
@@ -20,49 +22,99 @@ def test_freq_label_follows_technology():
     assert schema.DATASETS_BY_KEY["nr_radio"].freq_label == "NR-ARFCN"
 
 
-def test_pucch_has_no_geo():
-    assert schema.DATASETS_BY_KEY["lte_pucch"].has_geo is False
+def test_qp_exports_carry_gps():
     assert schema.DATASETS_BY_KEY["lte_radio"].has_geo is True
+    # the PUCCH export (CQI / Tx power only, no GPS) is no longer read
+    assert "lte_pucch" not in schema.DATASETS_BY_KEY
 
 
 def test_datasets_with_metric_filters_by_tech():
     nr = schema.datasets_with_metric("rsrp", tech="NR")
     assert [d.key for d in nr] == ["nr_radio"]
-    assert {d.key for d in schema.datasets_with_metric("throughput")} == {
+    assert {d.key for d in schema.datasets_with_metric("mcs")} == {
         "lte_pdsch_pc",
-        "lte_pdsch_agg",
         "lte_pusch_pc",
         "nr_pdsch_pc",
-        "nr_pdsch_agg",
         "nr_pusch_pc",
     }
 
 
-def test_offered_and_hidden_metrics_partition_the_registry():
-    assert set(schema.METRIC_ORDER) | set(schema.HIDDEN_METRICS) == set(schema.METRICS)
-    assert not set(schema.METRIC_ORDER) & set(schema.HIDDEN_METRICS)
+#: metric -> the one Qualipoc export per technology it is read from
+FIXED_EXPORTS = {
+    "rsrp": {"lte_radio", "nr_radio"},
+    "rsrq": {"lte_radio", "nr_radio"},
+    "rssi": {"lte_radio"},
+    "sinr": {"lte_radio", "nr_radio"},
+    "n_factor": {"lte_radio"},
+    "tput_dl": {"lte_pdsch_agg", "nr_pdsch_agg"},
+    "tput_dl_cc": {"lte_pdsch_pc", "nr_pdsch_pc"},
+    "tput_ul": {"lte_pusch_pc", "nr_pusch_pc"},
+    "tput_ul_cc": {"lte_pusch_pc", "nr_pusch_pc"},
+    "bler": {"lte_pdsch_pc", "nr_pdsch_pc"},
+}
+#: metrics that exist in both directions: one export per technology and link
+BOTH_DIRECTIONS = ("mcs", "spec_eff", "sf_usage", "rb", "rb_occ")
 
 
-def test_hidden_metrics_are_never_offered():
+@pytest.mark.parametrize("metric", sorted(FIXED_EXPORTS))
+def test_each_metric_reads_one_fixed_qualipoc_export(metric):
+    got = schema.datasets_with_metric(metric)
+    assert {d.key for d in got} == FIXED_EXPORTS[metric]
+    # never two exports of the same technology pooled into one metric
+    assert len({d.tech for d in got}) == len(got)
+
+
+@pytest.mark.parametrize("metric", BOTH_DIRECTIONS)
+def test_two_way_metrics_read_the_per_carrier_export_of_each_direction(metric):
+    got = schema.datasets_with_metric(metric)
+    assert {d.key for d in got} == {
+        "lte_pdsch_pc", "lte_pusch_pc", "nr_pdsch_pc", "nr_pusch_pc"
+    }
+    assert len({(d.tech, d.link) for d in got}) == len(got)
+
+
+def test_the_neighbour_export_is_not_read():
+    # signal metrics describe the serving cell only (Radio [connected])
+    assert "lte_neighbor" not in schema.DATASETS_BY_KEY
+    assert not [d for d in schema.DATASETS if "Neighbor" in d.filename]
+
+
+def test_the_single_throughput_metric_is_split_in_four():
+    assert "throughput" not in schema.METRICS
+    assert [schema.METRICS[m].label for m in schema.THROUGHPUT_METRICS] == [
+        "DL throughput, all carriers",
+        "DL throughput, per carrier",
+        "UL throughput, all carriers",
+        "UL throughput, per carrier",
+    ]
+    assert {schema.METRICS[m].unit for m in schema.THROUGHPUT_METRICS} == {"Mbps"}
+
+
+def test_every_registered_metric_is_offered():
+    assert set(schema.METRIC_ORDER) == set(schema.METRICS)
+    assert len(schema.METRIC_ORDER) == len(set(schema.METRIC_ORDER))
+
+
+def test_all_sources_together_supply_exactly_the_offered_metrics():
     # the union of every source (QP + PRISM + SigCap) supplies exactly the
-    # offered metric set, in display order - app_tput/rtt come from SigCap only
+    # offered metric set, in display order - rtt comes from SigCap only
     every_dataset = list(schema.ALL_DATASETS_BY_KEY)
-    offered = schema.metrics_available(every_dataset)
-    assert offered == schema.METRIC_ORDER
-    for metric in schema.HIDDEN_METRICS:
-        assert metric not in offered
-        # still mapped by the datasets, so restoring one needs no other change
-        assert schema.datasets_with_metric(metric)
+    assert schema.metrics_available(every_dataset) == schema.METRIC_ORDER
 
 
-def test_pucch_carries_only_hidden_metrics_so_it_is_not_reachable():
-    assert schema.metrics_available(["lte_pucch"]) == []
+@pytest.mark.parametrize(
+    "metric", ["app_tput", "tput_per_rb", "cqi", "tx_power", "pathloss"]
+)
+def test_cut_metrics_are_gone_from_the_registry_and_every_dataset(metric):
+    assert metric not in schema.METRICS
+    for ds in schema.ALL_DATASETS_BY_KEY.values():
+        assert metric not in ds.metrics
 
 
 def test_metrics_available_is_in_display_order():
     got = schema.metrics_available(["lte_radio", "lte_pusch_pc"])
     assert got == [m for m in schema.METRIC_ORDER if m in got]
-    assert "rsrp" in got and "throughput" in got
+    assert "rsrp" in got and "tput_ul" in got and "tput_dl" not in got
 
 
 def test_metrics_available_ignores_unknown_keys():
@@ -74,17 +126,13 @@ def test_technologies_map_to_dataset_tech_values():
 
 
 def test_datasets_for_resolves_metric_and_technology():
-    # RSRP for "All" pools the LTE serving + neighbour and the NR radio exports
-    assert {d.key for d in schema.datasets_for("rsrp")} == {
-        "lte_radio",
-        "lte_neighbor",
-        "nr_radio",
-    }
+    # RSRP for "All" reads the serving-cell export of each technology
+    assert {d.key for d in schema.datasets_for("rsrp")} == {"lte_radio", "nr_radio"}
     assert {d.key for d in schema.datasets_for("rsrp", "NR")} == {"nr_radio"}
 
 
 def test_datasets_for_spans_both_directions_where_the_metric_does():
-    resolved = schema.datasets_for("throughput", "LTE")
+    resolved = schema.datasets_for("mcs", "LTE")
     assert {d.link for d in resolved} == {"DL", "UL"}
 
 
@@ -100,8 +148,8 @@ def test_rb_metrics_map_scheduled_vs_all_sf():
     exports, and never crossed."""
     from qpviz.schema import METRICS, DATASETS_BY_KEY
 
-    assert METRICS["rb"].label == "RBs per subframe (scheduled)"
-    assert METRICS["rb_occ"].label == "RBs per subframe (all SF)"
+    assert METRICS["rb"].label == "RBs per used subframe"
+    assert METRICS["rb_occ"].label == "RBs per subframe, all subframes"
 
     checks = {
         "lte_pdsch_pc": ("PDSCH Avg RBs per SF", "PDSCH Avg RBs all SF"),
@@ -123,9 +171,46 @@ def test_traffic_label_classifies_session_names():
     assert traffic_label("PingiperfULDL") == "Mixed"
     assert traffic_label("NoForcing_Static_Ookla_Field") == "Ookla"
     assert traffic_label("D2C_FitzWalking_Ping_Coverage") == "Ping"
-    assert traffic_label("1011 http") == "HTTP"
     assert traffic_label("D2C_CampusWalking_IDLE_EARFCN8665") == "Idle"
-    assert traffic_label("910 iperf") == "iperf"          # no direction in name
-    assert traffic_label("iperfULDL") == "iperf DL+UL"
+    assert traffic_label("Campus_httpDL") == "HTTP DL"
+    assert traffic_label("Campus_httpUL") == "HTTP UL"
+    # no single test and direction in the name: a combined session, which the
+    # loader splits per row by the channel carrying the transfer
+    assert traffic_label("1011 http") == "Mixed"
+    assert traffic_label("910 iperf") == "Mixed"
+    assert traffic_label("iperfULDL") == "Mixed"
+    assert traffic_label("D2C_Sta_Gate1011_PinghttpULDL") == "Mixed"
+    # a misspelt "iper" still counts as iperf (a real session name)
+    assert traffic_label("D2C_OpenField_Static_twoPhone1_PingiperULDL") == "Mixed"
+    assert traffic_label("x_iperDL") == "iperf DL"
     assert traffic_label("D2C_Boulder_MostStatic_EARFCN8665") == "Other"
     assert traffic_label(None) == "Other"
+
+
+def test_the_traffic_filter_offers_six_values():
+    assert schema.TRAFFIC_ORDER == [
+        "Idle", "HTTP UL", "HTTP DL", "iperf DL", "iperf UL", "Mixed",
+    ]
+    # every label a session name can produce is either offered or unlisted
+    names = ["x_iperfDL", "x_iperfUL", "x_httpDL", "x_httpUL", "x_IDLE", "x_http",
+             "x_Ping", "x_Ookla", "x", "x_PingiperfULDL"]
+    produced = {schema.traffic_label(n) for n in names}
+    assert produced == set(schema.TRAFFIC_ORDER) | set(schema.TRAFFIC_UNLISTED)
+
+
+def test_traffic_app_names_the_one_transfer_test_in_a_session_name():
+    from qpviz.schema import traffic_app
+    assert traffic_app("D2C_Sta_Gate1011_PinghttpULDL") == "HTTP"
+    assert traffic_app("D2C_Sta_Gate1011_PingiperfULDL") == "iperf"
+    assert traffic_app("D2C_OpenField_Static_onephone1_http") == "HTTP"
+    assert traffic_app("D2C_OpenField_Static_twoPhone1_PingiperULDL") == "iperf"
+    assert traffic_app("x_iperf_http") is None   # two transfer tests: cannot tell
+    assert traffic_app("x_Ping") is None
+    assert traffic_app(None) is None
+
+
+def test_d2c_is_defined_by_its_carrier():
+    # LTE Band 25: downlink EARFCN 8665, paired uplink EARFCN 26665
+    assert schema.D2C_CARRIERS == {"LTE": (8665, 26665)}
+    assert schema.NETWORKS == ["D2C", "Terrestrial"]
+    assert "network" in schema.DIMENSION_COLUMNS

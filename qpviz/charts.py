@@ -11,11 +11,8 @@ import plotly.graph_objects as go
 
 from .stats import Curve
 from .theme import (
-    BAND_CONCURRENT,
-    BAND_SHARED_PCI,
     CATEGORICAL,
     CHROME,
-    DIVERGING_RED_BLUE,
     FONT_FAMILY,
     SEQUENTIAL_BLUE,
     series_style,
@@ -30,7 +27,6 @@ def cdf_figure(
     curves: Sequence[Curve],
     axis_label: str,
     mode: str = "light",
-    complementary: bool = False,
     show_direct_labels: bool = True,
     height: int = 560,
 ) -> go.Figure:
@@ -38,11 +34,11 @@ def cdf_figure(
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
 
-    y_title = "P(X > x)" if complementary else "P(X ≤ x)"
+    y_title = "P(X ≤ x)"
 
     for i, curve in enumerate(curves):
         color, dash = series_style(i, mode)
-        y = 1.0 - curve.y if complementary else curve.y
+        y = curve.y
         fig.add_trace(
             go.Scatter(
                 x=curve.x,
@@ -61,7 +57,7 @@ def cdf_figure(
     if show_direct_labels and 2 <= len(curves) <= 4:
         for i, curve in enumerate(curves):
             color, _ = series_style(i, mode)
-            y = 1.0 - curve.y if complementary else curve.y
+            y = curve.y
             fig.add_annotation(
                 x=float(curve.x[-1]),
                 y=float(y[-1]),
@@ -111,91 +107,6 @@ def cdf_figure(
     return fig
 
 
-def pdf_figure(
-    curves: Sequence[Curve],
-    axis_label: str,
-    mode: str = "light",
-    bins: int = 60,
-    height: int = 560,
-) -> go.Figure:
-    """Overlaid histograms (a PDF per group) sharing one set of bins.
-
-    Each group is normalised to a probability (its bars sum to 1), so groups of
-    different sizes are comparable and the mass piling up at particular values
-    (e.g. the RSRQ N-factor at 25 / 50 / 100 RBs) is easy to read.
-
-    ``curves`` must carry the *raw* sample values in ``x`` (build them with
-    ``cdf_curves(..., max_points=None)``): a histogram of a quantile-thinned
-    ECDF loses minor modes and misreports ``n``. The bins are computed here
-    with numpy so only ``bins`` bars per group reach the browser.
-    """
-    chrome = CHROME.get(mode, CHROME["light"])
-    fig = go.Figure()
-
-    allx = np.concatenate(
-        [np.asarray(c.x, dtype="float64") for c in curves if len(c.x)]
-    ) if curves else np.array([])
-    allx = allx[np.isfinite(allx)]
-    if allx.size:
-        lo, hi = float(allx.min()), float(allx.max())
-        if hi <= lo:
-            hi = lo + 1.0
-        edges = np.linspace(lo, hi, max(1, int(bins)) + 1)
-    else:
-        edges = np.array([0.0, 1.0])
-    centers = (edges[:-1] + edges[1:]) / 2.0
-    width = float(edges[1] - edges[0])
-
-    for i, curve in enumerate(curves):
-        color, _ = series_style(i, mode)
-        vals = np.asarray(curve.x, dtype="float64")
-        vals = vals[np.isfinite(vals)]
-        counts, _ = np.histogram(vals, bins=edges)
-        prob = counts / counts.sum() if counts.sum() else counts.astype("float64")
-        fig.add_trace(
-            go.Bar(
-                x=centers, y=prob, width=width,
-                name=f"{curve.name}  (n={vals.size:,})",
-                marker=dict(color=color, line=dict(width=0)),
-                opacity=0.55 if len(curves) > 1 else 0.85,
-                customdata=np.stack([edges[:-1], edges[1:]], axis=1),
-                hovertemplate=(
-                    f"<b>{curve.name}</b><br>{axis_label}: "
-                    "%{customdata[0]:.3g} – %{customdata[1]:.3g}"
-                    "<br>%{y:.1%} of samples<extra></extra>"
-                ),
-            )
-        )
-
-    fig.update_layout(
-        height=height,
-        barmode="overlay",
-        bargap=0.02,
-        paper_bgcolor=chrome["surface"],
-        plot_bgcolor=chrome["surface"],
-        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=64, r=24, t=16, b=56),
-        hovermode="closest",
-        hoverlabel=dict(font_family=FONT_FAMILY),
-        showlegend=len(curves) >= 2,
-        legend=dict(
-            orientation="v", yanchor="top", y=1, xanchor="left", x=1.01,
-            font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
-        ),
-    )
-    fig.update_xaxes(
-        title=dict(text=axis_label, font=dict(color=chrome["text_secondary"], size=12)),
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11),
-    )
-    fig.update_yaxes(
-        title=dict(text="Fraction of samples", font=dict(color=chrome["text_secondary"], size=12)),
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11), tickformat=".0%",
-    )
-    return fig
-
-
 # --------------------------------------------------------------------------- #
 # Map colouring
 # --------------------------------------------------------------------------- #
@@ -208,16 +119,21 @@ def _clean(values: Sequence[float]) -> np.ndarray:
 
 def color_bins(
     values: Sequence[float],
-    scale: str = "diverging",
-    midpoint: Optional[float] = None,
+    value_range: Optional[Tuple[float, float]] = None,
     n_bins: int = 9,
 ) -> Tuple[List[float], List[str]]:
     """Return ``(edges, colors)`` where ``len(edges) == len(colors) + 1``.
 
-    ``sequential`` uses a single blue hue light -> dark over the 2nd-98th
-    percentile range (so a few outliers do not wash out the scale).  ``diverging`` uses red <-> blue with a neutral grey
-    midpoint and an equal number of steps per arm.
+    A single blue hue, light -> dark, in equal steps. With ``value_range`` the
+    steps span that fixed range, so a colour means the same value on every map;
+    values outside it take the end colours. Without it they span the 2nd-98th
+    percentile of ``values`` (so a few outliers do not wash out the scale).
     """
+    colors = SEQUENTIAL_BLUE[:n_bins]
+    if value_range is not None:
+        lo, hi = float(value_range[0]), float(value_range[1])
+        return list(np.linspace(lo, hi, len(colors) + 1)), colors
+
     arr = _clean(values)
     if arr.size == 0:
         return [0.0, 1.0], [SEQUENTIAL_BLUE[-1]]
@@ -227,22 +143,7 @@ def color_bins(
         lo, hi = float(arr.min()), float(arr.max())
     if hi <= lo:
         hi = lo + 1.0
-
-    if scale == "sequential":
-        colors = SEQUENTIAL_BLUE[:n_bins]
-        edges = list(np.linspace(lo, hi, len(colors) + 1))
-        return edges, colors
-
-    mid = float(np.median(arr)) if midpoint is None else float(midpoint)
-    mid = min(max(mid, lo + 1e-9), hi - 1e-9)
-    colors = list(DIVERGING_RED_BLUE)  # 4 red + neutral + 4 blue
-    arm = (len(colors) - 1) // 2
-    half = min((mid - lo) / (arm + 0.5), (hi - mid) / (arm + 0.5)) / 2.0
-    half = max(half, 1e-9)
-    lower = list(np.linspace(lo, mid - half, arm + 1))
-    upper = list(np.linspace(mid + half, hi, arm + 1))
-    edges = lower + upper  # len == len(colors) + 1
-    return edges, colors
+    return list(np.linspace(lo, hi, len(colors) + 1)), colors
 
 
 def color_for(value: float, edges: Sequence[float], colors: Sequence[str]) -> str:
@@ -493,299 +394,6 @@ def downsample(frame: pd.DataFrame, max_points: int) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 
 
-def timeline_figure(
-    runs: pd.DataFrame,
-    identities: Sequence,
-    level_label: str,
-    mode: str = "light",
-    x_axis: str = "elapsed",
-    height: Optional[int] = None,
-) -> go.Figure:
-    """A swimlane of serving-cell dwell runs: one bar per continuous stretch.
-
-    ``identities`` fixes the row order (first-seen order draws the staircase a
-    satellite pass makes). ``x_axis`` is ``elapsed`` minutes from each
-    collection's first sample, or ``absolute`` wall-clock time.
-    """
-    chrome = CHROME.get(mode, CHROME["light"])
-    fig = go.Figure()
-    labels = [str(v) for v in identities]
-    keep = set(identities)
-
-    # Colour by collection, but never cycle hues: the eight with the most runs
-    # take the categorical slots and the remainder share one muted "Other".
-    if runs.empty:
-        collections, folded = [], []
-    else:
-        ranked = runs["collection"].value_counts().index.tolist()
-        collections, folded = ranked[:8], ranked[8:]
-
-    def _add(sub, name, color):
-        if sub.empty:
-            return
-        if x_axis == "absolute":
-            base = sub["start"]
-            width = (sub["end"] - sub["start"]).dt.total_seconds() * 1000.0
-            hover_x = "%{base|%Y-%m-%d %H:%M:%S}"
-        else:
-            base = sub["elapsed_start"] / 60.0
-            width = sub["duration_s"] / 60.0
-            hover_x = "%{base:.2f} min"
-        fig.add_trace(
-            go.Bar(
-                x=width,
-                y=[str(v) for v in sub["value"]],
-                base=base,
-                orientation="h",
-                name=str(name),
-                marker=dict(color=color, line=dict(width=0)),
-                width=0.72,
-                customdata=np.stack(
-                    [
-                        sub["duration_s"].to_numpy(),
-                        sub["samples"].to_numpy(),
-                        sub["collection"].astype(str).to_numpy(),
-                    ],
-                    axis=-1,
-                ),
-                hovertemplate=(
-                    f"<b>{level_label} %{{y}}</b><br>%{{customdata[2]}}"
-                    f"<br>start {hover_x}"
-                    "<br>held %{customdata[0]:.1f}s (%{customdata[1]} samples)"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    for i, collection in enumerate(collections):
-        _add(
-            runs[(runs["collection"] == collection) & (runs["value"].isin(keep))],
-            collection,
-            series_style(i, mode)[0],
-        )
-    if folded:
-        _add(
-            runs[runs["collection"].isin(folded) & runs["value"].isin(keep)],
-            f"Other ({len(folded)} collections)",
-            OTHER_COLOR,
-        )
-        collections = collections + ["other"]
-
-    if height is None:
-        height = int(min(1400, max(320, 18 * len(labels) + 120)))
-
-    fig.update_layout(
-        barmode="overlay",
-        bargap=0.15,
-        height=height,
-        paper_bgcolor=chrome["surface"],
-        plot_bgcolor=chrome["surface"],
-        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=8, r=16, t=8, b=48),
-        hovermode="closest",
-        hoverlabel=dict(font_family=FONT_FAMILY),
-        showlegend=len(collections) >= 2,
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
-            font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
-        ),
-    )
-    fig.update_xaxes(
-        title=dict(
-            text="Time" if x_axis == "absolute" else "Elapsed (minutes)",
-            font=dict(color=chrome["text_secondary"], size=12),
-        ),
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11),
-    )
-    fig.update_yaxes(
-        title=dict(text=level_label, font=dict(color=chrome["text_secondary"], size=12)),
-        type="category", categoryorder="array", categoryarray=labels,
-        autorange="reversed",  # first identity at the top, so time reads downward
-        gridcolor="rgba(0,0,0,0)", linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=10),
-    )
-    return fig
-
-
-#: the change timeline's two states — a new eNB (a site/satellite change) versus
-#: only a new Cell Id under the same eNB (a beam/sector change)
-CHANGE_ENB_COLOR = "#e8722c"   # orange
-CHANGE_CELL_COLOR = "#2f7ed8"  # blue
-
-
-def serving_timeline_figure(
-    segments: pd.DataFrame,
-    collections: Sequence,
-    subtitles: Optional[Sequence[str]] = None,
-    mode: str = "light",
-    height: Optional[int] = None,
-) -> go.Figure:
-    """Serving-cell change timeline: eNB Id on y, one segment per Cell Id.
-
-    Each dwell is a horizontal segment at its eNB Id, drawn over elapsed minutes.
-    Its colour says what kind of change *started* it - orange for a new eNB (a
-    site / satellite change), blue for the same eNB with a new Cell Id (a beam /
-    sector change) - the PCI is labelled above it, and dotted lines connect
-    consecutive segments so an eNB jump is visible. One panel per collection.
-    """
-    from plotly.subplots import make_subplots
-
-    chrome = CHROME.get(mode, CHROME["light"])
-    collections = list(collections)
-    n = len(collections)
-    if segments.empty or n == 0:
-        return go.Figure()
-    sub_map = {c: (subtitles[i] if subtitles else "") for i, c in enumerate(collections)}
-
-    orange, blue = CHANGE_ENB_COLOR, CHANGE_CELL_COLOR
-    fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.16)
-
-    # legend: two dummy traces so the colour meaning is spelled out once
-    fig.add_trace(
-        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=orange, width=6),
-                   name="new eNB/gNB Id (site or satellite change)"),
-        row=1, col=1,
-    )
-    fig.add_trace(
-        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=blue, width=6),
-                   name="same eNB/gNB Id, new Cell Id (beam or sector change)"),
-        row=1, col=1,
-    )
-
-    def _minutes(series):
-        return (series.to_numpy(dtype="float64") / 60.0)
-
-    for r, coll in enumerate(collections, start=1):
-        g = segments[segments["collection"] == coll].sort_values("elapsed_start")
-        if g.empty:
-            continue
-        # segments, batched by colour into one trace each (None separators)
-        for change_set, colour in ((("start", "enb"), orange), (("cell",), blue)):
-            sub = g[g["change"].isin(change_set)]
-            if sub.empty:
-                continue
-            xs, ys = [], []
-            x0 = _minutes(sub["elapsed_start"]); x1 = _minutes(sub["elapsed_end"])
-            enb = sub["enb"].to_numpy()
-            for a, b, e in zip(x0, x1, enb):
-                xs += [a, b, None]
-                ys += [e, e, None]
-            fig.add_trace(
-                go.Scatter(x=xs, y=ys, mode="lines",
-                           line=dict(color=colour, width=7),
-                           showlegend=False, hoverinfo="skip"),
-                row=r, col=1,
-            )
-        # dotted connectors between consecutive segments
-        em = _minutes(g["elapsed_end"]); sm = _minutes(g["elapsed_start"])
-        enb = g["enb"].to_numpy()
-        cx, cy = [], []
-        for i in range(1, len(g)):
-            cx += [em[i - 1], sm[i], None]
-            cy += [enb[i - 1], enb[i], None]
-        if cx:
-            fig.add_trace(
-                go.Scatter(x=cx, y=cy, mode="lines",
-                           line=dict(color=chrome["muted"], width=1, dash="dot"),
-                           showlegend=False, hoverinfo="skip"),
-                row=r, col=1,
-            )
-        # invisible mid-segment markers carry the hover detail
-        mid = (_minutes(g["elapsed_start"]) + _minutes(g["elapsed_end"])) / 2.0
-        cell = g["cell_id"].astype(str) if "cell_id" in g.columns else g["enb"].astype(str)
-        sector = g["sector"].astype(str) if "sector" in g.columns else pd.Series(["—"] * len(g))
-        fig.add_trace(
-            go.Scatter(
-                x=mid, y=g["enb"].to_numpy(), mode="markers",
-                marker=dict(size=2, color="rgba(0,0,0,0)"),
-                customdata=np.stack(
-                    [g["pci"].astype(str).to_numpy(), cell.to_numpy(),
-                     sector.to_numpy(), g["duration_s"].to_numpy()], axis=-1),
-                hovertemplate=(
-                    "eNB %{y} · PCI %{customdata[0]}"
-                    "<br>Cell %{customdata[1]} · sector %{customdata[2]}"
-                    "<br>held %{customdata[3]:.1f}s<extra></extra>"),
-                showlegend=False,
-            ),
-            row=r, col=1,
-        )
-        # PCI labelled above each segment, sector id below it
-        def _num(v):
-            try:
-                return str(int(v)) if float(v).is_integer() else str(v)
-            except (TypeError, ValueError):
-                return str(v)
-
-        sec_vals = (g["sector"].to_numpy() if "sector" in g.columns
-                    else np.full(len(g), np.nan))
-        for a, b, e, pci, sec in zip(
-            _minutes(g["elapsed_start"]), _minutes(g["elapsed_end"]),
-            g["enb"].to_numpy(), g["pci"].to_numpy(), sec_vals,
-        ):
-            xmid = (a + b) / 2.0
-            if not pd.isna(pci):
-                fig.add_annotation(
-                    x=xmid, y=e, text=_num(pci), showarrow=False, yshift=11,
-                    font=dict(size=9, color=chrome["text_secondary"]),
-                    row=r, col=1,
-                )
-            if not pd.isna(sec):
-                fig.add_annotation(
-                    x=xmid, y=e, text=f"s{_num(sec)}", showarrow=False, yshift=-11,
-                    font=dict(size=8, color=chrome["muted"]),
-                    row=r, col=1,
-                )
-        fig.update_yaxes(
-            title=dict(text="eNB Id", font=dict(color=chrome["text_secondary"], size=12)),
-            gridcolor=chrome["grid"], linecolor=chrome["axis"],
-            tickfont=dict(color=chrome["muted"], size=10), row=r, col=1,
-        )
-        # left-aligned per-panel subtitle
-        if sub_map.get(coll):
-            xref = "x domain" if r == 1 else f"x{r} domain"
-            yref = "y domain" if r == 1 else f"y{r} domain"
-            fig.add_annotation(
-                xref=xref, yref=yref, x=0, y=1.0, yshift=24, xanchor="left",
-                align="left", showarrow=False, text=sub_map[coll],
-                font=dict(size=12, color=chrome["text_primary"]),
-            )
-
-    if height is None:
-        height = int(min(1800, max(360, 300 * n + 90)))
-    fig.update_layout(
-        height=height,
-        paper_bgcolor=chrome["surface"], plot_bgcolor=chrome["surface"],
-        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=8, r=16, t=96, b=48),
-        hovermode="closest", hoverlabel=dict(font_family=FONT_FAMILY),
-        # anchor the legend to the whole figure so it sits above every panel,
-        # clear of the first panel's subtitle, no matter how many panels there are
-        legend=dict(orientation="h",
-                    xref="container", x=0.005, xanchor="left",
-                    yref="container", y=0.995, yanchor="top",
-                    font=dict(size=11, color=chrome["text_secondary"]),
-                    bgcolor="rgba(0,0,0,0)"),
-    )
-    # spell out the label convention, up in the top margin by the legend
-    fig.add_annotation(
-        xref="paper", x=1.0, xanchor="right",
-        yref="paper", y=1.0, yanchor="bottom", yshift=42, showarrow=False,
-        text="above segment = <b>PCI</b> · below = <b>sector</b> (s#)",
-        font=dict(size=10, color=chrome["muted"]),
-    )
-    fig.update_xaxes(
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11),
-    )
-    fig.update_xaxes(
-        title=dict(text="elapsed time (minutes)",
-                   font=dict(color=chrome["text_secondary"], size=12)),
-        row=n, col=1,
-    )
-    return fig
-
-
 #: one step of the sequential ramp per tree depth (an ordinal encoding - never
 #: a cycled categorical hue, which would imply groups that do not exist)
 _DEPTH_COLORS = ["#256abf", "#3987e5", "#6da7ec", "#9ec5f4", "#cde2fb"]
@@ -804,58 +412,27 @@ def _held_text(seconds: float) -> str:
     return f"{seconds:.0f} s"
 
 
-def _balanced_columns(branches: List[dict], n: int) -> List[List[dict]]:
-    """Split dwell-ordered branches into ``n`` contiguous groups of roughly
-    equal leaf count, so the columns come out about the same height while the
-    biggest-dwell branches stay in the first column."""
-    if n <= 1 or len(branches) <= 1:
-        return [branches]
-    total = sum(b["_leaves"] for b in branches) or 1
-    groups: List[List[dict]] = []
-    current: List[dict] = []
-    acc = 0
-    for i, branch in enumerate(branches):
-        current.append(branch)
-        acc += branch["_leaves"]
-        remaining = len(branches) - i - 1
-        # close this column once it holds its share, provided enough branches
-        # are left to fill the columns still to come
-        if (
-            len(groups) < n - 1
-            and acc >= total * (len(groups) + 1) / n
-            and remaining >= (n - 1 - len(groups))
-        ):
-            groups.append(current)
-            current = []
-    groups.append(current)
-    return [g for g in groups if g]
-
-
 def build_tree(
     table: pd.DataFrame,
     levels: Sequence[str],
-    level_labels: Sequence[str],
     include_root: bool = True,
-    columns: int = 1,
 ):
-    """Lay a dwell hierarchy out as a left-to-right node-link tree.
+    """Lay an identity hierarchy out as a left-to-right node-link tree.
 
-    Returns ``(nodes, edges)``: nodes carry ``x`` (depth, offset by column),
-    ``y`` (row within the column), ``col`` (column index), label, dwell and
-    depth; edges are elbow paths from parent to child.  Children are ordered by
-    dwell, and a parent sits at the mean row of its children.
-
-    ``columns`` breaks the outermost level (the eNBs) across that many
-    side-by-side sub-trees, balanced by leaf count, so a tree of hundreds of
-    paths is a few short columns instead of one unreadable strip.  Columns only
-    apply with ``include_root=False`` (the root joins every branch, so it
-    cannot sit in one column); the root is placed at column 0 otherwise.
+    Returns ``(nodes, edges)``: nodes carry ``x`` (depth), ``y`` (row), the
+    identity value as ``label``, the level it belongs to, and the time held
+    under it (``dwell``); edges are elbow paths from parent to child.  Children
+    are ordered by identity value - never by time held, which says where the
+    phone sat rather than how the network is built - and a parent sits at the
+    mean row of its children.
 
     ``include_root`` keeps the synthetic "All" node.  Drawing leaves it out - a
-    single root just adds a column of dead space, and the running total is
-    already in the caption above the figure.
+    single root just adds a column of dead space.
     """
-    root = {"id": "", "label": "All", "depth": 0, "dwell": 0.0, "children": []}
+    root = {
+        "id": "", "label": "All", "value": None, "level": None, "depth": 0,
+        "dwell": 0.0, "children": [],
+    }
     nodes = {"": root}
 
     cols = [table[level].tolist() for level in levels]
@@ -863,14 +440,16 @@ def build_tree(
 
     for row in range(len(table)):
         path = ""
-        for depth, label in enumerate(level_labels, start=1):
+        for depth, level in enumerate(levels, start=1):
             value = cols[depth - 1][row]
             path_next = f"{path}/{depth}={value}"
             node = nodes.get(path_next)
             if node is None:
                 node = {
                     "id": path_next,
-                    "label": f"{label} {_node_text(value)}",
+                    "label": _node_text(value),
+                    "value": value,
+                    "level": level,
                     "depth": depth,
                     "dwell": 0.0,
                     "children": [],
@@ -881,61 +460,32 @@ def build_tree(
             path = path_next
         root["dwell"] += float(dwells[row])
 
-    # dwell-order every sibling list, and count the leaves under each node
-    def count_leaves(node) -> int:
-        if not node["children"]:
-            node["_leaves"] = 1
-        else:
-            node["children"].sort(key=lambda c: -c["dwell"])
-            node["_leaves"] = sum(count_leaves(c) for c in node["children"])
-        return node["_leaves"]
-
-    count_leaves(root)
-
-    n_cols = 1
-    if not include_root and root["children"]:
-        n_cols = max(1, min(int(columns), len(root["children"])))
-    groups = (
-        _balanced_columns(root["children"], n_cols)
-        if not include_root
-        else [root["children"]]
-    )
-
-    # one column occupies the depth span plus a gutter wide enough for the
-    # rightmost (leaf) labels of the column to its left
-    col_width = len(levels) + 2.6
+    def _by_value(node):
+        value = node["value"]
+        try:
+            return (0, float(value), "")
+        except (TypeError, ValueError):
+            return (1, 0.0, str(value))
 
     order: List[dict] = []
+    counter = [0]
 
-    def place(node, counter, x_offset, col_index):
+    def place(node):
         if not node["children"]:
             node["y"] = float(counter[0])
             counter[0] += 1
         else:
+            node["children"].sort(key=_by_value)
             for child in node["children"]:
-                place(child, counter, x_offset, col_index)
+                place(child)
             node["y"] = float(
                 sum(c["y"] for c in node["children"]) / len(node["children"])
             )
-        node["x"] = float(node["depth"]) + x_offset
-        node["col"] = col_index
+        node["x"] = float(node["depth"])
         order.append(node)
 
-    for col_index, group in enumerate(groups):
-        counter = [0]
-        x_offset = col_index * col_width
-        for branch in group:
-            place(branch, counter, x_offset, col_index)
-
-    if include_root:
-        top = root["children"]
-        root["x"] = 0.0
-        root["y"] = (
-            float(sum(c["y"] for c in top) / len(top)) if top else 0.0
-        )
-        root["col"] = 0
-        order.append(root)
-    else:
+    place(root)
+    if not include_root:
         order = [n for n in order if n["depth"] > 0]
 
     edges = []
@@ -953,19 +503,21 @@ def build_tree(
             )
     return order, edges
 
+
 def tree_figure(
     table: pd.DataFrame,
     levels: Sequence[str],
     level_labels: Sequence[str],
     mode: str = "light",
     max_leaves: int = 150,
-    columns: int = 1,
     height: Optional[int] = None,
 ) -> go.Figure:
-    """Node-link tree over ``levels``, with dwell time on every node.
+    """Node-link tree over ``levels``.
 
-    ``columns`` splits the eNBs across that many side-by-side sub-trees, so a
-    tall strip of hundreds of paths becomes a few short, readable columns.
+    Each level is a column, named once in a header row ("eNB ID", "Sector ID",
+    "PCI"), so a node carries only its value.  A last column gives the time
+    each leaf was held.  ``max_leaves`` is a safety cap for a table too large
+    to read: the longest-held paths are kept.
     """
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
@@ -973,27 +525,13 @@ def tree_figure(
         return fig
 
     nodes, edges = build_tree(
-        table.nlargest(max_leaves, "dwell_s"),
-        levels,
-        level_labels,
-        include_root=False,
-        columns=columns,
+        table.nlargest(max_leaves, "dwell_s"), levels, include_root=False
     )
     if not nodes:
         return fig
-
-    # Held time is worth reading off the leaves, and off the outermost grouping
-    # too when there is horizontal room for it. Split into columns the room is
-    # gone - the eNB label would run into the sector level - so drop it there
-    # and leave it to the hover; the leaves keep it either way.
-    outermost = min(n["depth"] for n in nodes)
-    show_outer_time = columns <= 1
-    labels = [
-        f"{n['label']} · {_held_text(n['dwell'])}"
-        if (not n["children"]) or (n["depth"] == outermost and show_outer_time)
-        else n["label"]
-        for n in nodes
-    ]
+    label_of = dict(zip(levels, level_labels))
+    leaves = [n for n in nodes if not n["children"]]
+    deepest = len(levels)
 
     edge_x: List[Optional[float]] = []
     edge_y: List[Optional[float]] = []
@@ -1011,72 +549,84 @@ def tree_figure(
         )
     )
 
-    biggest = max((n["dwell"] for n in nodes), default=1.0) or 1.0
-    depth_of = [n["depth"] for n in nodes]
     fig.add_trace(
         go.Scatter(
             x=[n["x"] for n in nodes],
             y=[n["y"] for n in nodes],
             mode="markers+text",
-            text=labels,
-            # Leaves read best beside the marker. Inner nodes have a branch
-            # line leaving them, so their label goes above it. The outermost
-            # (eNB) node in a multi-column layout puts its label to the LEFT,
-            # into the empty gutter, so a long gNB-Id cannot run into the
-            # sector level of a narrow column.
+            text=[n["label"] for n in nodes],
+            # Leaves read best beside the marker. The outermost node has
+            # nothing to its left, so its label goes there. A node in between
+            # has a branch entering and leaving it, so its label sits above.
             textposition=[
                 "middle right"
                 if not n["children"]
-                else ("middle left"
-                      if n["depth"] == outermost and columns > 1
-                      else "top right")
+                else ("middle left" if n["depth"] == 1 else "top center")
                 for n in nodes
             ],
-            textfont=dict(family=FONT_FAMILY, size=11, color=chrome["text_primary"]),
+            textfont=dict(family=FONT_FAMILY, size=12, color=chrome["text_primary"]),
             marker=dict(
-                size=[7 + 11 * (n["dwell"] / biggest) ** 0.5 for n in nodes],
+                size=10,
                 color=[
-                    _DEPTH_COLORS[min(d, len(_DEPTH_COLORS) - 1)] for d in depth_of
+                    _DEPTH_COLORS[min(n["depth"], len(_DEPTH_COLORS) - 1)]
+                    for n in nodes
                 ],
                 line=dict(color=chrome["surface"], width=1.5),
             ),
-            customdata=[[n["dwell"]] for n in nodes],
-            hovertemplate="<b>%{text}</b><br>held %{customdata[0]:.0f}s<extra></extra>",
+            customdata=[
+                [label_of.get(n["level"], n["level"]), _held_text(n["dwell"])]
+                for n in nodes
+            ],
+            hovertemplate=(
+                "<b>%{customdata[0]} %{text}</b>"
+                "<br>held %{customdata[1]}<extra></extra>"
+            ),
+            showlegend=False,
+        )
+    )
+    # time held, once per leaf, in a column of its own
+    held_x = deepest + 0.9
+    fig.add_trace(
+        go.Scatter(
+            x=[held_x] * len(leaves),
+            y=[n["y"] for n in leaves],
+            mode="text",
+            text=[_held_text(n["dwell"]) for n in leaves],
+            textposition="middle center",
+            textfont=dict(family=FONT_FAMILY, size=12, color=chrome["text_secondary"]),
+            hoverinfo="skip",
             showlegend=False,
         )
     )
 
-    # Height follows the tallest column, not the total leaf count - that is the
-    # whole point of columns. Each leaf needs its own row plus a line for the
-    # sector label above it, so the figure GROWS with the leaf count (the page
-    # scrolls) rather than compressing rows into an unreadable smear once a
-    # column passes ~100 leaves. The ceiling is a safety limit, not a target:
-    # past it, focus on one eNB or lower the leaf cap.
-    per_column: Dict[int, int] = {}
-    for n in nodes:
-        if not n["children"]:
-            per_column[n["col"]] = per_column.get(n["col"], 0) + 1
-    tallest = max(per_column.values(), default=1)
+    # one row per leaf, plus room for the header row
     if height is None:
-        height = int(min(11000, max(320, 30 * tallest + 80)))
+        height = int(min(11000, max(170, 30 * len(leaves) + 90)))
 
     fig.update_layout(
         height=height,
         paper_bgcolor=chrome["surface"],
         plot_bgcolor=chrome["surface"],
         font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=8, r=8, t=8, b=8),
+        margin=dict(l=8, r=8, t=34, b=8),
         hoverlabel=dict(font_family=FONT_FAMILY),
     )
-    # left labels of column 0 spill left of its eNB nodes (x=1) in multi-column
-    # mode, so widen the left margin to keep them on canvas
-    right = max((n["x"] for n in nodes), default=float(len(levels)))
-    left = -1.0 if columns > 1 else 0.6
+    # the header row: the x axis, drawn on top, with one tick per column
     fig.update_xaxes(
-        visible=False, range=[left, right + 1.8], fixedrange=False
+        side="top",
+        tickmode="array",
+        tickvals=[float(d) for d in range(1, deepest + 1)] + [held_x],
+        ticktext=[f"<b>{label}</b>" for label in level_labels] + ["<b>Time held</b>"],
+        tickfont=dict(family=FONT_FAMILY, size=12, color=chrome["text_secondary"]),
+        ticks="",
+        showgrid=False,
+        zeroline=False,
+        showline=False,
+        range=[0.2, held_x + 0.6],
+        fixedrange=True,
     )
     fig.update_yaxes(
-        visible=False, autorange="reversed", range=None
+        visible=False, range=[len(leaves) - 0.4, -0.9], fixedrange=True
     )
     return fig
 
@@ -1084,15 +634,17 @@ def tree_figure(
 def fan_out_figure(
     dist: pd.DataFrame,
     relationship: str,
+    y_title: str = "Count",
+    groups: Optional[Sequence[str]] = None,
     mode: str = "light",
-    cumulative: bool = False,
-    normalise: bool = False,
-    height: int = 420,
+    height: int = 380,
 ) -> go.Figure:
-    """How many parents carry N children.
+    """How many parents show exactly N children, one bar group per network.
 
-    The counts are small integers, so bars are the honest default; the
-    cumulative form is the same population read as "P(children <= n)".
+    ``relationship`` names the count on the x axis ("Sectors seen per eNB")
+    and ``y_title`` what a bar counts ("Number of eNBs").  ``groups`` fixes the
+    order and the colour of the groups (the networks), so D2C keeps its colour
+    whichever network has more eNBs; without it the largest group leads.
     """
     chrome = CHROME.get(mode, CHROME["light"])
     fig = go.Figure()
@@ -1100,62 +652,35 @@ def fan_out_figure(
     if sub.empty:
         return fig
 
-    ranked = (
-        sub.groupby("group", observed=True)["parents"].sum().sort_values(ascending=False)
-    )
-    groups, folded = list(ranked.index[:8]), list(ranked.index[8:])
-    if folded:
-        sub = sub.copy()
-        sub.loc[sub["group"].isin(folded), "group"] = f"Other ({len(folded)})"
-        sub = (
-            sub.groupby(["relationship", "group", "children"], observed=True)
-            .agg(parents=("parents", "sum"))
-            .reset_index()
+    present = set(sub["group"])
+    if groups is None:
+        ranked = (
+            sub.groupby("group", observed=True)["parents"]
+            .sum()
+            .sort_values(ascending=False)
         )
-        totals = sub.groupby("group", observed=True)["parents"].transform("sum")
-        sub["share"] = sub["parents"] / totals
-        groups = groups + [f"Other ({len(folded)})"]
+        groups = list(ranked.index)
+    slots = [(i, g) for i, g in enumerate(groups) if g in present]
+    single = len(slots) == 1
 
-    single = len(groups) == 1
-    y_title = "Share of parents" if (normalise or cumulative) else "Parents"
-
-    for i, group in enumerate(groups):
+    for i, group in slots:
         part = sub[sub["group"] == group].sort_values("children")
-        if part.empty:
-            continue
-        color = OTHER_COLOR if str(group).startswith("Other (") else series_style(i, mode)[0]
-        if cumulative:
-            fig.add_trace(
-                go.Scatter(
-                    x=part["children"],
-                    y=part["share"].cumsum(),
-                    mode="lines+markers",
-                    line=dict(color=color, width=2, shape="hv"),
-                    marker=dict(size=8, color=color),
-                    name=str(group),
-                    hovertemplate=(
-                        f"<b>{group}</b><br>≤ %{{x}} children"
-                        "<br>%{y:.1%} of parents<extra></extra>"
-                    ),
-                )
+        color = series_style(i, mode)[0]
+        fig.add_trace(
+            go.Bar(
+                x=part["children"],
+                y=part["parents"],
+                name=str(group),
+                marker=dict(color=color, cornerradius=4, line=dict(width=0)),
+                text=part["parents"] if single else None,
+                textposition="outside",
+                textfont=dict(color=chrome["text_secondary"], size=11),
+                hovertemplate=(
+                    f"<b>{group}</b><br>{relationship}: %{{x}}"
+                    f"<br>{y_title}: %{{y}}<extra></extra>"
+                ),
             )
-        else:
-            values = part["share"] if normalise else part["parents"]
-            fig.add_trace(
-                go.Bar(
-                    x=part["children"],
-                    y=values,
-                    name=str(group),
-                    marker=dict(color=color, cornerradius=4, line=dict(width=0)),
-                    text=part["parents"] if single else None,
-                    textposition="outside",
-                    textfont=dict(color=chrome["text_secondary"], size=11),
-                    hovertemplate=(
-                        f"<b>{group}</b><br>%{{x}} children"
-                        "<br>%{y}<extra></extra>"
-                    ),
-                )
-            )
+        )
 
     fig.update_layout(
         height=height,
@@ -1168,7 +693,7 @@ def fan_out_figure(
         margin=dict(l=64, r=24, t=16, b=52),
         hovermode="closest",
         hoverlabel=dict(font_family=FONT_FAMILY),
-        showlegend=len(groups) >= 2,
+        showlegend=True,
         legend=dict(
             orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
             font=dict(size=11, color=chrome["text_secondary"]), bgcolor="rgba(0,0,0,0)",
@@ -1183,8 +708,6 @@ def fan_out_figure(
         title=dict(text=y_title, font=dict(color=chrome["text_secondary"], size=12)),
         gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
         tickfont=dict(color=chrome["muted"], size=11),
-        tickformat=".0%" if (normalise or cumulative) else None,
-        range=[0, 1.02] if cumulative else None,
     )
     return fig
 
@@ -1284,314 +807,3 @@ def sat_histogram_figure(
     )
     fig.update_xaxes(dtick=1)
     return _sat_layout(fig, chrome, f"D2C satellites visible (≥{mask}°)", "Samples", height)
-
-
-# --------------------------------------------------------------------------- #
-# Correlation (QP PHY  x  SigCap application layer)
-# --------------------------------------------------------------------------- #
-
-
-def correlation_timeline_figure(
-    merged: pd.DataFrame,
-    x_label: str,
-    y_label: str,
-    mode: str = "light",
-    height: int = 440,
-) -> go.Figure:
-    """Two time series on one shared timeline with independent y-axes.
-
-    ``merged`` has columns ``time`` (bin start), ``x`` (the QP PHY metric) and
-    ``y`` (the SigCap app metric).  The PHY series reads on the left axis, the
-    app series on the right, so their co-movement is visible despite different
-    units and scales.
-    """
-    chrome = CHROME.get(mode, CHROME["light"])
-    c_phy, _ = series_style(0, mode)
-    c_app, _ = series_style(1, mode)
-    fig = go.Figure()
-    if not merged.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=merged["time"], y=merged["x"], name=x_label,
-                mode="lines+markers", yaxis="y1",
-                line=dict(color=c_phy, width=2), marker=dict(size=4, color=c_phy),
-                hovertemplate=f"{x_label}: %{{y:.3g}}<br>%{{x|%H:%M:%S}}<extra></extra>",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=merged["time"], y=merged["y"], name=y_label,
-                mode="lines+markers", yaxis="y2",
-                line=dict(color=c_app, width=2), marker=dict(size=4, color=c_app),
-                hovertemplate=f"{y_label}: %{{y:.3g}}<br>%{{x|%H:%M:%S}}<extra></extra>",
-            )
-        )
-    fig.update_layout(
-        height=height,
-        template=None,
-        paper_bgcolor=chrome["surface"],
-        plot_bgcolor=chrome["surface"],
-        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=64, r=64, t=16, b=48),
-        hovermode="x unified",
-        hoverlabel=dict(font_family=FONT_FAMILY),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-            font=dict(size=11, color=chrome["text_secondary"]),
-            bgcolor="rgba(0,0,0,0)",
-        ),
-    )
-    fig.update_xaxes(
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11),
-    )
-    fig.update_layout(
-        yaxis=dict(
-            title=dict(text=x_label, font=dict(color=c_phy, size=12)),
-            gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-            tickfont=dict(color=c_phy, size=11),
-        ),
-        yaxis2=dict(
-            title=dict(text=y_label, font=dict(color=c_app, size=12)),
-            overlaying="y", side="right", showgrid=False, zeroline=False,
-            linecolor=chrome["axis"], tickfont=dict(color=c_app, size=11),
-        ),
-    )
-    return fig
-
-
-def correlation_scatter_figure(
-    merged: pd.DataFrame,
-    x_label: str,
-    y_label: str,
-    mode: str = "light",
-    height: int = 440,
-    fit_line: bool = True,
-) -> go.Figure:
-    """QP PHY metric (x) against the SigCap app metric (y), one point per bin.
-
-    An ordinary least-squares fit line is drawn when there are at least two
-    points that vary, as a visual read on the strength and sign of the relation.
-    """
-    chrome = CHROME.get(mode, CHROME["light"])
-    color, _ = series_style(0, mode)
-    fig = go.Figure()
-    if not merged.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=merged["x"], y=merged["y"], mode="markers",
-                marker=dict(size=7, color=color, opacity=0.72,
-                            line=dict(width=0.5, color=chrome["surface"])),
-                name="bins",
-                hovertemplate=f"{x_label}: %{{x:.3g}}<br>{y_label}: %{{y:.3g}}<extra></extra>",
-            )
-        )
-        x = pd.to_numeric(merged["x"], errors="coerce").to_numpy(dtype="float64")
-        y = pd.to_numeric(merged["y"], errors="coerce").to_numpy(dtype="float64")
-        ok = np.isfinite(x) & np.isfinite(y)
-        if fit_line and ok.sum() >= 2 and np.nanstd(x[ok]) > 0:
-            slope, intercept = np.polyfit(x[ok], y[ok], 1)
-            xs = np.array([np.nanmin(x[ok]), np.nanmax(x[ok])])
-            fig.add_trace(
-                go.Scatter(
-                    x=xs, y=slope * xs + intercept, mode="lines",
-                    line=dict(color=chrome["text_secondary"], width=1.5, dash="dash"),
-                    name="OLS fit", hoverinfo="skip",
-                )
-            )
-    fig.update_layout(
-        height=height,
-        template=None,
-        paper_bgcolor=chrome["surface"],
-        plot_bgcolor=chrome["surface"],
-        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=64, r=24, t=16, b=56),
-        showlegend=False,
-    )
-    fig.update_xaxes(
-        title=dict(text=x_label, font=dict(color=chrome["text_secondary"], size=12)),
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11),
-    )
-    fig.update_yaxes(
-        title=dict(text=y_label, font=dict(color=chrome["text_secondary"], size=12)),
-        gridcolor=chrome["grid"], zeroline=False, linecolor=chrome["axis"],
-        tickfont=dict(color=chrome["muted"], size=11),
-    )
-    return fig
-
-
-# --------------------------------------------------------------------------- #
-# Multi-device timeline (contention + shared-PCI analysis)
-# --------------------------------------------------------------------------- #
-
-
-def timeline_multi_figure(
-    binned: pd.DataFrame,
-    devices: Sequence[str],
-    concurrency: Sequence[dict] = (),
-    shared_pci: Sequence[dict] = (),
-    qp_overlay: Optional[pd.DataFrame] = None,
-    device_slots: Optional[dict] = None,
-    slot_labels: Optional[dict] = None,
-    mode: str = "light",
-    height: Optional[int] = None,
-) -> "go.Figure":
-    """Shared wall-clock timeline: throughput, RSRP, RBs and serving PCI per phone.
-
-    ``binned`` is :func:`qpviz.timeline.bin_devices` output. Downlink and uplink
-    throughput get their own panel each - one solid line per phone, colour kept
-    consistent down every panel - so direction never rides on a dashed line.
-    Bins where two phones are active are shaded grey, and bins where they share a
-    serving PCI are shaded in an accent colour on top.
-
-    Phones are coloured by **phone slot** (``device_slots`` maps each SigCap
-    device to its slot). ``qp_overlay`` is a long frame keyed by ``time`` and
-    ``slot`` (columns ``phy_tput_dl`` / ``phy_tput_ul`` / ``rsrp`` / ``rb_dl`` /
-    ``rb_ul``): QP recorded both phones, so every QP series is drawn per phone as
-    a dotted line in that phone's colour - PHY throughput on the throughput
-    panels, RSRP on the RSRP panel, and RBs on the dedicated RBs / subframe
-    panel (the sanity check that a shared cell hands each phone fewer RBs).
-    """
-    from plotly.subplots import make_subplots
-
-    chrome = CHROME.get(mode, CHROME["light"])
-    device_slots = device_slots or {}
-    slot_labels = slot_labels or {}
-    ov = qp_overlay if (qp_overlay is not None and not qp_overlay.empty) else None
-    has_rb = ov is not None and (
-        ("rb_dl" in ov.columns and ov["rb_dl"].notna().any())
-        or ("rb_ul" in ov.columns and ov["rb_ul"].notna().any())
-    )
-
-    # One colour policy for everything on the canvas: a phone with a slot owns
-    # categorical slot-1; a device without one takes the next slot no phone
-    # owns, so an unslotted device and phone 1 never share blue. The QP overlay
-    # for a slot reuses that slot's colour.
-    taken = {int(sl) - 1 for sl in device_slots.values() if sl}
-    free = iter(i for i in range(10_000) if i not in taken)
-    dev_color_index = {}
-    for dev in devices:
-        slot = device_slots.get(str(dev))
-        dev_color_index[str(dev)] = int(slot) - 1 if slot else next(free)
-
-    def _slot_color(slot):
-        return series_style(int(slot) - 1, mode)[0]
-
-    def _dev_color(i, dev):
-        return series_style(dev_color_index.get(str(dev), i), mode)[0]
-
-    plan = [("dl", "Downlink throughput (Mbps)"), ("ul", "Uplink throughput (Mbps)")]
-    if has_rb:
-        plan.append(("rb", "RBs / subframe (QP PHY, per phone)"))
-    plan += [("rsrp", "RSRP (dBm)"), ("pci", "Serving PCI")]
-    row_of = {name: i + 1 for i, (name, _) in enumerate(plan)}
-    n = len(plan)
-    weights = {"dl": 0.24, "ul": 0.24, "rb": 0.20, "rsrp": 0.17, "pci": 0.15}
-    heights = [weights[name] for name, _ in plan]
-    heights = [h / sum(heights) for h in heights]
-    if height is None:
-        height = 220 * n
-
-    fig = make_subplots(
-        rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-        row_heights=heights, subplot_titles=[t for _, t in plan],
-    )
-    devices = list(devices)
-
-    def _band(x0, x1, color, opacity):
-        fig.add_shape(type="rect", xref="x", yref="paper",
-                      x0=x0, x1=x1, y0=0, y1=1, fillcolor=color,
-                      opacity=opacity, line_width=0, layer="below")
-
-    for seg in concurrency:
-        if seg.get("value", 0) and seg["value"] >= 2:
-            _band(seg["start"], seg["end"], BAND_CONCURRENT.get(mode, BAND_CONCURRENT["light"]), 0.14)
-    for seg in shared_pci:
-        _band(seg["start"], seg["end"], BAND_SHARED_PCI.get(mode, BAND_SHARED_PCI["light"]), 0.22)
-
-    # --- per-device SigCap traces (solid) ---------------------------------- #
-    panels = [
-        (row_of["dl"], "app_tput_dl", "Mbps"),
-        (row_of["ul"], "app_tput_ul", "Mbps"),
-        (row_of["rsrp"], "rsrp", "dBm"),
-    ]
-    for i, dev in enumerate(devices):
-        g = binned[binned["device"] == dev].sort_values("time")
-        if g.empty:
-            continue
-        color = _dev_color(i, dev)
-        for row, col, unit in panels:
-            fig.add_trace(go.Scatter(
-                x=g["time"], y=g[col], name=str(dev),
-                legendgroup=str(dev), showlegend=(col == "app_tput_dl"),
-                mode="lines+markers", connectgaps=False,
-                line=dict(color=color, width=2), marker=dict(size=3, color=color),
-                hovertemplate=f"<b>{dev}</b> %{{y:.2f}} {unit}<br>%{{x|%H:%M:%S}}<extra></extra>",
-            ), row=row, col=1)
-        fig.add_trace(go.Scatter(
-            x=g["time"], y=g["pci"].astype("Float64"), name=str(dev),
-            legendgroup=str(dev), showlegend=False, mode="lines+markers",
-            line=dict(color=color, width=1.4, shape="hv"),
-            marker=dict(size=4, color=color),
-            hovertemplate=f"<b>{dev}</b> PCI %{{y:.0f}}<br>%{{x|%H:%M:%S}}<extra></extra>",
-        ), row=row_of["pci"], col=1)
-
-    # --- per-phone QP overlay (dotted, same colour as the phone) ----------- #
-    if ov is not None:
-        for slot, g in ov.sort_values("time").groupby("slot"):
-            slot = int(slot)
-            if slot >= 1:
-                color = _slot_color(slot)
-                phone = slot_labels.get(slot, f"phone{slot}")
-                grp = str(phone)
-            else:
-                color = chrome["text_secondary"]
-                phone, grp = "QP", "QP"
-
-            def _add(col, row, name, unit, dash="dot", show=False):
-                if col in g.columns and g[col].notna().any():
-                    fig.add_trace(go.Scatter(
-                        x=g["time"], y=g[col], name=name, legendgroup=grp,
-                        showlegend=show, mode="lines",
-                        line=dict(color=color, width=1.6, dash=dash),
-                        hovertemplate=f"{name}: %{{y:.2f}} {unit}<br>%{{x|%H:%M:%S}}<extra></extra>",
-                    ), row=row, col=1)
-
-            _add("phy_tput_dl", row_of["dl"], f"QP PHY · {phone} · DL", "Mbps", show=True)
-            _add("phy_tput_ul", row_of["ul"], f"QP PHY · {phone} · UL", "Mbps")
-            _add("rsrp", row_of["rsrp"], f"QP RSRP · {phone}", "dBm")
-            if has_rb:
-                _add("rb_dl", row_of["rb"], f"QP RB · {phone} · DL", "RB", show=True)
-                _add("rb_ul", row_of["rb"], f"QP RB · {phone} · UL", "RB", dash="longdash")
-
-    fig.update_layout(
-        height=height, template=None,
-        paper_bgcolor=chrome["surface"], plot_bgcolor=chrome["surface"],
-        font=dict(family=FONT_FAMILY, color=chrome["text_primary"], size=13),
-        margin=dict(l=64, r=20, t=48, b=40),
-        hovermode="x unified", hoverlabel=dict(font_family=FONT_FAMILY),
-        legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0,
-                    font=dict(size=11, color=chrome["text_secondary"]),
-                    bgcolor="rgba(0,0,0,0)"),
-    )
-    for r in range(1, n + 1):
-        fig.update_xaxes(gridcolor=chrome["grid"], zeroline=False,
-                         linecolor=chrome["axis"],
-                         tickfont=dict(color=chrome["muted"], size=11), row=r, col=1)
-        fig.update_yaxes(gridcolor=chrome["grid"], zeroline=False,
-                         linecolor=chrome["axis"],
-                         tickfont=dict(color=chrome["muted"], size=11), row=r, col=1)
-    # the throughput panels share one y-range covering BOTH the app traces and
-    # the QP PHY overlay, so a PHY line above the app line is never clipped
-    tput_parts = [binned["app_tput_dl"], binned["app_tput_ul"]]
-    if ov is not None:
-        tput_parts += [ov[c] for c in ("phy_tput_dl", "phy_tput_ul") if c in ov.columns]
-    tput_vals = pd.concat(tput_parts)
-    tmax = pd.to_numeric(tput_vals, errors="coerce").max()
-    if pd.notna(tmax) and tmax > 0:
-        fig.update_yaxes(range=[0, tmax * 1.08], row=row_of["dl"], col=1)
-        fig.update_yaxes(range=[0, tmax * 1.08], row=row_of["ul"], col=1)
-    for ann in fig.layout.annotations:
-        ann.font = dict(family=FONT_FAMILY, size=12, color=chrome["text_secondary"])
-    return fig

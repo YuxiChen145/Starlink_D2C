@@ -72,13 +72,13 @@ def test_available_datasets_lists_only_present_files(fixture_dir):
         "lte_radio",
         "nr_radio",
         "lte_pdsch_pc",
+        "lte_pdsch_agg",
         "lte_pusch_pc",
-        "lte_pucch",
     }
 
 
 def test_load_concatenates_and_skips_missing(fixture_dir, cache_dir):
-    frame = loader.load(fixture_dir, ["lte_radio", "nr_radio", "lte_pdsch_agg"], cache_dir)
+    frame = loader.load(fixture_dir, ["lte_radio", "nr_radio", "nr_pdsch_agg"], cache_dir)
     assert set(frame["tech"].unique()) == {"LTE", "NR"}
     assert set(frame["source"].unique()) == {"lte_radio", "nr_radio"}
     # NR contributes no RSSI, LTE contributes no NR-only column -> NaN filled
@@ -89,11 +89,6 @@ def test_load_with_no_valid_keys_returns_empty_frame(fixture_dir):
     frame = loader.load(fixture_dir, ["does_not_exist"], None)
     assert frame.empty
     assert "rsrp" in frame.columns
-
-
-def test_pucch_gets_null_geo_columns(fixture_dir, cache_dir):
-    frame = loader.read_dataset(fixture_dir, DATASETS_BY_KEY["lte_pucch"], cache_dir)
-    assert frame["lat"].isna().all() and frame["lon"].isna().all()
 
 
 def test_freq_label_for():
@@ -121,16 +116,14 @@ def test_freq_prefix_for_is_short():
 def test_spectral_efficiency_derived_metric(fixture_dir, cache_dir):
     ds = DATASETS_BY_KEY["lte_pdsch_pc"]
     frame = loader.read_dataset(fixture_dir, ds, cache_dir)
-    # both derived metrics exist and are finite where throughput + RBs are present
-    assert "spec_eff" in frame.columns and "tput_per_rb" in frame.columns
-    ok = frame["throughput"].notna() & frame["spec_eff"].notna()
+    # the derived metric exists and is finite where throughput + RBs are present
+    assert "spec_eff" in frame.columns
+    ok = frame["tput_dl_cc"].notna() & frame["spec_eff"].notna()
     assert ok.any()
-    # exact relation: bits/RB = spec_eff x 12 x 15kHz x 1ms = spec_eff x 180 (LTE)
-    sub = frame.loc[ok]
-    ratio = (sub["tput_per_rb"] / sub["spec_eff"]).round(3)
-    assert (ratio == 180.0).all()
-    # and they are positive
-    assert (sub["spec_eff"] > 0).all()
+    assert (frame.loc[ok, "spec_eff"] > 0).all()
+    # throughput per RB was the same quantity in other units (x180 on LTE), so
+    # it is no longer computed
+    assert "tput_per_rb" not in frame.columns
 
 
 def test_spectral_efficiency_only_on_pdsch_pusch(fixture_dir, cache_dir):
@@ -197,7 +190,7 @@ def test_qp_traffic_splits_only_mixed_sessions_by_throughput():
             "D2C_OpenField_Static_onePhone1_PingiperfULDL",  # Mixed, idle/ping
         ],
         "link": ["DL", "DL", "DL", "DL"],
-        "throughput": [3.0, 0.1, 4.0, 0.02],   # Mbps
+        "tput_dl_cc": [3.0, 0.1, 4.0, 0.02],   # Mbps
     })
     raw = pd.DataFrame({"Test Name": ["-", "-", "-", "-"]})
     traffic = loader._qp_traffic(out, raw, ds)
@@ -209,6 +202,45 @@ def test_qp_traffic_splits_only_mixed_sessions_by_throughput():
     assert traffic.iloc[3] == "Mixed"
 
 
+@pytest.mark.parametrize(
+    "key, direction", [("lte_pdsch_pc", "DL"), ("lte_pusch_pc", "UL")]
+)
+def test_qp_traffic_names_http_transfers_http_with_their_direction(key, direction):
+    """The active rows of an HTTP session are HTTP DL / HTTP UL by the channel
+    that carried the transfer - not iperf, which the session never ran."""
+    ds = DATASETS_BY_KEY[key]
+    out = pd.DataFrame({
+        "collection": [
+            "D2C_Sta_Gate1011_PinghttpULDL",        # combined: ping + HTTP
+            "D2C_Sta_Gate1011_PinghttpULDL",
+            "D2C_OpenField_Static_onephone1_http",  # HTTP, no direction named
+            "D2C_OpenField_Static_onephone1_http",
+        ],
+        "link": [direction] * 4,
+        ds.tput_metric: [3.0, 0.1, 4.0, 0.02],   # Mbps
+    })
+    raw = pd.DataFrame({"Test Name": ["-"] * 4})
+    traffic = loader._qp_traffic(out, raw, ds)
+    assert traffic.tolist() == [f"HTTP {direction}", "Mixed", f"HTTP {direction}", "Mixed"]
+
+
+def test_qp_traffic_never_produces_a_label_outside_the_known_set():
+    from qpviz.schema import TRAFFIC_ORDER, TRAFFIC_UNLISTED
+
+    ds = DATASETS_BY_KEY["lte_pdsch_pc"]
+    names = ["a_iperfDL", "a_iperfULDL", "a_iperf", "a_http", "a_Ping", "a_Ookla",
+             "a_IDLE", "a_plain", "a_iperf_http", "a_PingiperfULDL"]
+    out = pd.DataFrame({
+        "collection": names * 2,
+        "link": ["DL"] * len(names) * 2,
+        "tput_dl_cc": [5.0] * len(names) + [0.0] * len(names),
+    })
+    raw = pd.DataFrame({"Test Name": ["iperf"] * len(out)})
+    got = set(loader._qp_traffic(out, raw, ds))
+    assert got <= set(TRAFFIC_ORDER) | set(TRAFFIC_UNLISTED)
+    assert "iperf" not in got and "HTTP" not in got and "iperf DL+UL" not in got
+
+
 def test_qp_traffic_uses_test_name_for_unnamed_sessions():
     import pandas as pd
     from qpviz import loader
@@ -218,7 +250,7 @@ def test_qp_traffic_uses_test_name_for_unnamed_sessions():
     out = pd.DataFrame({
         "collection": ["D2C_Boulder_MostStatic_EARFCN8665"] * 3,  # -> "Other"
         "link": ["DL", "DL", "DL"],
-        "throughput": [1.0, 1.0, 0.0],
+        "tput_dl_cc": [1.0, 1.0, 0.0],
     })
     raw = pd.DataFrame({"Test Name": ["Ookla(R)", "Ping", "-"]})
     traffic = loader._qp_traffic(out, raw, ds)
@@ -238,18 +270,58 @@ def test_align_d2c_traffic_relabels_from_sigcap():
         "time": [t0, t0 + pd.Timedelta("2s"), t0 + pd.Timedelta("30s")],
         "collection": ["D2C_..._twoPhone1_PingiperULDL"] * 2 + ["NoForcing_Static_Ookla"],
         "provider": ["QP", "QP", "QP"],
+        "network": ["D2C", "D2C", "Terrestrial"],
         "traffic": pd.Series(["Ping", "Ping", "Ookla"], dtype="category"),
     })
     ref = pd.DataFrame({
         "time": [t0, t0 + pd.Timedelta("2s")],
-        "traffic": ["iperf DL", "iperf UL"],
+        "traffic": ["iperf DL", "HTTP UL"],
     })
     out = loader.align_d2c_traffic(qp, ref, tolerance="6s")
     # the two D2C rows are relabelled to the aligned SigCap traffic
     assert out.loc[0, "traffic"] == "iperf DL"
-    assert out.loc[1, "traffic"] == "iperf UL"
+    assert out.loc[1, "traffic"] == "HTTP UL"
     # the non-D2C Ookla row (and any far-from-ref row) keeps its own label
     assert out.loc[2, "traffic"] == "Ookla"
+
+
+def test_align_d2c_traffic_goes_by_the_carrier_not_the_collection_name():
+    """A session named D2C also holds rows on terrestrial carriers the phone
+    fell back to; only the rows on the D2C carrier take the SigCap label."""
+    t0 = pd.Timestamp("2026-09-14 19:47:00")
+    qp = pd.DataFrame({
+        "time": [t0, t0, t0],
+        "collection": ["D2C_Static_x", "D2C_Static_x", "Campus_walk"],
+        "provider": ["QP", "QP", "QP"],
+        "network": ["D2C", "Terrestrial", "D2C"],
+        "traffic": pd.Series(["Mixed", "Mixed", "Other"], dtype="category"),
+    })
+    ref = pd.DataFrame({"time": [t0], "traffic": ["iperf DL"]})
+    out = loader.align_d2c_traffic(qp, ref, tolerance="6s")
+    assert out["traffic"].tolist() == ["iperf DL", "Mixed", "iperf DL"]
+
+
+@pytest.mark.parametrize(
+    "key, freq, expected",
+    [
+        ("lte_radio", 8665, "D2C"),          # the D2C downlink carrier
+        ("lte_pusch_pc", 26665, "D2C"),      # its paired uplink carrier
+        ("lte_radio", 2175, "Terrestrial"),
+        ("nr_radio", 8665, "Terrestrial"),   # the same number as an NR-ARFCN
+        ("lte_radio", None, None),           # carrier never decoded
+    ],
+)
+def test_network_is_set_from_the_carrier(key, freq, expected):
+    ds = DATASETS_BY_KEY[key]
+    raw = pd.DataFrame({
+        "Time": ["2026-09-14 19:47:00.000"],
+        "Collection": ["D2C_named_or_not"],
+        ds.dims["freq"]: [freq],
+        next(iter(v for v in ds.metrics.values() if v != "@derived")): [1.0],
+    })
+    out = loader.normalise(raw, ds)
+    got = out["network"].iloc[0]
+    assert (got == expected) if expected else pd.isna(got)
 
 
 def test_align_d2c_traffic_keeps_unmatched_and_nonqp_rows():
@@ -259,6 +331,7 @@ def test_align_d2c_traffic_keeps_unmatched_and_nonqp_rows():
     frame = pd.DataFrame({
         "time": [t0, t0],
         "collection": ["D2C_x", "D2C_x"],
+        "network": ["D2C", "D2C"],
         "provider": ["QP", "SIGCAP"],   # SigCap D2C row must not be overwritten
         "traffic": pd.Series(["Mixed", "iperf DL"], dtype="category"),
     })
@@ -290,3 +363,99 @@ def test_band_normalisation_is_per_value_not_per_row():
     raw[band_col] = ["25", "LTE E-UTRA 25", None, "25.0"]
     out = loader.normalise(raw, ds)
     assert out["band"].tolist() == ["B25", "B25", "Unknown", "B25"]
+
+
+# --------------------------------------------------------------------------- #
+# Throughput split, uplink carrier sum, subframe usage
+# --------------------------------------------------------------------------- #
+
+
+def _pusch_raw(rows):
+    """A raw NR PUSCH [per-carrier] frame from (time, cell type, PCI, kbps)."""
+    ds = DATASETS_BY_KEY["nr_pusch_pc"]
+    raw = pd.DataFrame({
+        "Time": [r[0] for r in rows],
+        "Collection": "Campus_walk_iperfUL",
+        "Serial Number": "R5CX32LGQBD",
+        "Cell Type": [r[1] for r in rows],
+        "PCI 5G NR": [r[2] for r in rows],
+        "UL NR-ARFCN": 380970,
+        "Band Number": 25,
+        "5G NR Net PUSCH Throughput": [r[3] for r in rows],
+        "PUSCH Slot Utilization": 0.25,
+    })
+    return raw, ds
+
+
+def test_uplink_all_carriers_is_the_sum_of_the_carriers_at_each_timestamp():
+    t0, t1, t2 = (f"2026-07-30 12:10:0{i}.000" for i in range(3))
+    raw, ds = _pusch_raw([
+        (t0, "MCG SCell2", 11, 2000.0),   # two carriers at t0 ...
+        (t0, "MCG PCell", 98, 5000.0),    # ... the PCell carries the total
+        (t1, "MCG PCell", 98, 0.0),       # two records of one carrier at t1:
+        (t1, "MCG PCell", 98, 3000.0),    #   the one with data carries it
+        (t2, "SCG PSCell", 77, 1000.0),   # a single carrier keeps its value
+    ])
+    out = loader.normalise(raw, ds)
+    # per carrier: every row, in Mbps
+    assert out["tput_ul_cc"].tolist() == [2.0, 5.0, 0.0, 3.0, 1.0]
+    # all carriers: one sample per timestamp, on the primary carrier's row
+    assert out["tput_ul"].notna().tolist() == [False, True, False, True, True]
+    assert out["tput_ul"].dropna().tolist() == [7.0, 3.0, 1.0]
+    assert out.loc[out["tput_ul"].notna(), "pci"].tolist() == [98, 98, 77]
+
+
+def test_uplink_sum_keeps_two_phones_at_the_same_instant_apart():
+    t0 = "2026-07-30 12:10:00.000"
+    raw, ds = _pusch_raw([(t0, "MCG PCell", 98, 4000.0), (t0, "MCG PCell", 98, 6000.0)])
+    raw["Serial Number"] = ["PHONE_A", "PHONE_B"]
+    out = loader.normalise(raw, ds)
+    assert out["tput_ul"].tolist() == [4.0, 6.0]
+
+
+def test_downlink_throughput_metrics_come_from_separate_exports(fixture_dir, cache_dir):
+    frame = loader.load(fixture_dir, ["lte_pdsch_pc", "lte_pdsch_agg"], cache_dir)
+    per_carrier = frame[frame["source"] == "lte_pdsch_pc"]
+    aggregated = frame[frame["source"] == "lte_pdsch_agg"]
+    assert per_carrier["tput_dl_cc"].notna().any() and per_carrier["tput_dl"].isna().all()
+    assert aggregated["tput_dl"].notna().any() and aggregated["tput_dl_cc"].isna().all()
+    # the aggregated export supplies throughput only: its MCS and BLER would
+    # count every downlink sample twice
+    assert aggregated[["mcs", "bler"]].isna().all().all()
+    # kbps in the export, Mbps on screen
+    assert frame[["tput_dl", "tput_dl_cc"]].max().max() <= 90.0
+    assert "throughput" not in frame.columns
+
+
+def test_subframe_usage_is_a_percentage_and_links_the_two_rb_metrics():
+    raw, ds = _pusch_raw([("2026-07-30 12:10:00.000", "MCG PCell", 98, 4000.0)])
+    raw["PUSCH Avg RBs per Slot"] = 8.0
+    raw["PUSCH Avg RBs all Slots"] = 2.0
+    out = loader.normalise(raw, ds)
+    assert out["sf_usage"].tolist() == [25.0]
+    # RBs over all subframes = RBs per used subframe x usage
+    assert out["rb_occ"].iloc[0] == out["rb"].iloc[0] * out["sf_usage"].iloc[0] / 100.0
+
+
+def test_subframe_usage_is_loaded_for_both_directions(fixture_dir, cache_dir):
+    frame = loader.load(fixture_dir, ["lte_pdsch_pc", "lte_pusch_pc"], cache_dir)
+    usage = frame["sf_usage"].dropna()
+    assert set(frame.loc[usage.index, "link"].unique()) == {"DL", "UL"}
+    assert usage.between(0.0, 100.0).all() and usage.max() > 1.0
+
+
+def test_bler_is_a_percentage(fixture_dir, cache_dir):
+    """The exports log BLER as a 0-1 fraction; the metric's unit is percent."""
+    from qpviz.schema import METRICS
+
+    assert METRICS["bler"].unit == "%"
+    ds = DATASETS_BY_KEY["lte_pdsch_pc"]
+    raw = pd.DataFrame({
+        "Time": ["2026-07-30 12:10:00.000", "2026-07-30 12:10:01.000"],
+        "Collection": "Campus_walk",
+        "DL EARFCN": 8665,
+        "BLER": [0.024, 1.0],
+    })
+    assert loader.normalise(raw, ds)["bler"].tolist() == [2.4, 100.0]
+    frame = loader.read_dataset(fixture_dir, ds, cache_dir)
+    assert frame["bler"].max() > 1.0 and frame["bler"].max() <= 30.0

@@ -33,11 +33,12 @@ METRIC_RANGES = {
     "rssi": (-100.0, -55.0),
     "sinr": (-8.0, 25.0),
     "mcs": (0.0, 28.0),
-    "throughput": (0.0, 90000.0),
-    "bler": (0.0, 30.0),
-    "cqi": (0.0, 15.0),
-    "tx_power": (-10.0, 23.0),
-    "pathloss": (80.0, 150.0),
+    # the three throughput metrics read from a raw column, in kbps
+    "tput_dl": (0.0, 90000.0),
+    "tput_dl_cc": (0.0, 90000.0),
+    "tput_ul_cc": (0.0, 90000.0),
+    "sf_usage": (0.0, 1.0),  # the exports give sub-frame usage as a fraction
+    "bler": (0.0, 0.3),  # the exports give BLER as a fraction
     "rb": (1.0, 25.0),      # RBs per subframe, scheduled (rb_sched_col)
     "rb_occ": (0.0, 14.0),  # RBs per subframe, all SF (rb_all_col)
 }
@@ -104,7 +105,7 @@ def write_dataset(directory: Path, ds: Dataset, rows: int = 240, seed: int = 7) 
                 row[ds.dims["ssb"]] = (i % 2) * 2
             for metric, source_col in ds.metrics.items():
                 if source_col == "@derived":
-                    continue  # spec_eff / tput_per_rb are computed, not read
+                    continue  # spec_eff is computed, not read
                 lo, hi = METRIC_RANGES[metric]
                 # every 17th row leaves the metric blank, like the real exports
                 row[source_col] = "" if i % 17 == 0 else f"{rng.uniform(lo, hi):.3f}"
@@ -132,7 +133,7 @@ def _isolated_environ():
 @pytest.fixture(scope="session")
 def fixture_dir(tmp_path_factory) -> Path:
     directory = tmp_path_factory.mktemp("qp_csv")
-    for key in ("lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pusch_pc", "lte_pucch"):
+    for key in ("lte_radio", "nr_radio", "lte_pdsch_pc", "lte_pdsch_agg", "lte_pusch_pc"):
         write_dataset(directory, DATASETS_BY_KEY[key])
     return directory
 
@@ -243,7 +244,7 @@ _SIGCAP_COLUMNS = [
     "timestamp", "latitude", "longitude", "operator", "network_type*",
     "uuid", "device_name",
     "iperf_tput_mean_mbps", "iperf_direction", "iperf_protocol",
-    "http_tput_mean_mbps", "ping_rtt_mean_ms",
+    "http_tput_mean_mbps", "http_target", "ping_rtt_mean_ms",
     "lte_primary_pci", "lte_primary_ci", "lte_primary_earfcn",
     "lte_primary_band*", "lte_primary_rsrp_dbm", "lte_primary_rsrq_db",
     "lte_primary_rssi_dbm", "lte_primary_rssnr_db", "lte_primary_cqi",
@@ -314,6 +315,11 @@ def _write_sigcap(directory, filename, workload, rows=60, seed=11, tech="LTE",
                 row["iperf_protocol"] = "TCP"
             else:
                 row["http_tput_mean_mbps"] = f"{rng.uniform(0, 3):.3f}"
+                # like the real runs: mostly POSTs (an upload), some downloads
+                row["http_target"] = (
+                    "https://example.org/releases/download/free/large"
+                    if i % 4 == 1 else "https://httpbin.org/post"
+                )
             writer.writerow(row)
     return path
 

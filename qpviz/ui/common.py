@@ -47,7 +47,7 @@ def _qp_dataset(data_dir: str, key: str) -> pd.DataFrame:
 
     ``cache_resource`` hands back the same object on each call, where
     ``cache_data`` would keep a pickled copy and unpickle a fresh one per call.
-    The tabs ask for overlapping sets of exports (Timeline reads all nine), so
+    The tabs ask for overlapping sets of exports, so
     caching per set held the same rows several times over and pushed the hosted
     app past its memory limit. Never mutate the result: ``load_frame`` always
     returns a new frame built from it.
@@ -77,7 +77,7 @@ def sigcap_traffic_ref(sigcap_dir: str, dataset_keys: Tuple[str, ...]) -> pd.Dat
     sc = loader.load_sigcap(sigcap_dir, list(dataset_keys))
     if sc.empty or "traffic" not in sc.columns:
         return sc.iloc[0:0][["time"]].assign(traffic=[])
-    keep = sc["traffic"].isin(["iperf DL", "iperf UL", "HTTP", "Ping"])
+    keep = sc["traffic"].isin(["iperf DL", "iperf UL", "HTTP DL", "HTTP UL", "Ping"])
     return sc.loc[keep, ["time", "traffic"]].reset_index(drop=True)
 
 

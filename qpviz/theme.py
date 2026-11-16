@@ -1,9 +1,8 @@
 """Colour tokens for the app.
 
 Values come from the validated reference palette: categorical hues are used in
-fixed slot order (never cycled by rank), sequential encoding is a single blue
-hue light -> dark, and diverging encoding is blue <-> red with a neutral grey
-midpoint.
+fixed slot order (never cycled by rank) and sequential encoding is a single
+blue hue light -> dark.
 """
 
 from __future__ import annotations
@@ -33,12 +32,6 @@ CATEGORICAL: Dict[str, List[str]] = {
     ],
 }
 
-#: shaded-band accents on the multi-phone timeline. Phones take the categorical
-#: slots (blue, orange, ...), so the bands use hues no phone can get: a neutral
-#: grey for "two phones active" and the yellow for "shared PCI".
-BAND_CONCURRENT: Dict[str, str] = {"light": "#6b6b6b", "dark": "#a0a0a0"}
-BAND_SHARED_PCI: Dict[str, str] = {"light": "#eda100", "dark": "#c98500"}
-
 #: used as a secondary encoding once the 8 categorical slots are exhausted
 DASHES: List[str] = ["solid", "dash", "dot", "dashdot", "longdash", "longdashdot"]
 
@@ -51,18 +44,6 @@ SEQUENTIAL_BLUE: List[str] = [
     "#256abf",
     "#1c5cab",
     "#184f95",
-    "#0d366b",
-]
-
-DIVERGING_RED_BLUE: List[str] = [
-    "#8f1f1f",
-    "#b32e2e",
-    "#d03b3b",
-    "#e57070",
-    "#c3c2b7",  # neutral midpoint
-    "#86b6ef",
-    "#3987e5",
-    "#256abf",
     "#0d366b",
 ]
 

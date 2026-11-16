@@ -81,16 +81,14 @@ def test_region_filter_and_union(frame):
     assert len(flt.apply_filters(frame, flt.Filters(regions=[far_away]))) == 0
 
 
-def test_region_can_keep_ungeolocated_rows(fixture_dir, cache_dir):
-    mixed = load(fixture_dir, ["lte_radio", "lte_pucch"], cache_dir)
-    far_away = flt.bbox_polygon(0, 1, 0, 1)
-    dropped = flt.apply_filters(mixed, flt.Filters(regions=[far_away]))
-    kept = flt.apply_filters(
-        mixed, flt.Filters(regions=[far_away], keep_ungeolocated=True)
-    )
-    assert len(dropped) == 0
-    assert len(kept) > 0
-    assert set(kept["source"].unique()) == {"lte_pucch"}
+def test_a_region_always_drops_rows_without_gps(fixture_dir, cache_dir):
+    mixed = load(fixture_dir, ["lte_radio"], cache_dir).copy()
+    no_gps = mixed.index[:20]  # e.g. samples logged before the first GPS fix
+    mixed.loc[no_gps, ["lat", "lon"]] = np.nan
+    everywhere = flt.bbox_polygon(-90, 90, -180, 180)
+    kept = flt.apply_filters(mixed, flt.Filters(regions=[everywhere]))
+    assert len(kept) == len(mixed) - len(no_gps)
+    assert not set(no_gps) & set(kept.index)
 
 
 def test_time_range_filter(frame):
@@ -122,7 +120,7 @@ def test_empty_frame_passes_through():
 def test_require_drops_rows_with_null_dimensions(fixture_dir, cache_dir):
     from qpviz.loader import load as _load
 
-    mixed = _load(fixture_dir, ["lte_radio", "lte_pucch"], cache_dir)
+    mixed = _load(fixture_dir, ["lte_radio", "nr_radio"], cache_dir)
     patched = mixed.copy()
     patched.loc[patched.index[:5], "pci"] = None
     out = flt.apply_filters(patched, flt.Filters(require=["pci"]))
@@ -142,12 +140,9 @@ def test_direction_filter(fixture_dir, cache_dir):
     assert len(flt.apply_filters(both, flt.Filters(links=["DL", "UL"]))) == len(both)
 
 
-def test_source_filter(fixture_dir, cache_dir):
-    from qpviz.loader import load as _load
-
-    both = _load(fixture_dir, ["lte_pdsch_pc", "lte_pusch_pc"], cache_dir)
-    out = flt.apply_filters(both, flt.Filters(sources=["lte_pusch_pc"]))
-    assert set(out["source"].unique()) == {"lte_pusch_pc"}
+def test_there_is_no_data_source_filter():
+    # each metric reads a fixed export, so the export is not a filter
+    assert "sources" not in flt.Filters.__dataclass_fields__
 
 
 # --------------------------------------------------------------------------- #

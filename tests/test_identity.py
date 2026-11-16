@@ -47,78 +47,11 @@ def test_available_levels_reports_only_populated_columns():
 
 
 def test_label_for():
-    assert identity.label_for("enb") == "eNB / gNB-Id"
+    assert identity.label_for("enb") == "eNB ID"
+    assert identity.label_for("sector") == "Sector ID"
+    # the NR-only SSB index is no longer a level
+    assert "ssb" not in identity.IDENTITY_LEVELS
     assert identity.label_for("nope") == "nope"
-
-
-# --------------------------------------------------------------------------- #
-# Dwell runs
-# --------------------------------------------------------------------------- #
-
-
-def test_runs_collapse_consecutive_samples_on_one_cell():
-    runs = identity.dwell_runs(_frame([7, 7, 7, 9, 9, 7]), "pci")
-    assert runs["value"].tolist() == [7, 9, 7]
-    assert runs["samples"].tolist() == [3, 2, 1]
-    assert runs["order"].tolist() == [0, 1, 2]
-
-
-def test_run_duration_covers_the_gap_to_the_next_run():
-    # 1 s sampling: three samples on cell 7 own 3 s, not 2
-    runs = identity.dwell_runs(_frame([7, 7, 7, 9]), "pci")
-    assert runs.loc[0, "duration_s"] == pytest.approx(3.0)
-    assert runs["duration_s"].sum() == pytest.approx(4.0)
-
-
-def test_elapsed_is_measured_from_each_collections_first_sample():
-    a = _frame([1, 1, 2], collection="A", start="2026-07-22 14:00:00")
-    b = _frame([5, 6], collection="B", start="2026-08-01 09:30:00")
-    runs = identity.dwell_runs(pd.concat([a, b], ignore_index=True), "pci")
-    for _, group in runs.groupby("collection"):
-        assert group["elapsed_start"].min() == pytest.approx(0.0)
-    assert set(runs["collection"]) == {"A", "B"}
-
-
-def test_a_logging_pause_splits_a_run_rather_than_stretching_it():
-    times = pd.to_datetime(
-        [
-            "2026-07-22 14:00:00",
-            "2026-07-22 14:00:01",
-            "2026-07-22 16:00:00",  # two-hour pause, same cell
-            "2026-07-22 16:00:01",
-        ]
-    )
-    frame = pd.DataFrame(
-        {"time": times, "collection": "C", "pci": pd.array([7, 7, 7, 7], dtype="Int32")}
-    )
-    runs = identity.dwell_runs(frame, "pci", gap_seconds=60)
-    assert len(runs) == 2
-    assert runs["duration_s"].max() < 10  # neither run swallows the pause
-
-
-def test_runs_ignore_null_identities_and_empty_input():
-    frame = _frame([1, None, 1])
-    runs = identity.dwell_runs(frame, "pci")
-    assert runs["samples"].sum() == 2
-    assert identity.dwell_runs(pd.DataFrame(), "pci").empty
-    assert identity.dwell_runs(frame, "not_a_column").empty
-
-
-def test_order_identities_by_first_seen_dwell_and_value():
-    frame = _frame([9, 9, 9, 9, 3, 3, 7])
-    runs = identity.dwell_runs(frame, "pci")
-    assert identity.order_identities(runs, "first seen") == [9, 3, 7]
-    assert identity.order_identities(runs, "dwell") == [9, 3, 7]
-    assert identity.order_identities(runs, "value") == [3, 7, 9]
-
-
-def test_order_identities_limit_keeps_the_longest_held_in_requested_order():
-    frame = _frame([1, 2, 2, 2, 3, 3])
-    runs = identity.dwell_runs(frame, "pci")
-    # 1 is seen first but held shortest, so a limit of 2 drops it
-    assert identity.order_identities(runs, "first seen", limit=2) == [2, 3]
-    assert identity.order_identities(runs, "first seen") == [1, 2, 3]
-    assert identity.order_identities(pd.DataFrame(), "dwell") == []
 
 
 # --------------------------------------------------------------------------- #
@@ -189,14 +122,7 @@ def test_scell_rows_are_excluded_from_identity_analysis(fixture_dir, cache_dir):
     assert set(serving["cell_type"].dropna().unique()) == {"MCG PCell"}
 
 
-def test_dwell_and_hierarchy_agree_on_total_time(fixture_dir, cache_dir):
-    frame = identity.serving_only(load(fixture_dir, ["lte_radio"], cache_dir))
-    runs = identity.dwell_runs(frame, "pci")
-    table = identity.hierarchy(frame, ["enb", "sector", "pci"])
-    assert runs["duration_s"].sum() == pytest.approx(table["dwell_s"].sum(), rel=1e-6)
-
-
-def test_elapsed_excludes_logging_pauses():
+def test_time_held_excludes_logging_pauses():
     # two minutes of samples either side of a two-hour pause
     first = pd.date_range("2026-07-22 14:00:00", periods=60, freq="1s")
     second = pd.date_range("2026-07-22 16:00:00", periods=60, freq="1s")
@@ -207,33 +133,22 @@ def test_elapsed_excludes_logging_pauses():
             "pci": pd.array([1] * 60 + [2] * 60, dtype="Int32"),
         }
     )
-    runs = identity.dwell_runs(frame, "pci")
+    table = identity.hierarchy(frame, ["pci"])
     wall = (frame["time"].max() - frame["time"].min()).total_seconds()
     assert wall == pytest.approx(7259.0)
-    # active time is the 120 s actually logged, not the two-hour span
-    assert runs["elapsed_end"].max() == pytest.approx(120.0)
-    assert runs["duration_s"].sum() == pytest.approx(120.0)
-
-
-def test_duration_is_the_time_the_cell_owned_not_the_wall_clock_span():
-    frame = _frame([1, 1, 2], step_s=2.0)
-    runs = identity.dwell_runs(frame, "pci")
-    assert runs.loc[0, "duration_s"] == pytest.approx(4.0)
-    assert runs.loc[0, "end"] - runs.loc[0, "start"] == pd.Timedelta(seconds=4)
-    assert runs["elapsed_start"].tolist() == pytest.approx([0.0, 4.0])
+    # the time held is the 120 s actually logged, not the two-hour span
+    assert table["dwell_s"].sum() == pytest.approx(120.0)
+    assert table["dwell_s"].tolist() == pytest.approx([60.0, 60.0])
 
 
 @pytest.mark.parametrize("unit", ["ns", "us", "ms", "s"])
-def test_dwell_is_independent_of_the_datetime_resolution(unit):
+def test_time_held_is_independent_of_the_datetime_resolution(unit):
     """pandas 2 stores datetimes as ns and pandas 3 as us - durations must not
     change by a factor of a thousand between them."""
     frame = _frame([1, 1, 1, 2, 2], step_s=2.0)
     frame["time"] = frame["time"].astype(f"datetime64[{unit}]")
-    runs = identity.dwell_runs(frame, "pci")
-    assert runs["duration_s"].tolist() == pytest.approx([6.0, 4.0])
-    assert runs["elapsed_end"].max() == pytest.approx(10.0)
-    table = identity.hierarchy(frame, ["pci"])
-    assert table["dwell_s"].sum() == pytest.approx(10.0)
+    table = identity.hierarchy(frame, ["pci"]).set_index("pci")["dwell_s"]
+    assert table[1] == pytest.approx(6.0) and table[2] == pytest.approx(4.0)
 
 
 def test_loader_pins_the_time_resolution(fixture_dir, cache_dir):
@@ -277,14 +192,20 @@ def test_relationships_pairs_each_level_with_its_prefix():
 
 
 def test_relationship_label_names_the_immediate_parent():
-    assert identity.relationship_label(("enb", "sector"), "pci") == "PCI per Sector Id"
+    assert identity.relationship_label(("enb", "sector"), "pci") == "PCIs seen per sector"
+    assert identity.relationship_label(("enb",), "sector") == "Sectors seen per eNB"
+
+
+def test_parents_label_says_what_a_bar_counts():
+    assert identity.parents_label(("enb",)) == "Number of eNBs"
+    assert identity.parents_label(("enb", "sector")) == "Number of sectors"
 
 
 def test_fan_out_counts_one_row_per_parent():
     counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
-    sectors = counts[counts["relationship"] == "Sector Id per eNB / gNB-Id"]
+    sectors = counts[counts["relationship"] == "Sectors seen per eNB"]
     assert sorted(sectors["children"]) == [1, 3]
-    pcis = counts[counts["relationship"] == "PCI per Sector Id"]
+    pcis = counts[counts["relationship"] == "PCIs seen per sector"]
     assert sorted(pcis["children"]) == [1, 1, 1, 2]
     assert set(counts["group"]) == {"All"}
 
@@ -299,26 +220,13 @@ def test_sector_ids_are_scoped_to_their_enb():
         }
     )
     counts = identity.fan_out_counts(frame, ["enb", "sector", "pci"])
-    pcis = counts[counts["relationship"] == "PCI per Sector Id"]
+    pcis = counts[counts["relationship"] == "PCIs seen per sector"]
     assert sorted(pcis["children"]) == [2, 2]
 
 
 def test_fan_out_counts_can_split_the_population():
     counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector"], group_by="tech")
     assert set(counts["group"]) == {"LTE", "NR"}
-
-
-def test_fan_out_summary_columns_and_values():
-    summary = identity.fan_out_summary(
-        identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
-    )
-    assert list(summary.columns) == [
-        "Relationship", "Group", "Parents", "Children", "Min", "Median", "P90", "Max", "Mean"
-    ]
-    sectors = summary[summary["Relationship"] == "Sector Id per eNB / gNB-Id"].iloc[0]
-    assert sectors["Parents"] == 2 and sectors["Children"] == 4
-    assert sectors["Min"] == 1 and sectors["Max"] == 3
-    assert sectors["Mean"] == pytest.approx(2.0)
 
 
 def test_fan_out_distribution_counts_parents_and_shares():
@@ -333,150 +241,124 @@ def test_fan_out_distribution_counts_parents_and_shares():
 def test_fan_out_handles_too_few_levels_and_empty_frames():
     assert identity.fan_out_counts(_tree_frame(), ["enb"]).empty
     assert identity.fan_out_counts(pd.DataFrame(), ["enb", "sector"]).empty
-    assert identity.fan_out_summary(pd.DataFrame()).empty
     assert identity.fan_out_distribution(pd.DataFrame()).empty
 
 
 def test_fan_out_on_the_synthetic_export(fixture_dir, cache_dir):
     frame = identity.serving_only(load(fixture_dir, ["lte_radio"], cache_dir))
-    summary = identity.fan_out_summary(
-        identity.fan_out_counts(frame, ["enb", "sector", "pci"])
-    )
-    assert not summary.empty
-    assert (summary["Min"] >= 1).all()
-    assert (summary["Median"] <= summary["Max"]).all()
+    counts = identity.fan_out_counts(frame, ["enb", "sector", "pci"])
+    assert not counts.empty
+    assert (counts["children"] >= 1).all()
 
 
 def test_relationships_keep_tree_order_not_alphabetical():
     counts = identity.fan_out_counts(_tree_frame(), ["enb", "sector", "pci"])
-    order = identity.relationship_order(counts)
+    order = list(counts["relationship"].cat.categories)
     assert order == [
-        "Sector Id per eNB / gNB-Id",  # the outer pair leads
-        "PCI per Sector Id",
-        "PCI per eNB / gNB-Id",
+        "Sectors seen per eNB",  # the outer pair leads
+        "PCIs seen per sector",
+        "PCIs seen per eNB",
     ]
     assert sorted(order) != order  # i.e. this is not alphabetical
-    assert identity.fan_out_summary(counts)["Relationship"].tolist() == order
-    assert identity.relationship_order(pd.DataFrame()) == []
 
 
 # --------------------------------------------------------------------------- #
-# Serving-cell change timeline: segments per Cell Id, coloured by eNB change
+# Paths, the per-eNB summary and the per-network summary
 # --------------------------------------------------------------------------- #
 
 
-def _sframe(enb, cell_id, pci=None, sector=None, collection="C",
-            start="2026-07-22 14:00:00", step_s=1.0):
-    n = len(enb)
-    times = pd.date_range(start, periods=n, freq=pd.Timedelta(seconds=step_s))
-    data = {
-        "time": times,
-        "collection": collection,
-        "enb": pd.array(enb, dtype="Int64"),
-        "cell_id": pd.array(cell_id, dtype="Int64"),
-        "cell_type": "MCG PCell",
-    }
-    data["pci"] = pd.array(pci if pci is not None else [1] * n, dtype="Int32")
-    if sector is not None:
-        data["sector"] = pd.array(sector, dtype="Int32")
-    return pd.DataFrame(data)
-
-
-def test_segments_break_on_cell_id_and_classify_the_change():
-    # eNB/cell: (1,10)(1,10) -> (1,11) -> (2,20) -> (2,20)
-    #   seg1 start, seg2 same eNB new cell = "cell", seg3 new eNB = "enb"
-    frame = _sframe([1, 1, 1, 2, 2], [10, 10, 11, 20, 20])
-    segs = identity.serving_segments(frame)
-    assert segs["cell_id"].tolist() == [10, 11, 20]
-    assert segs["enb"].tolist() == [1, 1, 2]
-    assert segs["change"].tolist() == ["start", "cell", "enb"]
-    assert segs["samples"].tolist() == [2, 1, 2]
-
-
-def test_segment_summary_counts_changes_and_rates():
-    frame = _sframe([1, 1, 1, 2, 2], [10, 10, 11, 20, 20],
-                    pci=[100, 100, 101, 200, 200])
-    summ = identity.segment_summary(identity.serving_segments(frame))
-    row = summ.iloc[0]
-    assert row["segments"] == 3
-    assert row["cell_changes"] == 2       # two new Cell Ids after the first
-    assert row["enb_changes"] == 1        # one of them was also a new eNB
-    assert row["n_enb"] == 2 and row["n_cell"] == 3 and row["n_pci"] == 3
-
-
-def test_segments_are_per_collection():
-    a = _sframe([1, 1, 2], [10, 10, 20], collection="A")
-    b = _sframe([5, 6], [50, 60], collection="B", start="2026-07-22 15:00:00")
-    segs = identity.serving_segments(pd.concat([a, b], ignore_index=True))
-    # each collection starts its own segment chain at elapsed 0
-    for _, g in segs.groupby("collection"):
-        assert g["elapsed_start"].min() == pytest.approx(0.0)
-        assert g["change"].iloc[0] == "start"
-
-
-def test_serving_segments_and_summary_empty_on_empty_input():
-    assert identity.serving_segments(pd.DataFrame()).empty
-    assert identity.segment_summary(pd.DataFrame()).empty
-
-
-# --------------------------------------------------------------------------- #
-# Sectors per eNB - the per-sample count the map colours by
-# --------------------------------------------------------------------------- #
-
-
-def _sector_frame():
-    """eNB 10 carries sectors 1 and 2, eNB 11 only sector 1, eNB 12 never
-    decoded a sector, and one row has no eNB at all."""
+def _network_frame():
+    """D2C: eNB 10 with sectors 1, 2, 3 (sector 3 shows two PCIs) and eNB 12
+    with one sector. Terrestrial: eNB 500 with two sectors. One sample a
+    second, so every path is held for about its number of samples."""
+    rows = [
+        ("D2C", 12, 9, 900), ("D2C", 12, 9, 900), ("D2C", 12, 9, 900),
+        ("D2C", 10, 1, 100), ("D2C", 10, 2, 200),
+        ("D2C", 10, 3, 300), ("D2C", 10, 3, 301),
+        ("Terrestrial", 500, 1, 7), ("Terrestrial", 500, 2, 8),
+    ]
     return pd.DataFrame(
         {
-            "enb": pd.array([10, 10, 10, 11, 12, None], dtype="Int64"),
-            "sector": pd.array([1, 2, 2, 1, None, 3], dtype="Int32"),
+            "time": pd.date_range("2026-07-22 14:00:00", periods=len(rows), freq="1s"),
+            "collection": "C",
+            "network": pd.Categorical([r[0] for r in rows]),
+            "enb": pd.array([r[1] for r in rows], dtype="Int64"),
+            "sector": pd.array([r[2] for r in rows], dtype="Int32"),
+            "pci": pd.array([r[3] for r in rows], dtype="Int32"),
         }
     )
 
 
-def test_sectors_per_enb_counts_distinct_sectors():
-    counts = identity.sectors_per_enb(_sector_frame())
-    assert counts.to_dict() == {10: 2, 11: 1}  # eNB 12 has no sector, so no row
+def test_paths_lists_every_path_once_per_network():
+    table = identity.paths(_network_frame())
+    assert list(table.columns) == ["network", "enb", "sector", "pci", "dwell_s", "samples"]
+    assert len(table) == 7
+    assert set(table["network"]) == {"D2C", "Terrestrial"}
+    assert table["samples"].sum() == 9
+    held = table.set_index(["enb", "sector", "pci"])["samples"]
+    assert held[(12, 9, 900)] == 3
 
 
-def test_sectors_per_enb_is_empty_without_both_columns():
-    assert identity.sectors_per_enb(pd.DataFrame()).empty
-    assert identity.sectors_per_enb(pd.DataFrame({"enb": [1]})).empty
-    assert identity.sectors_per_enb(pd.DataFrame({"sector": [1]})).empty
+def test_paths_needs_the_whole_path():
+    frame = _network_frame().drop(columns=["sector"])
+    assert identity.paths(frame).empty
+    assert identity.paths(pd.DataFrame()).empty
+    # a row with no sector cannot be placed
+    partial = _network_frame()
+    partial.loc[0:2, "sector"] = pd.NA
+    assert 12 not in set(identity.paths(partial)["enb"])
 
 
-def test_with_sectors_per_enb_paints_the_count_onto_every_row():
-    out = identity.with_sectors_per_enb(_sector_frame())
-    counted = out[identity.SECTORS_PER_ENB_COL]
-    assert counted.tolist()[:4] == [2.0, 2.0, 2.0, 1.0]
-    # an eNB whose sector never decoded, and a row with no eNB, stay blank
-    # rather than being counted as zero
-    assert counted.isna().tolist()[4:] == [True, True]
+def test_paths_works_without_a_network_column():
+    table = identity.paths(_network_frame().drop(columns=["network"]))
+    assert list(table.columns) == ["enb", "sector", "pci", "dwell_s", "samples"]
+    assert len(table) == 7
 
 
-def test_with_sectors_per_enb_accepts_counts_from_another_population():
-    """The map counts over the filtered set and paints the unregioned points,
-    so an eNB keeps its colour whether or not the region is applied."""
-    counts = identity.sectors_per_enb(_sector_frame())
-    subset = _sector_frame().iloc[[3]]  # only eNB 11, whose own count is 1
-    assert identity.with_sectors_per_enb(subset, counts)[
-        identity.SECTORS_PER_ENB_COL
-    ].tolist() == [1.0]
-    wider = identity.with_sectors_per_enb(subset, pd.Series({11: 7}, dtype="int64"))
-    assert wider[identity.SECTORS_PER_ENB_COL].tolist() == [7.0]
+def test_enb_summary_counts_sectors_and_pcis_per_enb():
+    table = identity.paths(_network_frame())
+    d2c = identity.enb_summary(table[table["network"] == "D2C"])
+    assert list(d2c.columns) == ["enb", "sectors", "pcis", "minutes"]
+    # most sectors first, although eNB 12 was held longest
+    assert d2c["enb"].tolist() == [10, 12]
+    assert d2c["sectors"].tolist() == [3, 1]
+    assert d2c["pcis"].tolist() == [4, 1]
+    assert d2c["minutes"].sum() == pytest.approx(
+        table.loc[table["network"] == "D2C", "dwell_s"].sum() / 60
+    )
 
 
-def test_with_sectors_per_enb_leaves_frames_without_enb_alone():
-    frame = pd.DataFrame({"pci": [1, 2]})
-    assert identity.SECTORS_PER_ENB_COL not in identity.with_sectors_per_enb(frame)
-    assert identity.with_sectors_per_enb(pd.DataFrame()).empty
+def test_enb_summary_can_order_by_enb_id():
+    table = identity.paths(_network_frame())
+    d2c = table[table["network"] == "D2C"]
+    assert identity.enb_summary(d2c, "enb")["enb"].tolist() == [10, 12]
+    # ties on sectors fall back to PCIs, then to the eNB ID
+    tie = pd.DataFrame(
+        {
+            "enb": [7, 5, 6, 6], "sector": [1, 1, 1, 1], "pci": [1, 1, 1, 2],
+            "dwell_s": [1.0] * 4, "samples": [1] * 4,
+        }
+    )
+    assert identity.enb_summary(tie)["enb"].tolist() == [6, 5, 7]
+    assert set(identity.ENB_ORDERS) == {"sectors", "enb"}  # never by time held
+    assert identity.enb_summary(pd.DataFrame()).empty
 
 
-def test_sectors_per_enb_on_the_real_fixture(fixture_dir, cache_dir):
-    frame = load(fixture_dir, ["lte_radio"], cache_dir)
-    counts = identity.sectors_per_enb(frame)
-    assert not counts.empty and (counts >= 1).all()
-    painted = identity.with_sectors_per_enb(frame)
-    both = frame["enb"].notna() & frame["sector"].notna()
-    assert painted.loc[both, identity.SECTORS_PER_ENB_COL].notna().all()
+def test_network_summary_compares_the_networks():
+    summary = identity.network_summary(identity.paths(_network_frame()))
+    by_net = summary.set_index("network")
+    d2c, terr = by_net.loc["D2C"], by_net.loc["Terrestrial"]
+    assert (d2c["enbs"], d2c["sectors"], d2c["pcis"]) == (2, 4, 5)
+    assert d2c["sectors_per_enb_median"] == 2.0 and d2c["sectors_per_enb_max"] == 3
+    assert d2c["pcis_per_sector_median"] == 1.0 and d2c["pcis_per_sector_max"] == 2
+    assert (terr["enbs"], terr["sectors"], terr["pcis"]) == (1, 2, 2)
+    assert terr["sectors_per_enb_max"] == 2 and terr["pcis_per_sector_max"] == 1
+    assert identity.network_summary(pd.DataFrame()).empty
+
+
+def test_fan_out_counts_split_by_network_from_the_paths_table():
+    table = identity.paths(_network_frame())
+    counts = identity.fan_out_counts(table, identity.TREE_LEVELS, group_by="network")
+    sectors = counts[counts["relationship"] == "Sectors seen per eNB"]
+    assert sorted(sectors.loc[sectors["group"] == "D2C", "children"]) == [1, 3]
+    assert sorted(sectors.loc[sectors["group"] == "Terrestrial", "children"]) == [2]
