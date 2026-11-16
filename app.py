@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from qpviz import filters as flt, loader, mapview, satellites
+from qpviz import filters as flt, loader, satellites
 from qpviz.schema import (
     ALL_DATASETS_BY_KEY,
     DATASETS_BY_KEY,
@@ -172,7 +172,7 @@ with st.sidebar:
         st.stop()
 
     st.divider()
-    st.markdown("#### 1 · Data source")
+    st.markdown("#### 1 · Data and metric")
 
     # QP (Qualipoc phone) vs PRISM (SDR scanner) are genuinely different
     # measurements, so they get their own top-level filter. Empty means pool all
@@ -185,8 +185,8 @@ with st.sidebar:
             key="f_providers",
             help="QP is the Qualipoc phone (connected-mode logs, one serving "
                  "cell); PRISM is the SDR scanner (every audible cell, signal "
-                 "only); SigCap runs on the same phone and adds app-layer "
-                 "iperf/HTTP throughput and ping RTT. Leave empty to pool all; "
+                 "only); SigCap runs on the same phone and adds ping RTT. "
+                 "Leave empty to pool all; "
                  "split CDF/Statistics by “Measurement source” to compare them.",
             placeholder=f"All ({len(providers_present)})",
         )
@@ -200,8 +200,8 @@ with st.sidebar:
         list(TECHNOLOGIES),
         horizontal=True,
         key="tech_choice",
-        help="Which radio technology to read. The matching exports are selected "
-             "automatically from the metric you pick below.",
+        help="Which radio technology to read. Each metric is read from one "
+             "fixed export per technology, named above the plots.",
     )
     tech_value = TECHNOLOGIES[tech]
 
@@ -252,11 +252,6 @@ with st.sidebar:
         d.key for d in sigcap_datasets_for(metric, tech_value, available=sigcap_in_tech)
     ]
     reading = qp_source_keys + prism_source_keys + sigcap_source_keys
-    st.caption(
-        "Reading "
-        + ", ".join(f"**{ALL_DATASETS_BY_KEY[k].label}**" for k in reading)
-        + ". Narrow this with the Direction and Data source filters below."
-    )
 
 _parts = []
 if qp_source_keys:
@@ -291,34 +286,21 @@ with st.sidebar:
     )
     step0 = flt.apply_filters(frame, flt.Filters(links=links))
 
-    _traffic_present = loader.options(step0, "traffic")
-    traffic_options = (
-        [t for t in TRAFFIC_ORDER if t in _traffic_present]
-        + [t for t in _traffic_present if t not in TRAFFIC_ORDER]
-    )
+    _traffic_present = set(loader.options(step0, "traffic"))
+    traffic_options = [t for t in TRAFFIC_ORDER if t in _traffic_present]
     traffic = st.multiselect(
         "Traffic",
         options=traffic_options,
         default=[],
         key="f_traffic",
-        help="Traffic type read from the session name (iperf DL/UL, Ookla, Ping, "
-             "HTTP, Idle). 'Mixed' = several traffic types in one session; a bare "
-             "'iperf' has no direction in its name (use Direction). Empty = all.",
-        placeholder=f"All ({len(traffic_options)})",
+        help="The traffic the phone was carrying: idle, an HTTP or iperf "
+             "transfer in one direction, or Mixed, which is a row of a session "
+             "that ran several tests and cannot be put down to one of them. "
+             "Leave empty for everything, which also includes ping-only, "
+             "Ookla and unlabelled sessions.",
+        placeholder="All",
     )
     step0 = flt.apply_filters(step0, flt.Filters(traffic=traffic))
-
-    source_options = [k for k in reading if k in set(step0["source"].dropna())]
-    sources = st.multiselect(
-        "Data source",
-        options=source_options,
-        default=[],
-        format_func=lambda k: ALL_DATASETS_BY_KEY[k].label,
-        key="f_sources",
-        help="Leave empty to include all of the exports listed above.",
-        placeholder=f"All ({len(source_options)})",
-    )
-    step0 = flt.apply_filters(step0, flt.Filters(sources=sources))
 
     collections = multiselect_all(
         "Collections", loader.options(step0, "collection"), "f_collections"
@@ -363,32 +345,9 @@ with st.sidebar:
     # empty shared set has to show no data, not all of it.
     _NO_PCI = [-1]
     effective_pcis = pcis or (shared_pcis or _NO_PCI if shared_mode else [])
-
-    drop_unknown = st.checkbox(
-        "Require a known PCI and carrier",
-        value=True,
-        key="f_drop_unknown",
-        help=(
-            "Some exports (notably LTE Radio Neighbor) leave PCI and the "
-            "carrier blank; those rows would otherwise collapse into one "
-            "large “n/a” curve."
-        ),
-    )
-
-    st.markdown("**Region**")
-    n_regions = len(st.session_state["regions"])
-    cols = st.columns([3, 2])
-    cols[0].caption(
-        f"{n_regions} shape(s) drawn" if n_regions else "Draw on the map tab to limit by area"
-    )
-    if cols[1].button("Clear", disabled=not n_regions, width="stretch"):
-        st.session_state["regions"] = []
-        st.rerun()
-    keep_ungeo = st.checkbox(
-        "Keep rows without GPS",
-        value=False,
-        help="LTE PUCCH has no GPS columns; enable to keep such rows when a region is drawn.",
-    )
+    # Rows whose PCI or carrier never decoded are always left out: they cannot
+    # be put down to a cell, and would collapse into one large "n/a" curve.
+    _REQUIRE = ("pci", "freq")
 
     # ------------------------------------------------------------------- #
     # Time window
@@ -402,11 +361,10 @@ with st.sidebar:
     _time_scope = flt.apply_filters(
         frame,
         flt.Filters(
-            links=links, sources=sources, collections=collections, traffic=traffic,
+            links=links, collections=collections, traffic=traffic,
             bands=bands, freqs=freqs, pcis=effective_pcis,
             regions=st.session_state["regions"],
-            require=("pci", "freq") if drop_unknown else (),
-            keep_ungeolocated=keep_ungeo,
+            require=_REQUIRE,
         ),
     )
     _tt = pd.to_datetime(_time_scope["time"], errors="coerce").dropna()
@@ -500,30 +458,11 @@ with st.sidebar:
     st.session_state["_last_time_range"] = _wr
 
     st.divider()
-    with st.expander("Display options"):
-        min_samples = st.number_input(
-            "Min samples per curve", min_value=1, max_value=100000, value=30, step=10
-        )
-        max_curve_points = st.number_input(
-            "Max points per curve", min_value=100, max_value=100000, value=2000, step=500
-        )
-        max_map_points = st.number_input(
-            "Max points on map", min_value=200, max_value=20000, value=3000, step=500
-        )
-        map_scale = st.selectbox(
-            "Map colour scale", ["diverging", "sequential"], index=0
-        )
-        carto_key = mapview.carto_api_key(st.secrets)
-        tiles = st.selectbox(
-            "Basemap",
-            mapview.tile_choices(carto_key),
-            # Light CARTO when a key is configured, otherwise OpenStreetMap.
-            index=1 if carto_key else 0,
-            help=None if carto_key else (
-                "The CARTO Light/Dark basemaps need a free API key: set "
-                "CARTO_API_KEY in .streamlit/secrets.toml or the environment."
-            ),
-        )
+    min_samples = st.number_input(
+        "Min samples per curve", min_value=1, max_value=100000, value=30, step=10,
+        help="Groups with fewer samples than this are left out of the CDF "
+             "curves and the Statistics table.",
+    )
 
     st.divider()
     with st.expander("🛰️ Satellite visibility (D2C)"):
@@ -624,7 +563,6 @@ unregioned = flt.apply_filters(
     frame,
     flt.Filters(
         links=links,
-        sources=sources,
         collections=collections,
         traffic=traffic,
         bands=bands,
@@ -632,14 +570,14 @@ unregioned = flt.apply_filters(
         pcis=effective_pcis,
         time_range=time_range,
         metric=metric,
-        require=("pci", "freq") if drop_unknown else (),
+        require=_REQUIRE,
     ),
 )
 # ...and the region on top. With no region drawn this is `unregioned` itself,
 # not a second copy of it.
 active = flt.apply_filters(
     unregioned,
-    flt.Filters(regions=st.session_state["regions"], keep_ungeolocated=keep_ungeo),
+    flt.Filters(regions=st.session_state["regions"]),
 )
 del frame  # everything below reads `active` / `unregioned`
 
@@ -702,6 +640,16 @@ if active.empty:
     st.info("No samples match the current filters.")
     st.stop()
 
+# Which export the numbers on screen come from - fixed per metric, so it is
+# stated with the plots rather than offered as a filter.
+_shown = set(active["source"].dropna().unique())
+reading_note = (
+    f"{metric_meta.label} is read from "
+    + ", ".join(f"**{ALL_DATASETS_BY_KEY[k].label}**" for k in reading if k in _shown)
+    + "."
+)
+st.caption(reading_note)
+
 tab_labels = ["🗺️ Map", "📈 CDF curves", "🛰️ Cell identity", "📊 Statistics", "🧾 Data"]
 if sat_enable:
     tab_labels.insert(1, "🛰️ D2C visibility")
@@ -731,17 +679,10 @@ ctx = Ctx(
     bands=bands,
     freqs=freqs,
     effective_pcis=effective_pcis,
-    drop_unknown=drop_unknown,
-    keep_ungeo=keep_ungeo,
     time_range=time_range,
     active=active,
     unregioned=unregioned,
     min_samples=min_samples,
-    max_curve_points=max_curve_points,
-    max_map_points=max_map_points,
-    map_scale=map_scale,
-    tiles=tiles,
-    carto_key=carto_key,
     tle_dir=tle_dir,
     tle_fp=tle_fp,
     sat_mask=sat_mask,

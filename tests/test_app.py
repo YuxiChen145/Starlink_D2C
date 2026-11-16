@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+from qpviz import schema  # noqa: E402
 from tests.conftest import open_tab  # noqa: E402
 
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
@@ -131,7 +133,7 @@ def test_metric_with_both_directions_defaults_to_downlink(
     app = _run(fixture_dir)
     _assert_clean(app)
     app.radio(key="tech_choice").set_value("LTE").run()
-    app.selectbox(key="metric_choice").set_value("throughput").run()
+    app.selectbox(key="metric_choice").set_value("mcs").run()
     _assert_clean(app)
 
     direction = app.multiselect(key="f_links_DL-UL")
@@ -144,22 +146,39 @@ def test_metric_with_both_directions_defaults_to_downlink(
     assert int(app.metric[0].value.replace(",", "")) > downlink_only
 
 
-def test_data_source_filter_narrows_the_pooled_exports(
-    fixture_dir, monkeypatch, tmp_path
+def _captions(app):
+    return [c.value for c in app.caption]
+
+
+@pytest.mark.parametrize(
+    "metric, export, direction",
+    [
+        ("rsrp", "LTE Radio [connected]", ["DL"]),
+        ("tput_dl", "LTE PDSCH [aggregated]", ["DL"]),
+        ("tput_dl_cc", "LTE PDSCH [per-carrier]", ["DL"]),
+        ("tput_ul", "LTE PUSCH [per-carrier]", ["UL"]),
+        ("tput_ul_cc", "LTE PUSCH [per-carrier]", ["UL"]),
+        ("bler", "LTE PDSCH [per-carrier]", ["DL"]),
+        ("sf_usage", "LTE PDSCH [per-carrier]", ["DL", "UL"]),
+    ],
+)
+def test_each_metric_reads_one_fixed_export_named_with_the_plots(
+    fixture_dir, monkeypatch, tmp_path, metric, export, direction
 ):
+    """There is no Data source filter: the metric decides the export, and the
+    page says which one it is."""
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
     app.radio(key="tech_choice").set_value("LTE").run()
-    app.selectbox(key="metric_choice").set_value("throughput").run()
+    app.selectbox(key="metric_choice").set_value(metric).run()
     _assert_clean(app)
 
-    sources = app.multiselect(key="f_sources")
-    # the DL default leaves only the PDSCH export in play; options render as labels
-    assert sources.options == ["LTE PDSCH [per-carrier]"]
-    sources.select("lte_pdsch_pc").run()
-    _assert_clean(app)
-    assert app.multiselect(key="f_sources").value == ["lte_pdsch_pc"]
+    assert "f_sources" not in app.session_state
+    assert "Data source" not in [m.label for m in app.multiselect]
+    label = schema.METRICS[metric].label
+    assert f"{label} is read from **{export}**." in _captions(app)
+    assert app.multiselect(key=f"f_links_{'-'.join(direction)}").options == direction
 
 
 REAL_DATA = Path(__file__).resolve().parents[1] / "QP CSV"
@@ -172,7 +191,7 @@ def test_app_starts_against_the_real_export():
     assert int(app.metric[0].value.replace(",", "")) > 0
 
 
-def test_cell_identity_tab_renders_both_views(fixture_dir, monkeypatch, tmp_path):
+def test_cell_identity_opens_on_the_hierarchy(fixture_dir, monkeypatch, tmp_path):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
@@ -182,30 +201,80 @@ def test_cell_identity_tab_renders_both_views(fixture_dir, monkeypatch, tmp_path
     open_tab(app, "Cell identity")
     _assert_clean(app)
 
-    # timeline is the default view, with its four summary metrics
+    # the node tree leads, the counts behind it come second
     view = app.radio(key="identity_view")
-    assert view.value == "Timeline"
-    assert any("Distinct" in m.label for m in app.metric)
+    assert view.options == ["Hierarchy", "Structure"]
+    assert view.value == "Hierarchy"
 
-    level = app.selectbox(key="identity_level")
-    # technology is "All", so the NR-only SSB index is offered too
-    assert level.options == ["eNB / gNB-Id", "Sector Id", "PCI", "SSB Index"]
-    level.set_value("pci").run()
+    # D2C and terrestrial are separate trees, D2C first
+    network = app.radio(key="identity_network")
+    assert network.options == ["D2C", "Terrestrial"]
+    assert network.value == "D2C"
+
+    # the levels are fixed to eNB, sector, PCI: nothing to pick
+    assert not [m for m in app.multiselect if "Levels" in m.label]
+    assert not [n for n in app.number_input if n.label in ("Max leaves drawn", "Columns")]
+
+    # the tab opens on the per-eNB summary
+    summary = next(
+        d.value for d in app.dataframe if "Sectors seen" in list(d.value.columns)
+    )
+    assert list(summary.columns) == ["eNB ID", "Sectors seen", "PCIs seen", "Minutes"]
+    assert len(summary) > 1
+
+    # and one download serves the whole tab
+    assert len(app.get("download_button")) == 1
+
+
+def test_hierarchy_orders_enbs_by_sectors_or_by_id(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    open_tab(app, "Cell identity")
     _assert_clean(app)
 
-    app.selectbox(key="identity_order").set_value("dwell").run()
+    def _summary():
+        return next(
+            d.value for d in app.dataframe if "Sectors seen" in list(d.value.columns)
+        )
+
+    order = app.radio(key="identity_enb_order")
+    assert order.options == ["Number of sectors", "eNB ID"]   # not by time held
+    assert order.value == "sectors"
+    sectors = _summary()["Sectors seen"].tolist()
+    assert sectors == sorted(sectors, reverse=True)
+
+    order.set_value("enb").run()
     _assert_clean(app)
-    app.selectbox(key="identity_x").set_value("absolute").run()
+    ids = _summary()["eNB ID"].tolist()
+    assert ids == sorted(ids)
+
+
+def test_hierarchy_expands_one_enb_into_its_tree(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    open_tab(app, "Cell identity")
     _assert_clean(app)
 
-    view.set_value("Hierarchy").run()
+    summary = next(
+        d.value for d in app.dataframe if "Sectors seen" in list(d.value.columns)
+    )
+    focus = app.selectbox(key="identity_focus_D2C")
+    # no "All": the table is the overview, the tree is always one eNB,
+    # offered in the order of the table and opening on its first row
+    assert [int(o) for o in focus.options] == summary["eNB ID"].tolist()
+    assert focus.value == summary["eNB ID"].iloc[0]
+    focus.set_value(int(focus.options[1])).run()
     _assert_clean(app)
-    hierarchy = app.multiselect(key="identity_hierarchy")
-    assert hierarchy.value == ["enb", "sector", "pci"]
-    assert app.number_input(key="identity_leaves").value == 150
+
+    # the other network keeps its own choice of eNB
+    app.radio(key="identity_network").set_value("Terrestrial").run()
+    _assert_clean(app)
+    assert app.selectbox(key="identity_focus_Terrestrial").value is not None
 
 
-def test_cell_identity_has_no_collection_picker_of_its_own(
+def test_cell_identity_follows_the_sidebar_collections(
     fixture_dir, monkeypatch, tmp_path
 ):
     """The sidebar Collections filter governs this tab like every other."""
@@ -214,13 +283,19 @@ def test_cell_identity_has_no_collection_picker_of_its_own(
     _assert_clean(app)
     open_tab(app, "Cell identity")
     _assert_clean(app)
-    assert not [m for m in app.multiselect if m.label == "Collections to draw"]
+    assert not [m for m in app.multiselect if "Collections" in m.label
+                and m.key != "f_collections"]
 
-    runs_before = int(next(m for m in app.metric if m.label == "Dwell runs").value)
+    def _minutes():
+        table = next(
+            d.value for d in app.dataframe if "Sectors seen" in list(d.value.columns)
+        )
+        return table["Minutes"].sum()
+
+    before = _minutes()
     app.multiselect(key="f_collections").select("Collection_A").run()
     _assert_clean(app)
-    runs_after = int(next(m for m in app.metric if m.label == "Dwell runs").value)
-    assert runs_after < runs_before
+    assert _minutes() < before
 
 
 def test_cell_identity_survives_a_metric_with_no_identity_columns(
@@ -234,19 +309,28 @@ def test_cell_identity_survives_a_metric_with_no_identity_columns(
     # throughput comes from the PDSCH/PUSCH exports, which carry no eNB-Id -
     # the tab must still work, reading the Radio exports underneath
     app.radio(key="tech_choice").set_value("LTE").run()
-    app.selectbox(key="metric_choice").set_value("throughput").run()
+    app.selectbox(key="metric_choice").set_value("tput_dl_cc").run()
     _assert_clean(app)
-    assert app.selectbox(key="identity_level").options == [
-        "eNB / gNB-Id",
-        "Sector Id",
-        "PCI",
-    ]
+    assert app.radio(key="identity_view").value == "Hierarchy"
+    assert app.selectbox(key="identity_focus_D2C").options
+
+
+def test_cell_identity_has_no_time_views(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+    open_tab(app, "Cell identity")
+    _assert_clean(app)
+    # Timeline and Change timeline followed one session, not the network
+    assert app.radio(key="identity_view").options == ["Hierarchy", "Structure"]
+    assert not [m for m in app.metric if m.label == "Dwell runs"]
+    # the NR-only SSB index is no longer a level anywhere in the tab
+    assert not [b for b in app.selectbox if "SSB Index" in b.options]
 
 
 def test_cell_identity_shows_prism_decoded_identity(prism_dir, monkeypatch, tmp_path):
     # PRISM decodes eNB/sector/PCI on some scan rows; with no QP present the
-    # Cell identity tab must still open on those, offering the relationship views
-    # (Hierarchy / Structure) but not the serving-cell time views.
+    # Cell identity tab must still open on those.
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     empty_qp = tmp_path / "no_qp"
     empty_qp.mkdir()
@@ -257,10 +341,12 @@ def test_cell_identity_shows_prism_decoded_identity(prism_dir, monkeypatch, tmp_
     open_tab(app, "Cell identity")
     _assert_clean(app)
     view = app.radio(key="identity_view")
-    assert set(view.options) == {"Hierarchy", "Structure"}   # no serving-cell timelines
+    assert view.options == ["Hierarchy", "Structure"]
     # PRISM's decoded eNB / sector / PCI drive the hierarchy
-    hierarchy = app.multiselect(key="identity_hierarchy")
-    assert hierarchy.value == ["enb", "sector", "pci"]
+    summary = next(
+        d.value for d in app.dataframe if "Sectors seen" in list(d.value.columns)
+    )
+    assert len(summary) >= 1
     view.set_value("Structure").run()
     _assert_clean(app)
 
@@ -268,15 +354,15 @@ def test_cell_identity_shows_prism_decoded_identity(prism_dir, monkeypatch, tmp_
 def test_cell_identity_pools_qp_serving_and_prism_scans(
     fixture_dir, prism_dir, monkeypatch, tmp_path
 ):
-    # with both sources, the serving-cell views come back (QP) and PRISM rows
-    # still join the relationship views
+    # with both sources, the QP serving cells and the PRISM scans feed one tree
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir, prism_dir=prism_dir)
     _assert_clean(app)
     open_tab(app, "Cell identity")
     _assert_clean(app)
-    view = app.radio(key="identity_view")
-    assert {"Timeline", "Change timeline", "Hierarchy", "Structure"} <= set(view.options)
+    source = next(c.value for c in app.caption if c.value.startswith("Cell identity from"))
+    assert "QP serving cell" in source and "PRISM decoded scans" in source
+    assert "SigCap" not in source   # PCI only: it cannot be placed in the tree
 
 
 def test_metric_picker_offers_only_the_metrics_in_metric_order(
@@ -337,7 +423,7 @@ def test_shared_mode_restricts_the_data_to_the_intersection(
     assert int(app.metric[0].value.replace(",", "")) < everything
 
 
-def test_structure_view_renders_summary_and_chart(fixture_dir, monkeypatch, tmp_path):
+def test_structure_view_compares_the_two_networks(fixture_dir, monkeypatch, tmp_path):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
@@ -346,49 +432,41 @@ def test_structure_view_renders_summary_and_chart(fixture_dir, monkeypatch, tmp_
 
     app.radio(key="identity_view").set_value("Structure").run()
     _assert_clean(app)
-    assert app.multiselect(key="structure_levels").value == ["enb", "sector", "pci"]
+    # nothing to set: the levels are fixed and the split is always by network
+    assert not [m for m in app.multiselect if "Levels" in m.label]
+    assert not [b for b in app.selectbox if b.label in ("Split by", "Chart")]
+    assert not [c for c in app.checkbox if c.label == "Show as CDF"]
 
-    app.selectbox(key="structure_split").set_value("tech").run()
-    _assert_clean(app)
-    app.checkbox(key="structure_cdf").set_value(True).run()
-    _assert_clean(app)
+    summary = next(d.value for d in app.dataframe if "Network" in list(d.value.columns))
+    assert summary["Network"].tolist() == ["D2C", "Terrestrial"]
+    assert list(summary.columns) == [
+        "Network", "eNBs seen", "Sectors seen", "PCIs seen",
+        "Sectors per eNB (median)", "Sectors per eNB (most)",
+        "PCIs per sector (median)", "PCIs per sector (most)",
+    ]
+    # one chart per count, each named in plain words above it
+    titles = [m.value for m in app.markdown]
+    assert "**Sectors seen per eNB**" in titles
+    assert "**PCIs seen per sector**" in titles
+    assert len(app.get("download_button")) == 1
 
 
-def test_structure_view_needs_two_levels(fixture_dir, monkeypatch, tmp_path):
+def test_cell_identity_drops_a_network_the_filters_remove(
+    fixture_dir, monkeypatch, tmp_path
+):
     monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
     app = _run(fixture_dir)
     _assert_clean(app)
     open_tab(app, "Cell identity")
     _assert_clean(app)
-    app.radio(key="identity_view").set_value("Structure").run()
-    _assert_clean(app)
-    app.multiselect(key="structure_levels").set_value(["enb"]).run()
-    _assert_clean(app)
-    assert any("at least two levels" in i.value for i in app.info)
-
-
-def test_hierarchy_can_focus_one_branch(fixture_dir, monkeypatch, tmp_path):
-    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
-    app = _run(fixture_dir)
-    _assert_clean(app)
-    open_tab(app, "Cell identity")
-    _assert_clean(app)
-    app.radio(key="identity_view").set_value("Hierarchy").run()
+    app.radio(key="identity_network").set_value("Terrestrial").run()
     _assert_clean(app)
 
-    focus = app.selectbox(key="identity_focus_branch")
-    assert focus.value == "All"
-    assert len(focus.options) > 1
-    focus.set_value(focus.options[1]).run()
+    # keep the D2C carrier only: the stored "Terrestrial" choice must not break
+    app.multiselect(key="f_freqs").select(8665).run()
     _assert_clean(app)
-
-    # the leaf cap goes far beyond the old 600 now
-    assert app.number_input(key="identity_leaves").max == 5000
-    # and the tree can be split into balanced columns (default 2)
-    cols = app.number_input(key="identity_columns")
-    assert cols.value == 2 and cols.max == 4
-    cols.set_value(3).run()
-    _assert_clean(app)
+    assert not [r for r in app.radio if r.key == "identity_network"]
+    assert app.selectbox(key="identity_focus_D2C").options
 
 
 def test_time_window_filter_narrows_samples(fixture_dir, monkeypatch, tmp_path):
@@ -446,3 +524,143 @@ def test_filter_selection_is_pruned_when_options_cascade(fixture_dir, monkeypatc
     value = app.multiselect(key="f_pcis").value
     # invariant the fix guarantees: whatever is selected is in the options
     assert all(v in opts for v in value)
+
+
+# --------------------------------------------------------------------------- #
+# The trimmed sidebar and in-tab controls
+# --------------------------------------------------------------------------- #
+
+
+def _labels(widgets):
+    return [w.label for w in widgets]
+
+
+def test_sidebar_keeps_min_samples_and_drops_the_cut_options(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+
+    assert "Min samples per curve" in _labels(app.sidebar.number_input)
+    for gone in ("Max points per curve", "Max points on map"):
+        assert gone not in _labels(app.sidebar.number_input)
+    for gone in ("Map colour scale", "Basemap"):
+        assert gone not in _labels(app.sidebar.selectbox)
+    for gone in ("Require a known PCI and carrier", "Keep rows without GPS"):
+        assert gone not in _labels(app.sidebar.checkbox)
+    # the region is cleared from beside the map, not from the sidebar
+    assert "Clear" not in _labels(app.sidebar.button)
+
+
+def test_rows_without_a_pci_or_carrier_are_always_left_out(
+    fixture_dir, monkeypatch, tmp_path
+):
+    from qpviz import loader
+
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    blank = tmp_path / "qp"
+    blank.mkdir()
+    for path in Path(fixture_dir).iterdir():
+        frame = pd.read_csv(path)
+        if path.name.startswith("LTE Radio"):
+            frame.loc[frame.index[:30], "PCI LTE"] = None   # PCI never decoded
+            frame.loc[frame.index[30:50], "DL EARFCN"] = None  # nor the carrier
+        frame.to_csv(blank / path.name, index=False)
+
+    app = _run(blank)
+    _assert_clean(app)
+    app.radio(key="tech_choice").set_value("LTE").run()
+    _assert_clean(app)
+    radio = loader.read_dataset(blank, schema.DATASETS_BY_KEY["lte_radio"], None)
+    known = radio[radio["rsrp"].notna() & radio["pci"].notna() & radio["freq"].notna()]
+    assert 0 < len(known) < int(radio["rsrp"].notna().sum())
+    assert int(app.metric[0].value.replace(",", "")) == len(known)
+
+
+def test_map_controls_are_colour_by_and_clear_region(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    _assert_clean(app)
+
+    colour_by = next(s for s in app.selectbox if s.label == "Colour by")
+    assert colour_by.options == ["Metric", "eNB ID"]
+    assert "Colour scheme" not in _labels(app.radio)
+    assert not {"Marker size", "Coloured cells"} & set(_labels(app.slider))
+    assert "Diverging midpoint" not in _labels(app.number_input)
+    assert "Apply region to map" not in _labels(app.checkbox)
+    # the fixed colour range is stated next to the map
+    assert any("always span -140 to -80 dBm" in c.value for c in app.caption)
+
+    # with nothing drawn there is nothing to clear
+    clear = next(b for b in app.button if b.label == "Clear region")
+    assert clear.disabled
+    everything = int(app.metric[0].value.replace(",", ""))
+
+    # A region stays put while the Map tab is open (the map reporting no shapes
+    # must not remove it), and "Clear region" brings all the data back.
+    app.session_state["regions"] = [[(41.699, -86.2405), (41.699, -86.235),
+                                     (41.705, -86.235), (41.705, -86.2405)]]
+    app.run()
+    _assert_clean(app)
+    inside = int(app.metric[0].value.replace(",", ""))
+    assert 0 < inside < everything
+    app.run()
+    assert int(app.metric[0].value.replace(",", "")) == inside
+    clear = next(b for b in app.button if b.label == "Clear region")
+    assert not clear.disabled
+    clear.click().run()
+    _assert_clean(app)
+    assert app.session_state["regions"] == []
+    assert int(app.metric[0].value.replace(",", "")) == everything
+    assert next(b for b in app.button if b.label == "Clear region").disabled
+
+
+def test_a_drawn_region_narrows_the_other_tabs(fixture_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    open_tab(app, "Data")
+    _assert_clean(app)
+    everything = int(app.metric[0].value.replace(",", ""))
+    app.session_state["regions"] = [[(41.699, -86.2405), (41.699, -86.235),
+                                     (41.705, -86.235), (41.705, -86.2405)]]
+    app.run()
+    _assert_clean(app)
+    assert 0 < int(app.metric[0].value.replace(",", "")) < everything
+
+
+def test_map_colours_by_enb_only_when_the_metric_carries_it(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    app.radio(key="tech_choice").set_value("LTE").run()
+    app.selectbox(key="metric_choice").set_value("tput_dl").run()
+    _assert_clean(app)
+    colour_by = next(s for s in app.selectbox if s.label == "Colour by")
+    assert colour_by.options == ["Metric"]   # the PDSCH export has no eNB-Id
+
+
+def test_cdf_splits_by_network_first_and_plots_cdf_only(
+    fixture_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("QP_CACHE_DIR", str(tmp_path / "cache"))
+    app = _run(fixture_dir)
+    open_tab(app, "CDF")
+    _assert_clean(app)
+
+    split = next(m for m in app.multiselect if m.label == "Split curves by")
+    assert split.options == ["Network", "Collection", "Measurement source", "eNB / gNB"]
+    assert split.value == ["network"]
+    assert "Plot as" not in _labels(app.radio)
+    assert "Histogram bins" not in _labels(app.slider)
+    # D2C (EARFCN 8665) against terrestrial: two curves
+    assert any("2 group(s)" in c.value for c in app.caption)
+
+    # a metric whose export has no eNB-Id does not offer the eNB split
+    app.radio(key="tech_choice").set_value("LTE").run()
+    app.selectbox(key="metric_choice").set_value("tput_dl").run()
+    _assert_clean(app)
+    split = next(m for m in app.multiselect if m.label == "Split curves by")
+    assert split.options == ["Network", "Collection", "Measurement source"]
+    assert split.value == ["network"]

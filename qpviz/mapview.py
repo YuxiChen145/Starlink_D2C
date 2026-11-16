@@ -55,9 +55,10 @@ def carto_api_key(secrets=None) -> Optional[str]:
     return key or None
 
 
-def tile_choices(carto_key: Optional[str] = None) -> List[str]:
-    """Basemap names to offer: the CARTO styles only when a key is set."""
-    return [name for name in TILE_CHOICES if carto_key or name not in CARTO_TILES]
+def default_tiles(carto_key: Optional[str] = None) -> str:
+    """The basemap the map is drawn on: light CARTO when a key is configured,
+    otherwise OpenStreetMap (which needs none)."""
+    return "Light (CartoDB positron)" if carto_key else "OpenStreetMap"
 
 
 def resolve_tiles(tiles: str, carto_key: Optional[str] = None):
@@ -93,6 +94,19 @@ def regions_from_drawings(drawings) -> List[List[LatLon]]:
     return [p for p in polygons if len(p) >= 3]
 
 
+def new_regions(
+    drawn: Sequence[Sequence[LatLon]], existing: Sequence[Sequence[LatLon]]
+) -> List[List[LatLon]]:
+    """The polygons in ``drawn`` that are not already in ``existing``."""
+    known = [list(map(tuple, p)) for p in existing]
+    out: List[List[LatLon]] = []
+    for polygon in drawn:
+        shape = list(map(tuple, polygon))
+        if shape not in known and shape not in out:
+            out.append(shape)
+    return out
+
+
 def bounds(frame: pd.DataFrame) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
     geo = geolocated(frame)
     if geo.empty:
@@ -107,8 +121,7 @@ def build_map(
     metric: str,
     metric_label: str,
     *,
-    scale: str = "diverging",
-    midpoint: Optional[float] = None,
+    color_range: Optional[Tuple[float, float]] = None,
     max_points: int = 3000,
     tiles: str = "OpenStreetMap",
     carto_key: Optional[str] = None,
@@ -117,16 +130,15 @@ def build_map(
     radius: int = 4,
     color_by: Optional[str] = None,
     color_by_label: str = "",
-    color_max_slots: int = 8,
-    color_all: bool = False,
+    color_max_slots: int = 10,
 ):
     """Build a folium map with a rectangle/polygon draw control.
 
-    Points are coloured by ``metric`` on a continuous scale, or - when
-    ``color_by`` names an identity column such as ``pci`` or ``enb`` -
-    categorically. ``color_all`` gives every distinct value its own colour (no
-    grey "Other" bucket); otherwise the ``color_max_slots`` most common values
-    are coloured and the rest fold into a muted "Other".
+    Points are coloured by ``metric`` on a continuous scale - spanning
+    ``color_range`` when given, so the colours mean the same on every map - or,
+    when ``color_by`` names an identity column such as ``enb``, categorically:
+    the ``color_max_slots`` most common values are coloured and the rest fold
+    into a muted "Other".
     """
     import folium
     from folium.plugins import Draw
@@ -156,7 +168,9 @@ def build_map(
             "rectangle": True,
             "polygon": True,
         },
-        edit_options={"edit": True, "remove": True},
+        # shapes are only added on the map; the region is removed with the
+        # "Clear region" button beside it
+        edit_options={"edit": False, "remove": False},
     ).add_to(fmap)
 
     if geo.empty or metric not in geo.columns:
@@ -169,15 +183,13 @@ def build_map(
     legend_counts = None
     if categorical:
         identities = plotted[color_by].to_numpy()
-        n_distinct = int(pd.Series(identities).nunique(dropna=True))
-        slots = n_distinct if color_all else int(color_max_slots)
         order, palette, other_count = categorical_bins(
-            identities, max_slots=slots, mode=mode
+            identities, max_slots=int(color_max_slots), mode=mode
         )
         legend_counts = categorical_counts(identities)
         edges, colors = [], []
     else:
-        edges, colors = color_bins(values, scale=scale, midpoint=midpoint)
+        edges, colors = color_bins(values, value_range=color_range)
 
     layer = folium.FeatureGroup(name=metric_label, show=True)
     lat = pd.to_numeric(plotted["lat"], errors="coerce").to_numpy()
