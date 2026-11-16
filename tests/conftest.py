@@ -38,7 +38,7 @@ METRIC_RANGES = {
     "tput_dl_cc": (0.0, 90000.0),
     "tput_ul_cc": (0.0, 90000.0),
     "sf_usage": (0.0, 1.0),  # the exports give sub-frame usage as a fraction
-    "bler": (0.0, 30.0),
+    "bler": (0.0, 0.3),  # the exports give BLER as a fraction
     "rb": (1.0, 25.0),      # RBs per subframe, scheduled (rb_sched_col)
     "rb_occ": (0.0, 14.0),  # RBs per subframe, all SF (rb_all_col)
 }

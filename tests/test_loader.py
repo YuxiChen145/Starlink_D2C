@@ -442,3 +442,20 @@ def test_subframe_usage_is_loaded_for_both_directions(fixture_dir, cache_dir):
     usage = frame["sf_usage"].dropna()
     assert set(frame.loc[usage.index, "link"].unique()) == {"DL", "UL"}
     assert usage.between(0.0, 100.0).all() and usage.max() > 1.0
+
+
+def test_bler_is_a_percentage(fixture_dir, cache_dir):
+    """The exports log BLER as a 0-1 fraction; the metric's unit is percent."""
+    from qpviz.schema import METRICS
+
+    assert METRICS["bler"].unit == "%"
+    ds = DATASETS_BY_KEY["lte_pdsch_pc"]
+    raw = pd.DataFrame({
+        "Time": ["2026-07-30 12:10:00.000", "2026-07-30 12:10:01.000"],
+        "Collection": "Campus_walk",
+        "DL EARFCN": 8665,
+        "BLER": [0.024, 1.0],
+    })
+    assert loader.normalise(raw, ds)["bler"].tolist() == [2.4, 100.0]
+    frame = loader.read_dataset(fixture_dir, ds, cache_dir)
+    assert frame["bler"].max() > 1.0 and frame["bler"].max() <= 30.0
